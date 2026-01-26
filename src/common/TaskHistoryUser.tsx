@@ -18,6 +18,9 @@ import {
   Spacer,
   useColorModeValue,
   Badge,
+  Code,
+  UnorderedList,
+  ListItem,
 } from '@chakra-ui/react';
 import { useAppState } from '../state/store';
 import { DisplayHistoryEntry } from '../state/currentTask';
@@ -27,9 +30,12 @@ const TaskHistoryUser: React.FC = () => {
   const taskStatus = useAppState((state) => state.currentTask.status);
 
   const headingColor = useColorModeValue('gray.900', 'gray.100');
-  const textColor = useColorModeValue('gray.700', 'gray.300');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
   const successColor = useColorModeValue('green.600', 'green.400');
   const errorColor = useColorModeValue('red.600', 'red.400');
+  const codeBg = useColorModeValue('gray.100', 'gray.800');
+  const codeText = useColorModeValue('gray.800', 'gray.200');
 
   if (taskHistory.length === 0 && taskStatus !== 'running') {
     return null;
@@ -76,48 +82,64 @@ const TaskHistoryUser: React.FC = () => {
     return null;
   };
 
+  // Document Stream Style - No bubbles, markdown-first typography
   return (
-    <VStack mt={4} align="stretch" spacing={3}>
-      <HStack>
-        <Heading as="h3" size="md" color={headingColor}>
-          Action History
-        </Heading>
-        <Spacer />
-      </HStack>
-      <VStack align="stretch" spacing={2}>
-        {taskHistory.map((entry, index) => {
-          const summary = getSummary(entry);
-          const statusBadge = getStatusBadge(entry);
-          const isError = 'error' in entry.parsedAction;
-          const isComplete = 'parsedAction' in entry.parsedAction && 
-            entry.parsedAction.parsedAction.name === 'finish';
+    <VStack align="stretch" spacing={4} w="100%">
+      {taskHistory.map((entry, index) => {
+        const summary = getSummary(entry);
+        const statusBadge = getStatusBadge(entry);
+        const isError = 'error' in entry.parsedAction;
+        const isComplete = 'parsedAction' in entry.parsedAction && 
+          entry.parsedAction.parsedAction.name === 'finish';
 
-          return (
-            <Box
-              key={index}
-              p={3}
-              borderWidth="1px"
-              borderRadius="md"
-              bg={useColorModeValue('white', 'gray.800')}
-              borderColor={useColorModeValue('gray.200', 'gray.700')}
+        // Extract action details for inline code display
+        const actionDetails = 'parsedAction' in entry.parsedAction 
+          ? entry.parsedAction.parsedAction 
+          : null;
+
+        return (
+          <Box key={index} w="100%" textAlign="left">
+            {/* Main text - flows naturally like a document */}
+            <Text
+              fontSize="sm"
+              lineHeight="1.6"
+              color={isError ? errorColor : isComplete ? successColor : textColor}
+              mb={actionDetails ? 2 : 0}
             >
-              <HStack align="start" spacing={2}>
-                <Text fontSize="sm" fontWeight="bold" color={headingColor}>
-                  {index + 1}.
-                </Text>
-                <Text
-                  fontSize="sm"
-                  color={isError ? errorColor : isComplete ? successColor : textColor}
-                  flex="1"
+              {summary}
+            </Text>
+            
+            {/* Inline code for technical terms/actions */}
+            {actionDetails && (
+              <Box mb={2}>
+                <Code
+                  fontSize="xs"
+                  bg={codeBg}
+                  color={codeText}
+                  px={2}
+                  py={1}
+                  borderRadius="sm"
+                  fontFamily="mono"
                 >
-                  {summary}
-                </Text>
+                  {actionDetails.name}
+                  {actionDetails.args && Object.keys(actionDetails.args).length > 0 && (
+                    <>({Object.entries(actionDetails.args).map(([key, value]) => 
+                      `${key}: ${typeof value === 'string' ? `"${value}"` : value}`
+                    ).join(', ')})</>
+                  )}
+                </Code>
+              </Box>
+            )}
+            
+            {/* Status badge - inline with text */}
+            {statusBadge && (
+              <Box display="inline-block" ml={2}>
                 {statusBadge}
-              </HStack>
-            </Box>
-          );
-        })}
-      </VStack>
+              </Box>
+            )}
+          </Box>
+        );
+      })}
     </VStack>
   );
 };

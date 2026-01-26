@@ -16,11 +16,10 @@ import {
   Text,
   Alert,
   AlertIcon,
-  useToast,
   useColorModeValue,
 } from '@chakra-ui/react';
 import React, { useState } from 'react';
-import { apiClient } from '../api/client';
+import { apiClient, API_BASE } from '../api/client';
 import { useAppState } from '../state/store';
 
 export const Login: React.FC = () => {
@@ -28,7 +27,6 @@ export const Login: React.FC = () => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const toast = useToast();
   
   const setUser = useAppState((state) => state.settings.actions.setUser);
   const setTenant = useAppState((state) => state.settings.actions.setTenant);
@@ -51,28 +49,19 @@ export const Login: React.FC = () => {
       // Update Zustand state for UI
       setUser(response.user);
       setTenant(response.tenantId, response.tenantName);
-
-      toast({
-        title: 'Login successful',
-        description: `Welcome, ${response.user.email}`,
-        status: 'success',
-        duration: 3000,
-        isClosable: true,
-      });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Login failed';
       setError(message);
-      
-      toast({
-        title: 'Login failed',
-        description: message,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSignup = () => {
+    // Open signup page in a new tab - navigate to API base URL
+    chrome.tabs.create({ url: API_BASE }).catch((error) => {
+      console.error('Error opening signup page:', error);
+    });
   };
 
   return (
@@ -127,6 +116,16 @@ export const Login: React.FC = () => {
           disabled={!email || !password}
         >
           Sign In
+        </Button>
+
+        <Button
+          type="button"
+          variant="outline"
+          width="full"
+          onClick={handleSignup}
+          disabled={loading}
+        >
+          Sign Up
         </Button>
       </VStack>
     </Box>

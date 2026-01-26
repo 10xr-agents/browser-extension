@@ -9,7 +9,6 @@
 
 import {
   HStack,
-  useToast,
   VStack,
   Box,
   Text,
@@ -19,16 +18,18 @@ import {
   useColorModeValue,
   Alert,
   AlertIcon,
+  IconButton,
+  Code,
 } from '@chakra-ui/react';
 import { InfoIcon } from '@chakra-ui/icons';
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
-import { BsPlayFill, BsStopFill } from 'react-icons/bs';
+import { BsStopFill } from 'react-icons/bs';
+import { FiSend } from 'react-icons/fi';
 import { useAppState } from '../state/store';
 import TaskHistory from './TaskHistory';
 import KnowledgeOverlay from './KnowledgeOverlay';
 import AutosizeTextarea from './AutosizeTextarea';
 import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
-import DebugPanel from './DebugPanel';
 import PlanView from './PlanView';
 import VerificationView from './VerificationView';
 import CorrectionView from './CorrectionView';
@@ -68,8 +69,6 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
 
   const taskInProgress = state.taskStatus === 'running';
 
-  const toast = useToast();
-
   // Get active tab URL on mount and when tab changes
   useEffect(() => {
     const getActiveTabUrl = async () => {
@@ -108,22 +107,14 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
     };
   }, []);
 
-  const toastError = useCallback(
-    (message: string) => {
-      toast({
-        title: 'Error',
-        description: message,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
-    },
-    [toast]
-  );
-
   const handleRunTask = useCallback(() => {
-    instructions && runTask(toastError);
-  }, [instructions, runTask, toastError]);
+    if (instructions) {
+      // Silently handle errors - they will be shown in the UI via error state
+      runTask((message: string) => {
+        console.error('Task error:', message);
+      });
+    }
+  }, [instructions, runTask]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -142,11 +133,70 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
   const contentBg = useColorModeValue('white', 'gray.900');
   const bannerBg = useColorModeValue('blue.50', 'blue.900/20');
   const bannerTextColor = useColorModeValue('blue.800', 'blue.200');
+  
+  // Command Center design colors
+  const headerBg = useColorModeValue('white', 'gray.900');
+  const headerBorder = useColorModeValue('gray.200', 'gray.700');
+  const contextPillBg = useColorModeValue('gray.100', 'gray.800');
+  const contextPillText = useColorModeValue('gray.700', 'gray.300');
+  const floatingInputBg = useColorModeValue('white', 'gray.800');
+  const floatingInputBorder = useColorModeValue('gray.300', 'gray.600');
+
+  // Get current context (active URL domain or task name)
+  const getCurrentContext = () => {
+    if (activeUrl) {
+      try {
+        const url = new URL(activeUrl);
+        return url.hostname;
+      } catch {
+        return 'Current page';
+      }
+    }
+    return 'Ready to start';
+  };
 
   return (
-    <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg}>
-      {/* Scrollable Content Area */}
-      <Box flex="1" overflowY="auto" overflowX="hidden" minW="0" px={4} py={3} bg={contentBg}>
+    <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg} position="relative">
+      {/* Zone A: Sticky Context Header */}
+      <Box
+        flex="none"
+        position="sticky"
+        top={0}
+        zIndex={10}
+        bg={headerBg}
+        borderBottomWidth="1px"
+        borderColor={headerBorder}
+        px={4}
+        py={2}
+        shadow="sm"
+      >
+        <HStack spacing={3} justify="flex-start" align="center">
+          {/* Current Context Pill */}
+          <Box
+            px={3}
+            py={1}
+            borderRadius="full"
+            bg={contextPillBg}
+            _dark={{ bg: 'gray.800' }}
+          >
+            <Text fontSize="xs" fontWeight="medium" color={contextPillText} _dark={{ color: 'gray.300' }}>
+              {getCurrentContext()}
+            </Text>
+          </Box>
+        </HStack>
+      </Box>
+
+      {/* Zone B: Scrollable Document Stream */}
+      <Box 
+        flex="1" 
+        overflowY="auto" 
+        overflowX="hidden" 
+        minW="0" 
+        px={4} 
+        py={4} 
+        bg={contentBg}
+        pb="100px" // Add padding bottom to account for floating input
+      >
         <VStack spacing={4} align="stretch" minW="0">
           {/* Plan View (Manus Orchestrator) */}
           <PlanView />
@@ -227,81 +277,83 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
         </VStack>
       </Box>
 
-      {/* Fixed Chat Input at Bottom */}
+      {/* Zone C: Floating Command Bar */}
       <Box
-        flex="none"
-        bg={contentBg}
-        borderTopWidth="1px"
-        borderColor={borderColor}
-        px={4}
-        pt={3}
-        pb={3}
+        position="absolute"
+        bottom={4}
+        left={4}
+        right={4}
+        zIndex={20}
         minW="0"
       >
-        {/* Prompt Input Card */}
         <Box
           borderWidth="1px"
-          borderColor={borderColor}
+          borderColor={floatingInputBorder}
           borderRadius="xl"
-          p={4}
-          bg={cardBg}
-          shadow="sm"
+          bg={floatingInputBg}
+          shadow="lg"
           minW="0"
+          _focusWithin={{
+            borderColor: 'blue.500',
+            _dark: { borderColor: 'blue.400' },
+            boxShadow: '0 0 0 1px var(--chakra-colors-blue-500)',
+          }}
         >
-          <VStack spacing={3} align="stretch" minW="0">
-            <AutosizeTextarea
-              autoFocus
-              placeholder="What would you like me to do on this page?"
-              value={instructions || ''}
-              isDisabled={isRunning}
-              onChange={(e) => setInstructions(e.target.value)}
-              onKeyDown={onKeyDown}
-              bg={inputBg}
-              borderWidth="1px"
-              borderColor={useColorModeValue('gray.300', 'gray.600')}
-              borderRadius="lg"
-              px={4}
-              py={3}
-              fontSize="sm"
-              resize="none"
-              minW="0"
-              _focus={{
-                borderColor: 'blue.500',
-                _dark: { borderColor: 'blue.400' },
-                boxShadow: '0 0 0 1px var(--chakra-colors-blue-500)',
-              }}
-              _focusVisible={{
-                boxShadow: '0 0 0 1px var(--chakra-colors-blue-500)',
-              }}
-              _disabled={{
-                opacity: 0.6,
-                cursor: 'not-allowed',
-              }}
-              minRows={2}
-              maxRows={6}
-            />
+          <Flex align="flex-end" px={4} py={3} gap={2} minW="0">
+            {/* Text Input - Takes up most space */}
+            <Box flex="1" minW="0">
+              <AutosizeTextarea
+                autoFocus
+                placeholder="What would you like me to do on this page? (e.g., fill out the form, click the button, search for products)"
+                value={instructions || ''}
+                isDisabled={isRunning}
+                onChange={(e) => setInstructions(e.target.value)}
+                onKeyDown={onKeyDown}
+                bg="transparent"
+                borderWidth="0"
+                px={0}
+                py={0}
+                fontSize="sm"
+                resize="none"
+                minW="0"
+                _focus={{
+                  outline: 'none',
+                  boxShadow: 'none',
+                }}
+                _focusVisible={{
+                  outline: 'none',
+                  boxShadow: 'none',
+                }}
+                _disabled={{
+                  opacity: 0.6,
+                  cursor: 'not-allowed',
+                }}
+                minRows={2}
+                maxRows={6}
+              />
+            </Box>
             
-            <Flex justify="flex-end" gap={2} minW="0" align="center">
+            {/* Send Button - Inline with text input */}
+            <Box flexShrink={0} pb={1}>
               {isRunning ? (
-                <Button
-                  leftIcon={<Icon as={BsStopFill} />}
+                <IconButton
+                  aria-label="Stop task"
+                  icon={<Icon as={BsStopFill} />}
                   onClick={interruptTask}
                   colorScheme="red"
-                  size="md"
-                  fontWeight="medium"
+                  size="sm"
                   _focusVisible={{
                     boxShadow: 'outline',
                   }}
-                >
-                  Stop
-                </Button>
+                  borderRadius="md"
+                />
               ) : (
-                <Button
-                  leftIcon={<Icon as={BsPlayFill} />}
+                <IconButton
+                  aria-label="Send task"
+                  icon={<Icon as={FiSend} />}
                   onClick={handleRunTask}
                   colorScheme="blue"
-                  size="md"
-                  fontWeight="medium"
+                  size="sm"
                   isDisabled={!instructions}
                   _disabled={{
                     opacity: 0.5,
@@ -310,17 +362,13 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
                   _focusVisible={{
                     boxShadow: 'outline',
                   }}
-                >
-                  Start Task
-                </Button>
+                  borderRadius="md"
+                />
               )}
-            </Flex>
-          </VStack>
+            </Box>
+          </Flex>
         </Box>
       </Box>
-
-      {/* Debug Panel - Only visible when developer mode is enabled */}
-      <DebugPanel />
     </Flex>
   );
 };

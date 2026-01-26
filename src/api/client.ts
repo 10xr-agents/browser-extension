@@ -162,7 +162,7 @@ interface NextActionResponse {
 // This is injected at build time via webpack's built-in dotenv feature (5.103.0+)
 // Uses WEBPACK_ prefix for security (only prefixed variables are exposed)
 // Fallback to NEXT_PUBLIC_API_BASE or API_BASE for compatibility
-const API_BASE = (
+export const API_BASE = (
   process.env.WEBPACK_API_BASE || 
   process.env.NEXT_PUBLIC_API_BASE || 
   process.env.API_BASE || 
@@ -406,6 +406,8 @@ class ApiClient {
    * Resolve knowledge for a given URL
    * Returns knowledge context and citations for internal use and debugging
    * 
+   * Extracts only the domain (hostname) from the URL before sending to backend.
+   * 
    * Reference: THIN_CLIENT_ROADMAP.md §3.1 (Task 2: Runtime Knowledge Resolution)
    * Reference: SERVER_SIDE_AGENT_ARCH.md §5 (GET /api/knowledge/resolve)
    */
@@ -421,7 +423,17 @@ class ApiClient {
       error?: string;
     }) => void
   ): Promise<ResolveKnowledgeResponse> {
-    const params = new URLSearchParams({ url });
+    // Extract only the domain (hostname) from the URL
+    let domain: string;
+    try {
+      const urlObj = new URL(url);
+      domain = urlObj.hostname;
+    } catch (error) {
+      // If URL parsing fails, use the original URL as fallback
+      domain = url;
+    }
+    
+    const params = new URLSearchParams({ url: domain });
     if (query) {
       params.append('query', query);
     }

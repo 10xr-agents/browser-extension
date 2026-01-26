@@ -11,7 +11,6 @@ import {
   Box,
   Button,
   VStack,
-  useToast,
   Text,
   HStack,
   Flex,
@@ -47,7 +46,6 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
   const setTheme = useAppState((state) => state.settings.actions.setTheme);
   const setDeveloperMode = useAppState((state) => state.settings.actions.setDeveloperMode);
   const clearAuth = useAppState((state) => state.settings.actions.clearAuth);
-  const toast = useToast();
 
   // Load preferences on mount and sync with backend
   useEffect(() => {
@@ -82,22 +80,7 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
     try {
       // Sync to backend
       await apiClient.updatePreferences({ theme: newTheme });
-      toast({
-        title: 'Preferences saved',
-        description: 'Your theme preference has been updated.',
-        status: 'success',
-        duration: 2000,
-        isClosable: true,
-      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to save preferences';
-      toast({
-        title: 'Save error',
-        description: message,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
       // Revert on error
       setTheme(previousTheme);
     } finally {
@@ -110,26 +93,15 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
       await apiClient.logout();
       clearAuth();
       
-      toast({
-        title: 'Logged out',
-        description: 'You have been successfully logged out.',
-        status: 'success',
-        duration: 3000,
-        isClosable: true,
-      });
-      
       // Navigate back to main view (will show login)
       onNavigate('/');
       window.location.reload();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Logout failed';
-      toast({
-        title: 'Logout error',
-        description: message,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
+      // Silently handle logout errors - user will see login screen anyway
+      console.error('Logout error:', error);
+      clearAuth();
+      onNavigate('/');
+      window.location.reload();
     }
   };
 
@@ -138,6 +110,7 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
     return email.charAt(0).toUpperCase();
   };
 
+  // Dark mode colors - ALL defined at component top level (before any conditional returns)
   const borderColor = useColorModeValue('gray.200', 'gray.700');
   const hoverBg = useColorModeValue('red.50', 'red.900/20');
   const contentBg = useColorModeValue('white', 'gray.900');
@@ -145,6 +118,11 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
   const nameColor = useColorModeValue('gray.900', 'gray.100');
   const emailColor = useColorModeValue('gray.600', 'gray.300');
   const headingColor = useColorModeValue('gray.900', 'gray.100');
+  const backButtonBorderColor = useColorModeValue('gray.300', 'gray.600');
+  const backButtonHoverBg = useColorModeValue('gray.100', 'gray.700');
+  const backButtonHoverBorderColor = useColorModeValue('gray.400', 'gray.500');
+  const formLabelColor = useColorModeValue('gray.700', 'gray.300');
+  const formDescColor = useColorModeValue('gray.600', 'gray.400');
 
   if (loading) {
     return (
@@ -170,21 +148,41 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
     <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg}>
       {/* Navigation Header - Fixed */}
       <Box flex="none" px={4} pt={4} pb={2} minW="0" bg={contentBg}>
-        <Flex align="center" minW="0">
+        <Flex align="center" justify="space-between" minW="0" position="relative">
+          {/* Left: Back Button */}
           <IconButton
             aria-label="Back"
             icon={<ChevronLeftIcon />}
-            variant="ghost"
-            size="sm"
+            variant="outline"
+            size="md"
             onClick={() => onNavigate('/')}
-            mr={2}
+            borderColor={backButtonBorderColor}
+            _hover={{
+              bg: backButtonHoverBg,
+              borderColor: backButtonHoverBorderColor,
+            }}
             _focusVisible={{
               boxShadow: 'outline',
             }}
+            flexShrink={0}
           />
-          <Text fontSize="lg" fontWeight="semibold" minW="0" color={headingColor}>
+          
+          {/* Center: Settings Title */}
+          <Text 
+            fontSize="lg" 
+            fontWeight="semibold" 
+            minW="0" 
+            color={headingColor}
+            position="absolute"
+            left="50%"
+            transform="translateX(-50%)"
+            pointerEvents="none"
+          >
             Settings
           </Text>
+          
+          {/* Right: Spacer to balance the layout */}
+          <Box w="32px" flexShrink={0} />
         </Flex>
       </Box>
 
@@ -205,10 +203,10 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
       <SettingsSection title="Developer Options">
         <FormControl display="flex" alignItems="center" justifyContent="space-between">
           <Box flex="1">
-            <FormLabel htmlFor="developer-mode" mb={0} fontSize="sm" fontWeight="medium" color={useColorModeValue('gray.700', 'gray.300')}>
+            <FormLabel htmlFor="developer-mode" mb={0} fontSize="sm" fontWeight="medium" color={formLabelColor}>
               Enable Developer Mode
             </FormLabel>
-            <Text fontSize="xs" color={useColorModeValue('gray.600', 'gray.400')} mt={1}>
+            <Text fontSize="xs" color={formDescColor} mt={1}>
               Show technical debug information and advanced debugging tools
             </Text>
           </Box>
@@ -218,15 +216,6 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
             onChange={(e) => {
               const newValue = e.target.checked;
               setDeveloperMode(newValue);
-              toast({
-                title: newValue ? 'Developer mode enabled' : 'Developer mode disabled',
-                description: newValue
-                  ? 'Debug panel is now available. You can access it from the main task view.'
-                  : 'Debug panel has been hidden.',
-                status: 'info',
-                duration: 3000,
-                isClosable: true,
-              });
             }}
             colorScheme="blue"
             size="md"
@@ -279,19 +268,16 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
               </VStack>
             </HStack>
 
-            {/* Sign Out Button */}
+            {/* Sign Out Button - Full Width */}
             <Button
               leftIcon={<Icon as={BsBoxArrowRight} />}
-              variant="ghost"
+              variant="solid"
               colorScheme="red"
-              size="sm"
+              size="md"
               onClick={handleLogout}
-              justifyContent="flex-start"
               fontWeight="medium"
-              px={0}
-              _hover={{
-                bg: hoverBg,
-              }}
+              width="100%"
+              justifyContent="center"
               _focusVisible={{
                 boxShadow: 'outline',
               }}

@@ -15,33 +15,36 @@ import {
   HStack,
   Text,
   Heading,
-  Accordion,
-  AccordionItem,
-  AccordionButton,
-  AccordionPanel,
-  AccordionIcon,
   Badge,
   Code,
   Spacer,
   Button,
   Input,
   useColorModeValue,
+  Flex,
+  Tooltip,
+  IconButton,
+  Collapse,
 } from '@chakra-ui/react';
+import { CopyIcon } from '@chakra-ui/icons';
 import { useAppState } from '../state/store';
 import type { NetworkLogEntry } from '../state/debug';
-import CopyButton from './CopyButton';
+import { callRPC } from '../helpers/pageRPC';
 
 const NetworkTraceView: React.FC = () => {
   const networkLogs = useAppState((state) => state.debug.networkLogs);
   const clearNetworkLogs = useAppState((state) => state.debug.actions.clearNetworkLogs);
   const [searchTerm, setSearchTerm] = useState('');
 
-  // Terminal aesthetic: darker background for debug components
+  // Dark mode colors - defined at component top level
   const bgColor = useColorModeValue('white', 'gray.800');
   const borderColor = useColorModeValue('gray.200', 'gray.700');
   const headingColor = useColorModeValue('gray.900', 'gray.100');
   const textColor = useColorModeValue('gray.700', 'gray.300');
   const codeBg = useColorModeValue('gray.50', 'gray.900');
+  const rowBg = useColorModeValue('white', 'gray.800');
+  const rowHoverBg = useColorModeValue('gray.50', 'gray.700');
+  const rowBorder = useColorModeValue('gray.200', 'gray.700');
 
   // Filter logs by search term
   const filteredLogs = useMemo(() => {
@@ -73,13 +76,19 @@ const NetworkTraceView: React.FC = () => {
     return new Date(date).toLocaleTimeString();
   };
 
+  const handleCopyAll = async () => {
+    try {
+      await callRPC('copyToClipboard', [JSON.stringify(filteredLogs, null, 2)]);
+    } catch (error) {
+      console.error('Failed to copy logs:', error);
+    }
+  };
+
   if (networkLogs.length === 0) {
     return (
-      <Box p={4} borderWidth={1} borderRadius="md" bg={bgColor} borderColor={borderColor}>
-        <Text fontSize="sm" color={textColor}>
-          No network logs available. API calls will be logged here when they occur.
-        </Text>
-      </Box>
+      <Text fontSize="sm" color={textColor} fontStyle="italic">
+        No network logs available. API calls will be logged here when they occur.
+      </Text>
     );
   }
 
@@ -87,9 +96,6 @@ const NetworkTraceView: React.FC = () => {
     <VStack align="stretch" spacing={4}>
       {/* Header with search and clear */}
       <HStack>
-        <Heading size="sm" color={headingColor}>
-          Network/API Trace
-        </Heading>
         <Spacer />
         <Input
           placeholder="Search logs..."
@@ -98,21 +104,47 @@ const NetworkTraceView: React.FC = () => {
           onChange={(e) => setSearchTerm(e.target.value)}
           maxW="200px"
         />
-        <Button size="sm" onClick={clearNetworkLogs}>
+        <Button size="sm" onClick={clearNetworkLogs} variant="outline">
           Clear Logs
         </Button>
-        <CopyButton text={JSON.stringify(filteredLogs, null, 2)} />
+        <Tooltip label="Copy all logs as JSON">
+          <IconButton
+            aria-label="Copy all logs"
+            icon={<CopyIcon />}
+            size="sm"
+            variant="outline"
+            onClick={handleCopyAll}
+          />
+        </Tooltip>
       </HStack>
 
-      {/* Logs List */}
-      <Accordion allowMultiple allowToggle defaultIndex={[]}>
-        {filteredLogs.map((log) => (
-          <NetworkLogItem key={log.id} log={log} getStatusColor={getStatusColor} formatDuration={formatDuration} formatTimestamp={formatTimestamp} />
-        ))}
-      </Accordion>
+      {/* Logs List - Scrollable container */}
+      <Box
+        maxH="300px"
+        overflowY="auto"
+        borderWidth="1px"
+        borderColor={borderColor}
+        borderRadius="md"
+      >
+        <VStack align="stretch" spacing={0} divider={<Box borderColor={rowBorder} />}>
+          {filteredLogs.map((log, index) => (
+            <NetworkLogItem 
+              key={log.id} 
+              log={log} 
+              getStatusColor={getStatusColor} 
+              formatDuration={formatDuration} 
+              formatTimestamp={formatTimestamp}
+              rowBg={rowBg}
+              rowHoverBg={rowHoverBg}
+              rowBorder={rowBorder}
+              isEven={index % 2 === 0}
+            />
+          ))}
+        </VStack>
+      </Box>
 
       {filteredLogs.length === 0 && searchTerm && (
-        <Text fontSize="sm" color={textColor} textAlign="center" py={4}>
+        <Text fontSize="sm" color={textColor} textAlign="center" py={4} fontStyle="italic">
           No logs match "{searchTerm}"
         </Text>
       )}
@@ -125,140 +157,182 @@ const NetworkLogItem: React.FC<{
   getStatusColor: (status: number, error?: string) => string;
   formatDuration: (ms: number) => string;
   formatTimestamp: (date: Date) => string;
-}> = ({ log, getStatusColor, formatDuration, formatTimestamp }) => {
-  const bgColor = useColorModeValue('white', 'gray.800');
-  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  rowBg: string;
+  rowHoverBg: string;
+  rowBorder: string;
+  isEven: boolean;
+}> = ({ log, getStatusColor, formatDuration, formatTimestamp, rowBg, rowHoverBg, rowBorder, isEven }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  
+  // Dark mode colors - defined at component top level
   const textColor = useColorModeValue('gray.700', 'gray.300');
   const codeBg = useColorModeValue('gray.50', 'gray.900');
   const headingColor = useColorModeValue('gray.900', 'gray.100');
+  const bgColor = useColorModeValue('white', 'gray.800');
+  const oddRowBg = useColorModeValue('white', 'gray.800');
+  const evenRowBg = useColorModeValue('gray.50', 'gray.700');
 
   const statusColor = getStatusColor(log.response.status, log.error);
   const statusText = log.error ? 'Error' : `${log.response.status}`;
 
+  const handleCopyUrl = async () => {
+    try {
+      await callRPC('copyToClipboard', [log.endpoint]);
+    } catch (error) {
+      console.error('Failed to copy URL:', error);
+    }
+  };
+
   return (
-    <AccordionItem border="none" mb={2}>
-      <AccordionButton
-        bg={bgColor}
-        borderWidth={1}
-        borderColor={borderColor}
-        borderRadius="md"
-        _hover={{ bg: useColorModeValue('gray.50', 'gray.700') }}
+    <Box
+      bg={isEven ? evenRowBg : oddRowBg}
+      borderBottomWidth="1px"
+      borderColor={rowBorder}
+      _hover={{ bg: rowHoverBg }}
+      transition="background-color 0.2s"
+    >
+      {/* Row Header - Always Visible */}
+      <Flex
+        align="center"
+        px={3}
+        py={2}
+        cursor="pointer"
+        onClick={() => setIsExpanded(!isExpanded)}
+        minW="0"
       >
-        <HStack flex="1" spacing={3}>
-          <Badge colorScheme={statusColor} fontSize="xs">
+        <HStack spacing={2} flex="1" minW="0">
+          <Badge colorScheme={statusColor} fontSize="xs" flexShrink={0}>
             {statusText}
           </Badge>
-          <Badge colorScheme="blue" fontSize="xs">
+          <Badge colorScheme="blue" fontSize="xs" flexShrink={0}>
             {log.method}
           </Badge>
-          <Text fontSize="sm" color={headingColor} flex="1" textAlign="left" isTruncated>
-            {log.endpoint}
-          </Text>
-          <Text fontSize="xs" color={textColor}>
+          <Tooltip label={log.endpoint}>
+            <Text 
+              fontSize="sm" 
+              color={headingColor} 
+              flex="1" 
+              minW="0"
+              isTruncated
+              noOfLines={1}
+            >
+              {log.endpoint}
+            </Text>
+          </Tooltip>
+          <Tooltip label="Copy URL">
+            <IconButton
+              aria-label="Copy URL"
+              icon={<CopyIcon />}
+              size="xs"
+              variant="ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleCopyUrl();
+              }}
+              flexShrink={0}
+            />
+          </Tooltip>
+          <Text fontSize="xs" color={textColor} flexShrink={0} minW="60px" textAlign="right">
             {formatDuration(log.duration)}
           </Text>
-          <Text fontSize="xs" color={textColor}>
+          <Text fontSize="xs" color={textColor} flexShrink={0} minW="80px" textAlign="right">
             {formatTimestamp(log.timestamp)}
           </Text>
-          <AccordionIcon />
         </HStack>
-      </AccordionButton>
-      <AccordionPanel bg={codeBg} p={4}>
-        <VStack align="stretch" spacing={3}>
-          {/* Request */}
-          <Box>
-            <Heading as="h5" size="xs" color={headingColor} mb={2}>
-              Request
-            </Heading>
-            <VStack align="stretch" spacing={2}>
-              {log.request.headers && (
-                <Box>
-                  <Text fontSize="xs" color={textColor} mb={1}>
-                    Headers:
-                  </Text>
-                    <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} fontFamily="mono">
-                      {JSON.stringify(log.request.headers, null, 2)}
-                    </Code>
-                </Box>
-              )}
-              {log.request.body ? (() => {
-                const bodyStr: string = typeof log.request.body === 'string'
-                  ? log.request.body
-                  : JSON.stringify(log.request.body, null, 2);
-                return (
-                  <Box>
-                    <Text fontSize="xs" color={textColor} mb={1}>
-                      Body:
-                    </Text>
-                    <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} maxH="200px" overflowY="auto" fontFamily="mono">
-                      {bodyStr}
-                    </Code>
-                  </Box>
-                );
-              })() : null}
-            </VStack>
-          </Box>
+      </Flex>
 
-          {/* Response */}
-          <Box>
-            <Heading as="h5" size="xs" color={headingColor} mb={2}>
-              Response
-            </Heading>
-            <VStack align="stretch" spacing={2}>
-              <HStack>
+      {/* Expandable Details */}
+      <Collapse in={isExpanded} animateOpacity>
+        <Box px={3} pb={3} pt={2} bg={codeBg}>
+          <VStack align="stretch" spacing={3}>
+            {/* Request */}
+            {(log.request.headers || log.request.body) && (
+              <Box>
+                <Heading as="h5" size="xs" color={headingColor} mb={2}>
+                  Request
+                </Heading>
+                <VStack align="stretch" spacing={2}>
+                  {log.request.headers && (
+                    <Box>
+                      <Text fontSize="xs" color={textColor} mb={1}>
+                        Headers:
+                      </Text>
+                      <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} fontFamily="mono" maxH="150px" overflowY="auto">
+                        {JSON.stringify(log.request.headers, null, 2)}
+                      </Code>
+                    </Box>
+                  )}
+                  {log.request.body && (() => {
+                    const bodyStr: string = typeof log.request.body === 'string'
+                      ? log.request.body
+                      : JSON.stringify(log.request.body, null, 2);
+                    return (
+                      <Box>
+                        <Text fontSize="xs" color={textColor} mb={1}>
+                          Body:
+                        </Text>
+                        <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} maxH="150px" overflowY="auto" fontFamily="mono">
+                          {bodyStr}
+                        </Code>
+                      </Box>
+                    );
+                  })()}
+                </VStack>
+              </Box>
+            )}
+
+            {/* Response */}
+            <Box>
+              <Heading as="h5" size="xs" color={headingColor} mb={2}>
+                Response
+              </Heading>
+              <VStack align="stretch" spacing={2}>
                 <Text fontSize="xs" color={textColor}>
                   Status: {log.response.status}
                 </Text>
                 {log.response.headers && Object.keys(log.response.headers).length > 0 && (
-                  <>
-                    <Text fontSize="xs" color={textColor}>
-                      Headers:
-                    </Text>
-                    <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} fontFamily="mono">
-                      {JSON.stringify(log.response.headers, null, 2)}
-                    </Code>
-                  </>
-                )}
-              </HStack>
-              {log.response.body ? (() => {
-                const bodyStr: string = typeof log.response.body === 'string'
-                  ? log.response.body
-                  : JSON.stringify(log.response.body, null, 2);
-                return (
                   <Box>
                     <Text fontSize="xs" color={textColor} mb={1}>
-                      Body:
+                      Headers:
                     </Text>
-                    <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} maxH="200px" overflowY="auto" fontFamily="mono">
-                      {bodyStr}
+                    <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} fontFamily="mono" maxH="150px" overflowY="auto">
+                      {JSON.stringify(log.response.headers, null, 2)}
                     </Code>
                   </Box>
-                );
-              })() : null}
-            </VStack>
-          </Box>
-
-          {/* Error */}
-          {log.error && (
-            <Box>
-              <Heading as="h5" size="xs" color="red.500" mb={2}>
-                Error
-              </Heading>
-                  <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} color="red.500" fontFamily="mono">
-                    {log.error}
-                  </Code>
+                )}
+                {log.response.body && (() => {
+                  const bodyStr: string = typeof log.response.body === 'string'
+                    ? log.response.body
+                    : JSON.stringify(log.response.body, null, 2);
+                  return (
+                    <Box>
+                      <Text fontSize="xs" color={textColor} mb={1}>
+                        Body:
+                      </Text>
+                      <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} maxH="150px" overflowY="auto" fontFamily="mono">
+                        {bodyStr}
+                      </Code>
+                    </Box>
+                  );
+                })()}
+              </VStack>
             </Box>
-          )}
 
-          {/* Metadata */}
-          <Box>
-            <Text fontSize="xs" color={textColor}>
-              Duration: {formatDuration(log.duration)} | Timestamp: {formatTimestamp(log.timestamp)}
-            </Text>
-          </Box>
-        </VStack>
-      </AccordionPanel>
-    </AccordionItem>
+            {/* Error */}
+            {log.error && (
+              <Box>
+                <Heading as="h5" size="xs" color="red.500" mb={2}>
+                  Error
+                </Heading>
+                <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={bgColor} color="red.500" fontFamily="mono">
+                  {log.error}
+                </Code>
+              </Box>
+            )}
+          </VStack>
+        </Box>
+      </Collapse>
+    </Box>
   );
 };
 

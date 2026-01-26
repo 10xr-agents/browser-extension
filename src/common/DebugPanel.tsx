@@ -1,25 +1,20 @@
 /**
  * Debug Panel Component for Thin Client Architecture
  * 
- * Dedicated container for all debug components. Only visible when developer mode is enabled.
- * Collapsible panel with accordion organization and health signals in header.
+ * Flat dashboard view for system/debug information.
+ * No accordions - all sections displayed as cards in a vertical stack.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §2 (Task 2: Space Utilization & Layout)
- * Reference: DEBUG_VIEW_IMPROVEMENTS.md §3 (Task 2: Space Utilization & Layout)
+ * Reference: User request for flat dashboard design
  */
 
 import React from 'react';
 import {
   Box,
   VStack,
-  Collapse,
-  Accordion,
-  AccordionItem,
-  AccordionButton,
-  AccordionPanel,
-  AccordionIcon,
   Heading,
   useColorModeValue,
+  Text,
+  Code,
 } from '@chakra-ui/react';
 import { useAppState } from '../state/store';
 import AccessibilityTreeView from './AccessibilityTreeView';
@@ -27,7 +22,6 @@ import CoverageMetricsView from './CoverageMetricsView';
 import HybridElementView from './HybridElementView';
 import TaskStatus from './TaskStatus';
 import TaskHistoryDebug from './TaskHistoryDebug';
-import DebugPanelHeader from './DebugPanelHeader';
 import NetworkTraceView from './NetworkTraceView';
 import RAGContextView from './RAGContextView';
 import StateInspectorView from './StateInspectorView';
@@ -35,10 +29,12 @@ import PlanViewDebug from './PlanViewDebug';
 import VerificationViewDebug from './VerificationViewDebug';
 import CorrectionViewDebug from './CorrectionViewDebug';
 
-const DebugPanel: React.FC = () => {
+interface DebugPanelProps {
+  hideHeader?: boolean;
+}
+
+const DebugPanel: React.FC<DebugPanelProps> = ({ hideHeader = false }) => {
   const developerMode = useAppState((state) => state.settings.developerMode);
-  const debugPanelExpanded = useAppState((state) => state.ui.debugPanelExpanded);
-  const setDebugPanelExpanded = useAppState((state) => state.ui.actions.setDebugPanelExpanded);
   
   // Get debug data from store
   const accessibilityTree = useAppState((state) => state.currentTask.accessibilityTree);
@@ -52,213 +48,113 @@ const DebugPanel: React.FC = () => {
   const verificationHistory = useAppState((state) => state.currentTask.verificationHistory);
   const correctionHistory = useAppState((state) => state.currentTask.correctionHistory);
 
-  // Terminal aesthetic theme: darker background to distinguish from main UI
-  const panelBg = useColorModeValue('gray.100', 'gray.950');
-  const borderColor = useColorModeValue('gray.300', 'gray.800');
+  // Dark mode colors - defined at component top level
+  const cardBg = useColorModeValue('white', 'gray.800');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
   const headingColor = useColorModeValue('gray.900', 'gray.100');
-  const terminalBorder = useColorModeValue('gray.300', 'gray.700');
+  const textColor = useColorModeValue('gray.700', 'gray.300');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
 
   // Don't render if developer mode is off
   if (!developerMode) {
     return null;
   }
 
-  const handleToggle = () => {
-    setDebugPanelExpanded(!debugPanelExpanded);
-  };
+  // Card wrapper component for consistent styling
+  const DebugCard: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+    <Box
+      borderWidth="1px"
+      borderColor={borderColor}
+      borderRadius="lg"
+      p={4}
+      bg={cardBg}
+      shadow="sm"
+    >
+      <Heading size="sm" mb={3} color={headingColor}>
+        {title}
+      </Heading>
+      {children}
+    </Box>
+  );
+
+  // Empty state component
+  const EmptyState: React.FC<{ message: string }> = ({ message }) => (
+    <Text fontSize="sm" color={descColor} fontStyle="italic">
+      {message}
+    </Text>
+  );
 
   return (
-    <Box 
-      w="100%" 
-      borderTopWidth="2px" 
-      borderColor={terminalBorder}
-      shadow="md"
-      bg={panelBg}
-    >
-      {/* Compact Header with Health Signals - Always Visible */}
-      <DebugPanelHeader
-        isExpanded={debugPanelExpanded}
-        onToggle={handleToggle}
-      />
+    <VStack align="stretch" spacing={5} w="100%">
+        {/* Execution Status */}
+        {(taskStatus === 'running' || actionStatus !== 'idle') && (
+          <DebugCard title="Execution Status">
+            <TaskStatus />
+          </DebugCard>
+        )}
 
-      {/* Collapsible Panel Content */}
-      <Collapse in={debugPanelExpanded} animateOpacity>
-        <Box
-          bg={panelBg}
-          maxH="400px"
-          overflowY="auto"
-          p={4}
-          borderTopWidth="1px"
-          borderColor={borderColor}
-        >
-          <VStack align="stretch" spacing={4}>
-            <Heading size="sm" color={headingColor} fontFamily="mono" letterSpacing="wide">
-              Debug Panel
-            </Heading>
+        {/* Action Plan (Manus Orchestrator) */}
+        {(plan || currentStep || totalSteps) && (
+          <DebugCard title="Action Plan">
+            <PlanViewDebug />
+          </DebugCard>
+        )}
 
-            {/* Accordion Organization */}
-            <Accordion allowMultiple allowToggle defaultIndex={[]}>
-              {/* Execution Status */}
-              {(taskStatus === 'running' || actionStatus !== 'idle') && (
-                <AccordionItem>
-                  <AccordionButton>
-                    <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                      Execution Status
-                    </Heading>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4}>
-                    <TaskStatus />
-                  </AccordionPanel>
-                </AccordionItem>
-              )}
+        {/* Verification Results (Manus Orchestrator) */}
+        {verificationHistory && verificationHistory.length > 0 && (
+          <DebugCard title="Verification Results">
+            <VerificationViewDebug />
+          </DebugCard>
+        )}
 
-              {/* Action Plan (Manus Orchestrator) */}
-              {(plan || currentStep || totalSteps) && (
-                <AccordionItem>
-                  <AccordionButton>
-                    <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                      Action Plan
-                    </Heading>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4}>
-                    <PlanViewDebug />
-                  </AccordionPanel>
-                </AccordionItem>
-              )}
+        {/* Correction Results (Manus Orchestrator) */}
+        {correctionHistory && correctionHistory.length > 0 && (
+          <DebugCard title="Correction Results">
+            <CorrectionViewDebug />
+          </DebugCard>
+        )}
 
-              {/* Verification Results (Manus Orchestrator) */}
-              {verificationHistory && verificationHistory.length > 0 && (
-                <AccordionItem>
-                  <AccordionButton>
-                    <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                      Verification Results
-                    </Heading>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4}>
-                    <VerificationViewDebug />
-                  </AccordionPanel>
-                </AccordionItem>
-              )}
+        {/* Network/API Trace */}
+        <DebugCard title="Network/API Trace">
+          <NetworkTraceView />
+        </DebugCard>
 
-              {/* Correction Results (Manus Orchestrator) */}
-              {correctionHistory && correctionHistory.length > 0 && (
-                <AccordionItem>
-                  <AccordionButton>
-                    <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                      Correction Results
-                    </Heading>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4}>
-                    <CorrectionViewDebug />
-                  </AccordionPanel>
-                </AccordionItem>
-              )}
+        {/* Raw Logs */}
+        <DebugCard title="Raw Logs">
+          <TaskHistoryDebug />
+        </DebugCard>
 
-              {/* Page Structure (Accessibility Tree) */}
-              {accessibilityTree && (
-                <AccordionItem>
-                  <AccordionButton>
-                    <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                      Page Structure
-                    </Heading>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4}>
-                    <AccessibilityTreeView tree={accessibilityTree} />
-                  </AccordionPanel>
-                </AccordionItem>
-              )}
+        {/* RAG Context */}
+        <DebugCard title="RAG Context">
+          <RAGContextView />
+        </DebugCard>
 
-              {/* Interaction Coverage (Coverage Metrics) */}
-              {coverageMetrics && (
-                <AccordionItem>
-                  <AccordionButton>
-                    <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                      Interaction Coverage
-                    </Heading>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4}>
-                    <CoverageMetricsView metrics={coverageMetrics} />
-                  </AccordionPanel>
-                </AccordionItem>
-              )}
+        {/* Page Structure (Accessibility Tree) */}
+        {accessibilityTree && (
+          <DebugCard title="Page Structure">
+            <AccessibilityTreeView tree={accessibilityTree} />
+          </DebugCard>
+        )}
 
-              {/* Element Sources (Hybrid Elements) */}
-              {hybridElements && hybridElements.length > 0 && (
-                <AccordionItem>
-                  <AccordionButton>
-                    <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                      Element Sources
-                    </Heading>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4}>
-                    <HybridElementView hybridElements={hybridElements} />
-                  </AccordionPanel>
-                </AccordionItem>
-              )}
+        {/* Interaction Coverage (Coverage Metrics) */}
+        {coverageMetrics && (
+          <DebugCard title="Interaction Coverage">
+            <CoverageMetricsView metrics={coverageMetrics} />
+          </DebugCard>
+        )}
 
-              {/* Raw Logs (Task History Debug View) */}
-              <AccordionItem>
-                <AccordionButton>
-                  <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                    Raw Logs
-                  </Heading>
-                  <AccordionIcon />
-                </AccordionButton>
-                <AccordionPanel pb={4}>
-                  <TaskHistoryDebug />
-                </AccordionPanel>
-              </AccordionItem>
+        {/* Element Sources (Hybrid Elements) */}
+        {hybridElements && hybridElements.length > 0 && (
+          <DebugCard title="Element Sources">
+            <HybridElementView hybridElements={hybridElements} />
+          </DebugCard>
+        )}
 
-              {/* Network/API Trace (NEW - Task 3) */}
-              <AccordionItem>
-                <AccordionButton>
-                  <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                    Network/API Trace
-                  </Heading>
-                  <AccordionIcon />
-                </AccordionButton>
-                <AccordionPanel pb={4}>
-                  <NetworkTraceView />
-                </AccordionPanel>
-              </AccordionItem>
-
-              {/* RAG Context (NEW - Task 3) */}
-              <AccordionItem>
-                <AccordionButton>
-                  <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                    RAG Context
-                  </Heading>
-                  <AccordionIcon />
-                </AccordionButton>
-                <AccordionPanel pb={4}>
-                  <RAGContextView />
-                </AccordionPanel>
-              </AccordionItem>
-
-              {/* State Inspector (NEW - Task 3) */}
-              <AccordionItem>
-                <AccordionButton>
-                  <Heading as="h4" size="xs" flex="1" textAlign="left" color={headingColor}>
-                    State Inspector
-                  </Heading>
-                  <AccordionIcon />
-                </AccordionButton>
-                <AccordionPanel pb={4}>
-                  <StateInspectorView />
-                </AccordionPanel>
-              </AccordionItem>
-            </Accordion>
-          </VStack>
-        </Box>
-      </Collapse>
-    </Box>
+        {/* State Inspector */}
+        <DebugCard title="State Inspector">
+          <StateInspectorView />
+        </DebugCard>
+      </VStack>
   );
 };
 

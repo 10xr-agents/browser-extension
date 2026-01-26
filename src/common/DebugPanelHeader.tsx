@@ -22,7 +22,6 @@ import {
 import { ChevronUpIcon, ChevronDownIcon, DownloadIcon } from '@chakra-ui/icons';
 import { useAppState } from '../state/store';
 import { exportDebugSession } from '../helpers/exportDebugSession';
-import { useToast } from '@chakra-ui/react';
 
 interface DebugPanelHeaderProps {
   isExpanded: boolean;
@@ -33,7 +32,6 @@ const DebugPanelHeader: React.FC<DebugPanelHeaderProps> = ({
   isExpanded,
   onToggle,
 }) => {
-  const toast = useToast();
   // Get data for health signals from store
   const coverageMetrics = useAppState((state) => state.currentTask.coverageMetrics);
   const displayHistory = useAppState((state) => state.currentTask.displayHistory);
@@ -205,21 +203,8 @@ const DebugPanelHeader: React.FC<DebugPanelHeaderProps> = ({
               const state = useAppState.getState();
               const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
               exportDebugSession(state, tab?.url || null);
-              toast({
-                title: 'Debug session exported',
-                description: 'Debug session data has been downloaded as JSON.',
-                status: 'success',
-                duration: 3000,
-                isClosable: true,
-              });
             } catch (error) {
-              toast({
-                title: 'Export failed',
-                description: error instanceof Error ? error.message : 'Failed to export debug session',
-                status: 'error',
-                duration: 5000,
-                isClosable: true,
-              });
+              console.error('Failed to export debug session:', error);
             }
           }}
         >

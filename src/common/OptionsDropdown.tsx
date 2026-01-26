@@ -8,7 +8,7 @@
  */
 
 import { SettingsIcon } from '@chakra-ui/icons';
-import { IconButton } from '@chakra-ui/react';
+import { IconButton, useColorModeValue } from '@chakra-ui/react';
 import React from 'react';
 import { useAppState } from '../state/store';
 
@@ -18,6 +18,12 @@ interface OptionsDropdownProps {
 
 const OptionsDropdown: React.FC<OptionsDropdownProps> = ({ onNavigate }) => {
   const user = useAppState((state) => state.settings.user);
+
+  // Dark mode colors - defined at component top level
+  const borderColor = useColorModeValue('gray.300', 'gray.600');
+  const bgColor = useColorModeValue('white', 'gray.800');
+  const hoverBg = useColorModeValue('gray.100', 'gray.700');
+  const iconColor = useColorModeValue('gray.700', 'gray.300');
 
   if (!user) return null;
 
@@ -29,8 +35,19 @@ const OptionsDropdown: React.FC<OptionsDropdownProps> = ({ onNavigate }) => {
     <IconButton
       aria-label="Settings"
       icon={<SettingsIcon />}
+      size="sm"
       variant="outline"
       onClick={handleClick}
+      bg={bgColor}
+      borderColor={borderColor}
+      color={iconColor}
+      _hover={{
+        bg: hoverBg,
+        borderColor: useColorModeValue('gray.400', 'gray.500'),
+      }}
+      _focusVisible={{
+        boxShadow: 'outline',
+      }}
     />
   );
 };
