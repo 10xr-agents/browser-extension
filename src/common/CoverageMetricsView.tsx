@@ -67,7 +67,7 @@ const CoverageMetricsView: React.FC<CoverageMetricsViewProps> = ({ metrics }) =>
     <Box p={4} borderWidth={1} borderRadius="md" bg={containerBg} borderColor={borderColor}>
       <VStack align="stretch" spacing={4}>
         <HStack>
-          <Heading size="sm" color={headingColor}>Accessibility Coverage Metrics</Heading>
+          <Heading size="sm" color={headingColor}>Interaction Coverage</Heading>
           <Spacer />
           <Badge colorScheme={coverageColorScheme} fontSize="sm" fontWeight="bold">
             {metrics.axCoverage.toFixed(1)}% Coverage

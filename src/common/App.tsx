@@ -41,6 +41,8 @@ const App = () => {
   const setUser = useAppState((state) => state.settings.actions.setUser);
   const setTenant = useAppState((state) => state.settings.actions.setTenant);
   const clearAuth = useAppState((state) => state.settings.actions.clearAuth);
+  const addNetworkLog = useAppState((state) => state.debug.actions.addNetworkLog);
+  const updateRAGContext = useAppState((state) => state.debug.actions.updateRAGContext);
   // Use user directly from store - this will trigger re-render when login updates it
   const user = useAppState((state) => state.settings.user);
   
@@ -56,8 +58,41 @@ const App = () => {
       try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab?.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {
-          const response = await apiClient.knowledgeResolve(tab.url);
+          const response = await apiClient.knowledgeResolve(
+            tab.url,
+            undefined,
+            addNetworkLog ? (log) => {
+              addNetworkLog({
+                method: log.method,
+                endpoint: log.endpoint,
+                request: log.request,
+                response: log.response,
+                duration: log.duration,
+                error: log.error,
+              });
+            } : undefined
+          );
           setHasOrgKnowledge(response.hasOrgKnowledge);
+
+          // Update RAG context for debug panel
+          if (updateRAGContext) {
+            try {
+              const urlObj = new URL(tab.url);
+              const activeDomain = urlObj.hostname;
+              updateRAGContext({
+                hasOrgKnowledge: response.hasOrgKnowledge,
+                activeDomain,
+                domainMatch: response.hasOrgKnowledge, // Simplified
+                ragMode: response.hasOrgKnowledge ? 'org_specific' : 'public_only',
+                reason: response.hasOrgKnowledge
+                  ? 'Organization-specific knowledge available for this domain'
+                  : 'No organization-specific knowledge for this domain. Using public knowledge only.',
+                chunkCount: response.context?.length || null,
+              });
+            } catch (err) {
+              // Ignore URL parsing errors
+            }
+          }
         }
       } catch (error) {
         // If resolve fails, assume no org knowledge
@@ -84,7 +119,7 @@ const App = () => {
     return () => {
       chrome.tabs.onUpdated.removeListener(handleTabUpdate);
     };
-  }, [user]);
+  }, [user, addNetworkLog, updateRAGContext]);
 
   const setTheme = useAppState((state) => state.settings.actions.setTheme);
 
@@ -200,9 +235,7 @@ const App = () => {
               <TaskUI hasOrgKnowledge={hasOrgKnowledge} />
             )
           ) : (
-            <Box px={4} py={4} bg={bgColor} minH="100%">
-              <Login />
-            </Box>
+            <Login />
           )}
         </Box>
       </Flex>

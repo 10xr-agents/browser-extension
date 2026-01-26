@@ -27,6 +27,56 @@ import type { CoverageMetrics } from '../helpers/accessibilityFirst';
 import { createAccessibilityMapping } from '../helpers/accessibilityMapping';
 
 /**
+ * Plan step structure from Manus orchestrator
+ * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §6.2 (Action Plan Structure)
+ */
+export type PlanStep = {
+  id: string;
+  description: string;
+  status: 'pending' | 'active' | 'completed' | 'failed';
+  toolType?: 'dom' | 'server';
+  reasoning?: string;
+  expectedOutcome?: string;
+};
+
+/**
+ * Action plan structure from Manus orchestrator
+ * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §6.2 (Action Plan Structure)
+ */
+export type ActionPlan = {
+  steps: PlanStep[];
+  currentStepIndex: number;
+};
+
+/**
+ * Verification result from Manus orchestrator
+ * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §6.4 (Verification Result Model)
+ */
+export type VerificationResult = {
+  stepIndex: number;
+  success: boolean;
+  confidence: number; // 0-1 score
+  expectedState?: string; // What was expected
+  actualState?: string; // What actually happened
+  reason: string; // Explanation of result
+  timestamp: Date;
+};
+
+/**
+ * Self-correction result from Manus orchestrator
+ * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §9 (Self-Correction Architecture)
+ */
+export type CorrectionResult = {
+  stepIndex: number;
+  strategy: string; // Correction strategy used (e.g., "ALTERNATIVE_SELECTOR", "ALTERNATIVE_TOOL", etc.)
+  reason: string; // Why correction was needed
+  attemptNumber: number; // Retry attempt number (1-indexed)
+  originalStep?: string; // Original step description (if available)
+  correctedStep?: string; // Corrected step description (if available)
+  timestamp: Date;
+};
+
+/**
  * Display-only history entry for UI
  * Server owns the canonical history used for prompts
  */
@@ -38,6 +88,7 @@ export type DisplayHistoryEntry = {
     completionTokens: number;
   };
   parsedAction: ParsedAction;
+  expectedOutcome?: string; // Expected outcome for verification (Task 9)
 };
 
 export type CurrentTaskSlice = {
@@ -50,7 +101,17 @@ export type CurrentTaskSlice = {
   accessibilityMapping: AccessibilityMapping | null; // Bidirectional mapping for action targeting (Task 6)
   hybridElements: HybridElement[] | null; // Hybrid elements combining accessibility and DOM data (Task 7)
   coverageMetrics: CoverageMetrics | null; // Coverage metrics for accessibility-first selection (Task 8)
-  status: 'idle' | 'running' | 'success' | 'error' | 'interrupted';
+  hasOrgKnowledge: boolean | null; // RAG mode: true = org-specific, false = public-only, null = unknown
+  // Manus orchestrator plan data (Task 6)
+  plan: ActionPlan | null; // Action plan from orchestrator
+  currentStep: number | null; // Current step number (1-indexed, from API)
+  totalSteps: number | null; // Total steps in plan (from API)
+  orchestratorStatus: 'planning' | 'executing' | 'verifying' | 'correcting' | 'completed' | 'failed' | null; // Orchestrator status
+  // Manus orchestrator verification data (Task 7)
+  verificationHistory: VerificationResult[]; // Verification results from server
+  // Manus orchestrator correction data (Task 8)
+  correctionHistory: CorrectionResult[]; // Self-correction attempts from server
+  status: 'idle' | 'running' | 'success' | 'error' | 'interrupted'; // Legacy task status (kept for backward compatibility)
   actionStatus:
     | 'idle'
     | 'attaching-debugger'
@@ -77,6 +138,13 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
   accessibilityMapping: null,
   hybridElements: null,
   coverageMetrics: null,
+  hasOrgKnowledge: null,
+  plan: null,
+  currentStep: null,
+  totalSteps: null,
+  orchestratorStatus: null,
+  verificationHistory: [],
+  correctionHistory: [],
   status: 'idle',
   actionStatus: 'idle',
   actions: {
@@ -187,8 +255,10 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
 
           // Store hybrid elements for UI display (Task 7)
           if (domResult.hybridElements) {
+            const hybridElements = domResult.hybridElements;
             set((state) => {
-              state.currentTask.hybridElements = domResult.hybridElements!;
+              // Use cast to work around Immer's WritableDraft type issue with DOM elements
+              state.currentTask.hybridElements = hybridElements as typeof state.currentTask.hybridElements;
             });
           } else {
             set((state) => {
@@ -220,18 +290,96 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             // Get current taskId from state (will be null on first request)
             const currentTaskId = get().currentTask.taskId;
 
-            // Call agentInteract API
+            // Get debug actions for logging
+            const addNetworkLog = get().debug?.actions.addNetworkLog;
+
+            // Call agentInteract API with logging
             const response = await apiClient.agentInteract(
               url,
               instructions,
               currentDom,
-              currentTaskId
+              currentTaskId,
+              addNetworkLog ? (log) => {
+                addNetworkLog({
+                  method: log.method,
+                  endpoint: log.endpoint,
+                  request: log.request,
+                  response: log.response,
+                  duration: log.duration,
+                  error: log.error,
+                });
+              } : undefined
             );
 
             // Store taskId if returned (first request or server-assigned)
             if (response.taskId) {
               set((state) => {
                 state.currentTask.taskId = response.taskId!;
+              });
+            }
+
+            // Store hasOrgKnowledge for debug panel health signals
+            if (response.hasOrgKnowledge !== undefined) {
+              set((state) => {
+                state.currentTask.hasOrgKnowledge = response.hasOrgKnowledge ?? null;
+              });
+            }
+
+            // Store orchestrator plan data (Task 6)
+            if (response.plan) {
+              set((state) => {
+                state.currentTask.plan = response.plan ?? null;
+              });
+            }
+            if (response.currentStep !== undefined) {
+              set((state) => {
+                state.currentTask.currentStep = response.currentStep ?? null;
+              });
+            }
+            if (response.totalSteps !== undefined) {
+              set((state) => {
+                state.currentTask.totalSteps = response.totalSteps ?? null;
+              });
+            }
+            if (response.status) {
+              set((state) => {
+                state.currentTask.orchestratorStatus = response.status ?? null;
+              });
+            }
+
+            // Store verification result (Task 7)
+            if (response.verification) {
+              set((state) => {
+                const verification: VerificationResult = {
+                  stepIndex: response.verification!.stepIndex,
+                  success: response.verification!.success,
+                  confidence: response.verification!.confidence,
+                  expectedState: response.verification!.expectedState,
+                  actualState: response.verification!.actualState,
+                  reason: response.verification!.reason,
+                  timestamp: response.verification!.timestamp
+                    ? new Date(response.verification!.timestamp)
+                    : new Date(),
+                };
+                state.currentTask.verificationHistory.push(verification);
+              });
+            }
+
+            // Store correction result (Task 8)
+            if (response.correction) {
+              set((state) => {
+                const correction: CorrectionResult = {
+                  stepIndex: response.correction!.stepIndex,
+                  strategy: response.correction!.strategy,
+                  reason: response.correction!.reason,
+                  attemptNumber: response.correction!.attemptNumber,
+                  originalStep: response.correction!.originalStep,
+                  correctedStep: response.correction!.correctedStep,
+                  timestamp: response.correction!.timestamp
+                    ? new Date(response.correction!.timestamp)
+                    : new Date(),
+                };
+                state.currentTask.correctionHistory.push(correction);
               });
             }
 
@@ -251,7 +399,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             const parsed = parseAction(response.action);
             
             // Add thought from response
-            const parsedWithThought: ParsedAction = parsed.error
+            // Type guard: check if parsed has error property
+            const parsedWithThought: ParsedAction = 'error' in parsed
               ? parsed
               : {
                   ...parsed,
@@ -265,6 +414,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 action: response.action,
                 usage: response.usage,
                 parsedAction: parsedWithThought,
+                expectedOutcome: response.expectedOutcome, // Task 9: Store expected outcome for verification context
               });
             });
 

@@ -27,6 +27,7 @@ import {
   useColorModeValue,
 } from '@chakra-ui/react';
 import { apiClient, type ResolveKnowledgeResponse } from '../api/client';
+import { useAppState } from '../state/store';
 
 interface KnowledgeOverlayProps {
   url: string;
@@ -36,6 +37,8 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url }) => {
   const [knowledge, setKnowledge] = useState<ResolveKnowledgeResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const addNetworkLog = useAppState((state) => state.debug.actions.addNetworkLog);
+  const updateRAGContext = useAppState((state) => state.debug.actions.updateRAGContext);
 
   useEffect(() => {
     const fetchKnowledge = async () => {
@@ -45,8 +48,41 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url }) => {
       setError(null);
       
       try {
-        const response = await apiClient.knowledgeResolve(url);
+        const response = await apiClient.knowledgeResolve(
+          url,
+          undefined,
+          addNetworkLog ? (log) => {
+            addNetworkLog({
+              method: log.method,
+              endpoint: log.endpoint,
+              request: log.request,
+              response: log.response,
+              duration: log.duration,
+              error: log.error,
+            });
+          } : undefined
+        );
         setKnowledge(response);
+
+        // Update RAG context for debug panel
+        if (updateRAGContext) {
+          try {
+            const urlObj = new URL(url);
+            const activeDomain = urlObj.hostname;
+            updateRAGContext({
+              hasOrgKnowledge: response.hasOrgKnowledge,
+              activeDomain,
+              domainMatch: response.hasOrgKnowledge, // Simplified - actual domain matching logic is server-side
+              ragMode: response.hasOrgKnowledge ? 'org_specific' : 'public_only',
+              reason: response.hasOrgKnowledge
+                ? 'Organization-specific knowledge available for this domain'
+                : 'No organization-specific knowledge for this domain. Using public knowledge only.',
+              chunkCount: response.context?.length || null,
+            });
+          } catch (err) {
+            // Ignore URL parsing errors
+          }
+        }
       } catch (err) {
         if (err instanceof Error) {
           if (err.message === 'DOMAIN_NOT_ALLOWED') {

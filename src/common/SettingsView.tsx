@@ -21,6 +21,9 @@ import {
   SkeletonText,
   useColorModeValue,
   Icon,
+  Switch,
+  FormControl,
+  FormLabel,
 } from '@chakra-ui/react';
 import React, { useState, useEffect } from 'react';
 import { BsBoxArrowRight } from 'react-icons/bs';
@@ -40,7 +43,9 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
   
   const user = useAppState((state) => state.settings.user);
   const theme = useAppState((state) => state.settings.theme);
+  const developerMode = useAppState((state) => state.settings.developerMode);
   const setTheme = useAppState((state) => state.settings.actions.setTheme);
+  const setDeveloperMode = useAppState((state) => state.settings.actions.setDeveloperMode);
   const clearAuth = useAppState((state) => state.settings.actions.clearAuth);
   const toast = useToast();
 
@@ -194,6 +199,39 @@ const SettingsView: React.FC<SettingsViewProps> = ({ onNavigate }) => {
           onChange={handleThemeChange}
           isDisabled={saving}
         />
+      </SettingsSection>
+
+      {/* Developer Options Section */}
+      <SettingsSection title="Developer Options">
+        <FormControl display="flex" alignItems="center" justifyContent="space-between">
+          <Box flex="1">
+            <FormLabel htmlFor="developer-mode" mb={0} fontSize="sm" fontWeight="medium" color={useColorModeValue('gray.700', 'gray.300')}>
+              Enable Developer Mode
+            </FormLabel>
+            <Text fontSize="xs" color={useColorModeValue('gray.600', 'gray.400')} mt={1}>
+              Show technical debug information and advanced debugging tools
+            </Text>
+          </Box>
+          <Switch
+            id="developer-mode"
+            isChecked={developerMode}
+            onChange={(e) => {
+              const newValue = e.target.checked;
+              setDeveloperMode(newValue);
+              toast({
+                title: newValue ? 'Developer mode enabled' : 'Developer mode disabled',
+                description: newValue
+                  ? 'Debug panel is now available. You can access it from the main task view.'
+                  : 'Debug panel has been hidden.',
+                status: 'info',
+                duration: 3000,
+                isClosable: true,
+              });
+            }}
+            colorScheme="blue"
+            size="md"
+          />
+        </FormControl>
       </SettingsSection>
 
       {/* Account Section */}

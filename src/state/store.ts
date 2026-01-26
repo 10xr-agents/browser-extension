@@ -5,11 +5,13 @@ import { createJSONStorage, devtools, persist } from 'zustand/middleware';
 import { createCurrentTaskSlice, CurrentTaskSlice } from './currentTask';
 import { createUiSlice, UiSlice } from './ui';
 import { createSettingsSlice, SettingsSlice } from './settings';
+import { createDebugSlice, DebugSlice } from './debug';
 
 export type StoreType = {
   currentTask: CurrentTaskSlice;
   ui: UiSlice;
   settings: SettingsSlice;
+  debug: DebugSlice;
 };
 
 export type MyStateCreator<T> = StateCreator<
@@ -26,6 +28,7 @@ export const useAppState = create<StoreType>()(
         currentTask: createCurrentTaskSlice(...a),
         ui: createUiSlice(...a),
         settings: createSettingsSlice(...a),
+        debug: createDebugSlice(...a),
       }))
     ),
     {
@@ -35,6 +38,7 @@ export const useAppState = create<StoreType>()(
         // Stuff we want to persist
         ui: {
           instructions: state.ui.instructions,
+          debugPanelExpanded: state.ui.debugPanelExpanded,
         },
         settings: {
           // Auth state for UI display (tokens stored in chrome.storage.local)
@@ -43,6 +47,8 @@ export const useAppState = create<StoreType>()(
           tenantName: state.settings.tenantName,
           // Theme preference
           theme: state.settings.theme,
+          // Developer mode (runtime control)
+          developerMode: state.settings.developerMode,
         },
       }),
       merge: (persistedState, currentState) =>

@@ -19,12 +19,16 @@ export type SettingsSlice = {
   // Theme preference
   theme: 'light' | 'dark' | 'system';
   
+  // Debug mode (runtime control, not build-time)
+  developerMode: boolean;
+  
   actions: {
     update: (values: Partial<SettingsSlice>) => void;
     setUser: (user: SettingsSlice['user']) => void;
     setTenant: (tenantId: string, tenantName: string) => void;
     clearAuth: () => void;
     setTheme: (theme: 'light' | 'dark' | 'system') => void;
+    setDeveloperMode: (enabled: boolean) => void;
   };
 };
 
@@ -33,6 +37,7 @@ export const createSettingsSlice: MyStateCreator<SettingsSlice> = (set) => ({
   tenantId: null,
   tenantName: null,
   theme: 'system',
+  developerMode: false,
   
   actions: {
     update: (values) => {
@@ -61,6 +66,11 @@ export const createSettingsSlice: MyStateCreator<SettingsSlice> = (set) => ({
     setTheme: (theme) => {
       set((state) => {
         state.settings.theme = theme;
+      });
+    },
+    setDeveloperMode: (enabled) => {
+      set((state) => {
+        state.settings.developerMode = enabled;
       });
     },
   },

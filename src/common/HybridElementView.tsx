@@ -181,7 +181,7 @@ const HybridElementView: React.FC<HybridElementViewProps> = ({ hybridElements })
     <Box p={4} borderWidth={1} borderRadius="md" bg={containerBg} borderColor={borderColor} maxH="600px" overflowY="auto">
       <VStack align="stretch" spacing={4}>
         <HStack>
-          <Heading size="sm" color={headingColor}>Hybrid Elements</Heading>
+          <Heading size="sm" color={headingColor}>Element Sources</Heading>
           <Spacer />
           <Badge colorScheme="purple" fontSize="xs">
             {hybridElements.length} total

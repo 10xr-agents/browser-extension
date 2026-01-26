@@ -5,13 +5,14 @@ import { useAsync } from 'react-use';
 import { useAppState } from '../state/store';
 
 const TokenCount = ({ html }: { html: string }) => {
-  const selectedModel = useAppState((state) => state.settings.selectedModel);
+  // Note: selectedModel was removed from settings (model selection is server-side now)
+  // Using default model 'gpt-4o-mini' for token counting
   const textColor = useColorModeValue('gray.500', 'gray.400');
 
   const numTokens =
     useAsync(
-      () => countTokens(html, selectedModel as string),
-      [html, selectedModel]
+      () => countTokens(html, 'gpt-4o-mini'),
+      [html]
     ).value || null;
 
   let displayedCount = null;

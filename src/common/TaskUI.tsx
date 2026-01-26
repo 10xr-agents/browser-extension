@@ -23,16 +23,15 @@ import {
 import { InfoIcon } from '@chakra-ui/icons';
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { BsPlayFill, BsStopFill } from 'react-icons/bs';
-import { debugMode } from '../constants';
 import { useAppState } from '../state/store';
 import TaskHistory from './TaskHistory';
-import TaskStatus from './TaskStatus';
 import KnowledgeOverlay from './KnowledgeOverlay';
-import AccessibilityTreeView from './AccessibilityTreeView';
-import HybridElementView from './HybridElementView';
-import CoverageMetricsView from './CoverageMetricsView';
 import AutosizeTextarea from './AutosizeTextarea';
 import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
+import DebugPanel from './DebugPanel';
+import PlanView from './PlanView';
+import VerificationView from './VerificationView';
+import CorrectionView from './CorrectionView';
 
 interface TaskUIProps {
   hasOrgKnowledge?: boolean | null;
@@ -45,10 +44,7 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
   const runTask = useAppState((state) => state.currentTask.actions.runTask);
   const instructions = useAppState((state) => state.ui.instructions);
   const setInstructions = useAppState((state) => state.ui.actions.setInstructions);
-  const accessibilityTree = useAppState((state) => state.currentTask.accessibilityTree);
   const accessibilityElements = useAppState((state) => state.currentTask.accessibilityElements);
-  const hybridElements = useAppState((state) => state.currentTask.hybridElements);
-  const coverageMetrics = useAppState((state) => state.currentTask.coverageMetrics);
 
   // Memoize only state values (not action functions) to prevent re-renders
   // Action functions should be stable and don't need to be in dependencies
@@ -57,19 +53,13 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
       taskHistory,
       taskStatus,
       instructions,
-      accessibilityTree,
       accessibilityElements,
-      hybridElements,
-      coverageMetrics,
     }),
     [
       taskHistory,
       taskStatus,
       instructions,
-      accessibilityTree,
       accessibilityElements,
-      hybridElements,
-      coverageMetrics,
     ]
   );
 
@@ -158,6 +148,15 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
       {/* Scrollable Content Area */}
       <Box flex="1" overflowY="auto" overflowX="hidden" minW="0" px={4} py={3} bg={contentBg}>
         <VStack spacing={4} align="stretch" minW="0">
+          {/* Plan View (Manus Orchestrator) */}
+          <PlanView />
+
+          {/* Verification View (Manus Orchestrator) */}
+          <VerificationView />
+
+          {/* Correction View (Manus Orchestrator) */}
+          <CorrectionView />
+
           {/* Status Banner */}
           {hasOrgKnowledge === false && (
             <Box minW="0" mb={2}>
@@ -198,14 +197,7 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
             </Box>
           )}
 
-          {/* Accessibility Tree Section (Task 4) */}
-          {state.accessibilityTree && (
-            <Box minW="0">
-              <AccessibilityTreeView tree={state.accessibilityTree} />
-            </Box>
-          )}
-
-          {/* Accessibility Elements Info (Task 5) */}
+          {/* Accessibility Elements Info (Task 5) - User-facing indicator only */}
           {state.accessibilityElements && state.accessibilityElements.length > 0 && (
             <Box
               p={3}
@@ -228,20 +220,7 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
             </Box>
           )}
 
-          {/* Coverage Metrics View (Task 8) */}
-          {state.coverageMetrics && (
-            <Box minW="0">
-              <CoverageMetricsView metrics={state.coverageMetrics} />
-            </Box>
-          )}
-
-          {/* Hybrid Elements View (Task 7) */}
-          {state.hybridElements && state.hybridElements.length > 0 && (
-            <Box minW="0">
-              <HybridElementView hybridElements={state.hybridElements} />
-            </Box>
-          )}
-
+          {/* Task History - User-facing view only */}
           <Box minW="0">
             <TaskHistory />
           </Box>
@@ -274,7 +253,7 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
               autoFocus
               placeholder="What would you like me to do on this page?"
               value={instructions || ''}
-              disabled={isRunning}
+              isDisabled={isRunning}
               onChange={(e) => setInstructions(e.target.value)}
               onKeyDown={onKeyDown}
               bg={inputBg}
@@ -303,7 +282,6 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
             />
             
             <Flex justify="flex-end" gap={2} minW="0" align="center">
-              {debugMode && <TaskStatus />}
               {isRunning ? (
                 <Button
                   leftIcon={<Icon as={BsStopFill} />}
@@ -340,6 +318,9 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
           </VStack>
         </Box>
       </Box>
+
+      {/* Debug Panel - Only visible when developer mode is enabled */}
+      <DebugPanel />
     </Flex>
   );
 };

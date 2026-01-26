@@ -166,7 +166,7 @@ const AccessibilityTreeView: React.FC<AccessibilityTreeViewProps> = ({ tree }) =
     <Box p={4} borderWidth={1} borderRadius="md" bg={containerBg} borderColor={borderColor} maxH="600px" overflowY="auto">
       <VStack align="stretch" spacing={4}>
         <HStack>
-          <Heading size="sm" color={headingColor}>Accessibility Tree</Heading>
+          <Heading size="sm" color={headingColor}>Page Structure</Heading>
           <Spacer />
           <Badge colorScheme="green" fontSize="xs">
             {tree.nodes.length} nodes

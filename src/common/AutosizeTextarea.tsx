@@ -2,7 +2,13 @@ import { Textarea, TextareaProps } from '@chakra-ui/react';
 import ResizeTextarea from 'react-textarea-autosize';
 import React from 'react';
 
-const AutosizeTextarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
+// Extend TextareaProps to include react-textarea-autosize props
+type AutosizeTextareaProps = TextareaProps & {
+  minRows?: number;
+  maxRows?: number;
+};
+
+const AutosizeTextarea = React.forwardRef<HTMLTextAreaElement, AutosizeTextareaProps>(
   (props, ref) => {
     return (
       <Textarea

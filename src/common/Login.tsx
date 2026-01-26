@@ -32,7 +32,13 @@ export const Login: React.FC = () => {
   
   const setUser = useAppState((state) => state.settings.actions.setUser);
   const setTenant = useAppState((state) => state.settings.actions.setTenant);
+  
+  // Dark mode color values - defined at component top level
   const bgColor = useColorModeValue('white', 'gray.900');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const labelColor = useColorModeValue('gray.700', 'gray.300');
+  const errorBg = useColorModeValue('red.50', 'red.900/30');
+  const errorText = useColorModeValue('red.800', 'red.300');
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -72,19 +78,25 @@ export const Login: React.FC = () => {
   return (
     <Box p={4} bg={bgColor} minH="100%">
       <VStack spacing={4} as="form" onSubmit={handleLogin}>
-        <Text fontSize="lg" fontWeight="bold">
+        <Text fontSize="lg" fontWeight="bold" color={textColor}>
           Sign in to Spadeworks Copilot AI
         </Text>
         
         {error && (
-          <Alert status="error">
+          <Alert
+            status="error"
+            bg={errorBg}
+            _dark={{ bg: 'red.900/30' }}
+          >
             <AlertIcon />
-            {error}
+            <Text color={errorText} _dark={{ color: 'red.300' }}>
+              {error}
+            </Text>
           </Alert>
         )}
         
         <FormControl isRequired>
-          <FormLabel>Email</FormLabel>
+          <FormLabel color={labelColor}>Email</FormLabel>
           <Input
             type="email"
             value={email}
@@ -96,7 +108,7 @@ export const Login: React.FC = () => {
         </FormControl>
         
         <FormControl isRequired>
-          <FormLabel>Password</FormLabel>
+          <FormLabel color={labelColor}>Password</FormLabel>
           <Input
             type="password"
             value={password}
