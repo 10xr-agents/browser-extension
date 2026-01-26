@@ -24,7 +24,6 @@
     "@emotion/react": "^11.13.5",
     "@emotion/styled": "^11.13.5",
     "@mozilla/readability": "^0.5.0",
-    "dotenv-webpack": "^8.1.0",
     "framer-motion": "^11.11.17",
     "immer": "^10.1.1",
     "lodash": "^4.17.21",
@@ -85,7 +84,7 @@
     "terser-webpack-plugin": "^5.3.11",
     "ts-loader": "^9.5.1",
     "typescript": "^5.7.2",
-    "webpack": "^5.97.1",
+    "webpack": "^5.103.0",
     "webpack-cli": "^6.0.1",
     "webpack-dev-server": "^5.1.0"
   }

@@ -1,14 +1,15 @@
 # Server-Side Agent Architecture
 
-**Document Version:** 1.6  
-**Date:** January 25, 2026  
+**Document Version:** 1.7  
+**Date:** January 26, 2026  
 **Status:** Technical Specification  
+**Changelog (1.7):** User Preferences API added to Summary (§9): `GET/POST /api/v1/user/preferences` for extension settings. See `THIN_CLIENT_ROADMAP_SERVER.md` §5 for implementation details.  
 **Changelog (1.6):** Task 3 complete: `POST /api/agent/interact` implemented (`app/api/agent/interact/route.ts`); `tasks` and `task_actions` Mongoose models; shared RAG helper (`getRAGChunks()`); LLM integration (prompt builder, client, parser); §4.3 updated with implementation details; §8 Implementation Checklist interact items marked complete.  
 **Changelog (1.5):** Task 2 complete: `GET /api/knowledge/resolve` implemented (`app/api/knowledge/resolve/route.ts`); §5.3 updated with implementation details; §8 Implementation Checklist resolve items marked complete.  
 **Changelog (1.4):** §1.4 Knowledge types & `allowed_domains` as filter (not assert); `hasOrgKnowledge` on interact/resolve; no 403 `DOMAIN_NOT_ALLOWED`; public-only RAG path; extension “no knowledge for this website” dialog.  
 **Target:** Next.js Intelligence Layer (Thin Client backend)
 
-**Sync:** This document is the **specification**. Implementation details (MongoDB, Mongoose, Better Auth, Next.js) are in `THIN_SERVER_ROADMAP.md`. Keep both in sync; on conflict, prefer ROADMAP + enriched thread (auth adapters, DB stack, resolve = internal/debugging).
+**Sync:** This document is the **specification**. Implementation details (MongoDB, Mongoose, Better Auth, Next.js) are in `THIN_CLIENT_ROADMAP_SERVER.md`. Keep both in sync; on conflict, prefer ROADMAP + enriched thread (auth adapters, DB stack, resolve = internal/debugging).
 
 ---
 
@@ -66,9 +67,9 @@ lib/
 
 ### 1.3 Database Stack & Tenant (Sync with ROADMAP)
 
-- **Database:** **MongoDB** only. **Prisma** (Better Auth) for auth; **Mongoose** for app data. **No SQL migrations.** See `THIN_SERVER_ROADMAP.md` §1.4 and `ENTERPRISE_PLATFORM_SPECIFICATION.md` §1 (Multi-Tenant Architecture & Security).
+- **Database:** **MongoDB** only. **Prisma** (Better Auth) for auth; **Mongoose** for app data. **No SQL migrations.** See `THIN_CLIENT_ROADMAP_SERVER.md` §1.4 and `ARCHITECTURE.md`.
 - **Tenant:** In normal mode, tenant = **user** (`userId`). In organization mode, tenant = **organization** (`organizationId`). No separate `tenants` table. Use `getTenantState` / `getActiveOrganizationId`.
-- **Auth:** Reuse Better Auth (User, Session, Organization). Add **Mongoose** model `allowed_domains` for domain **filter** (when to use org-specific RAG). **Tasks** and **task_actions** are Mongoose models (`THIN_SERVER_ROADMAP.md` §4.1).
+- **Auth:** Reuse Better Auth (User, Session, Organization). Add **Mongoose** model `allowed_domains` for domain **filter** (when to use org-specific RAG). **Tasks** and **task_actions** are Mongoose models (`THIN_CLIENT_ROADMAP_SERVER.md` §4.1).
 
 ### 1.4 Knowledge Types & `allowed_domains` as Filter (Not Assert)
 
@@ -120,7 +121,7 @@ Signup is **invite-based** and handled outside the extension. The extension only
 
 ### 2.4 Implementation Notes
 
-- **Auth implementation:** Use **Better Auth** (Bearer plugin, `trustedOrigins` for extension) + **`/api/v1/auth/*` adapters** that wrap it and return `{ accessToken, expiresAt, user, tenantId, tenantName }` in the login body. See `THIN_SERVER_ROADMAP.md` §2.4 for Better Auth vs Next.js.
+- **Auth implementation:** Use **Better Auth** (Bearer plugin, `trustedOrigins` for extension) + **`/api/v1/auth/*` adapters** that wrap it and return `{ accessToken, expiresAt, user, tenantId, tenantName }` in the login body. See `THIN_CLIENT_ROADMAP_SERVER.md` §2.4 for Better Auth vs Next.js.
 - **Shared helper:** `getSessionFromToken(Authorization header) → { userId, tenantId } | null`. Implement via `auth.api.getSession({ headers })` when Bearer is present. Use in all protected routes.
 - Extension stores `accessToken` in `chrome.storage.local`; sends Bearer on all API calls; `credentials: "omit"`.
 - **CORS:** Allow extension origin (`chrome-extension://<id>`) for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, `/api/knowledge/*` (including preflight `OPTIONS`).
@@ -240,7 +241,7 @@ export type NextActionResponse = z.infer<typeof nextActionResponseSchema>;
    - **Max steps:** Enforce limit (50); return **400** if exceeded.
    - Return `NextActionResponse` with CORS headers.
 
-**See:** `THIN_SERVER_ROADMAP.md` §4.2 for detailed contract; `lib/agent/` for prompt builder, LLM client, schemas.
+**See:** `THIN_CLIENT_ROADMAP_SERVER.md` §4.2 for detailed contract; `lib/agent/` for prompt builder, LLM client, schemas.
 
 ### 4.4 Action History (Server-Side)
 
@@ -288,7 +289,7 @@ export type NextActionResponse = z.infer<typeof nextActionResponseSchema>;
 
 - Returns **knowledge context** (chunks and citations) for **internal use and debugging only** (no inference, no LLM).
 - Validates **tenant**; uses **`allowed_domains` as filter** (§1.4) to decide org-specific vs public-only. **Org-specific:** **proxy** to the **browser automation / knowledge extraction service** (no duplicate storage or RAG in Next.js). **Public-only:** no extraction call; return `hasOrgKnowledge: false`, empty context. Returns **`ResolveKnowledgeResponse`** with `hasOrgKnowledge`.
-- **Not** for extension overlay, side panel, or tooltips shown to end users. Use resolve to inspect what knowledge returns for a given `url`/`query` (e.g. debugging, tooling, internal dashboards). Extraction service contract → **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`**; proxy details → `THIN_SERVER_ROADMAP.md` §3.1, §3.2.
+- **Not** for extension overlay, side panel, or tooltips shown to end users. Use resolve to inspect what knowledge returns for a given `url`/`query` (e.g. debugging, tooling, internal dashboards). Extraction service contract → **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`**; proxy details → `THIN_CLIENT_ROADMAP_SERVER.md` §3.1, §3.2.
 
 ### 5.2 Contract
 
@@ -362,7 +363,7 @@ export type ResolveKnowledgeResponse = z.infer<typeof resolveKnowledgeResponseSc
    - Return `{ allowed: true, domain, hasOrgKnowledge, context, citations? }` with CORS headers.
    - Handle errors: proxy/extraction errors → **500** with Sentry; outer catch → **500**; all responses include CORS.
 
-**See:** `THIN_SERVER_ROADMAP.md` §3.2 for detailed contract; `lib/knowledge-extraction/resolve-client.ts` for extraction service client.
+**See:** `THIN_CLIENT_ROADMAP_SERVER.md` §3.2 for detailed contract; `lib/knowledge-extraction/resolve-client.ts` for extraction service client.
 
 ### 5.4 Tenant ID and Active Domain
 
@@ -387,7 +388,7 @@ export type ResolveKnowledgeResponse = z.infer<typeof resolveKnowledgeResponseSc
 | **`GET /api/knowledge/resolve`** | Internal / debugging | `context`, `citations`, `hasOrgKnowledge` — raw chunks | **Internal use and debugging only.** Inspect what RAG returns for a URL/query; **not** for overlay or end-user display. |
 
 - **Interact:** Extension sends `url`, `query`, `dom`, `taskId?`. Backend uses **`allowed_domains` as filter** (§1.4); runs RAG (org-specific or public-only), injects knowledge **into the LLM prompt**, calls LLM, returns **`NextActionResponse`** with `hasOrgKnowledge`. The extension **never** receives raw chunks or citations — only the next action. When `hasOrgKnowledge === false`, extension shows dialog: “No knowledge for this website — all suggestions are from publicly available information.”
-- **Resolve:** Same filter + RAG logic, **no LLM**. Returns **`ResolveKnowledgeResponse`** (`hasOrgKnowledge`, `context`, `citations`). Used for **internal tooling and debugging** only. See `THIN_SERVER_ROADMAP.md` §1.5, §1.6.
+- **Resolve:** Same filter + RAG logic, **no LLM**. Returns **`ResolveKnowledgeResponse`** (`hasOrgKnowledge`, `context`, `citations`). Used for **internal tooling and debugging** only. See `THIN_CLIENT_ROADMAP_SERVER.md` §1.5, §1.6.
 
 ---
 
@@ -399,7 +400,7 @@ export type ResolveKnowledgeResponse = z.infer<typeof resolveKnowledgeResponseSc
 | **Active Domain** | Request `url` | **Filter** (§1.4): when to use org-specific vs public-only RAG. No 403. |
 | **Task ID** | Server-created | Keys action history. All history rows scoped by `tenant_id` + `task_id`. |
 
-RAG and action history MUST use **Tenant ID** and **Active Domain** as above to ensure strict isolation and correct context for each request. Persistence uses **Mongoose** (app) and **Prisma** (auth only); see `THIN_SERVER_ROADMAP.md` §1.4, §4.1.
+RAG and action history MUST use **Tenant ID** and **Active Domain** as above to ensure strict isolation and correct context for each request. Persistence uses **Mongoose** (app) and **Prisma** (auth only); see `THIN_CLIENT_ROADMAP_SERVER.md` §1.4, §4.1.
 
 ---
 
@@ -429,10 +430,10 @@ RAG and action history MUST use **Tenant ID** and **Active Domain** as above to 
 
 ## 8. Implementation Checklist
 
-- [ ] **Auth:** Better Auth (Bearer plugin, `trustedOrigins`) + **`/api/v1/auth/*` adapters** (login, session, logout). Implement **`getSessionFromToken`** via `auth.api.getSession({ headers })`; use in all protected routes. See `THIN_SERVER_ROADMAP.md` §2.4.
+- [ ] **Auth:** Better Auth (Bearer plugin, `trustedOrigins`) + **`/api/v1/auth/*` adapters** (login, session, logout). Implement **`getSessionFromToken`** via `auth.api.getSession({ headers })`; use in all protected routes. See `THIN_CLIENT_ROADMAP_SERVER.md` §2.4.
 - [ ] **Persistence:** **Mongoose** models `allowed_domains`, `tasks`, `task_actions`. No new auth schemas; reuse Better Auth. No SQL migrations. See ROADMAP §2.1, §4.1.
 - [x] Implement `POST /api/agent/interact`: validate body; **`allowed_domains` as filter** (§1.4); task create/load; RAG (org or public); prompt build; LLM call; history append; return `NextActionResponse` with `hasOrgKnowledge`. Knowledge injected **into LLM prompt only**; extension never receives chunks/citations. **Implementation:** `app/api/agent/interact/route.ts` (Task 3 complete). Uses shared `getRAGChunks()` helper, `buildActionPrompt()`, `callActionLLM()`, `parseActionResponse()`, `validateActionFormat()`.
-- [x] Implement `GET /api/knowledge/resolve`: validate query params; **`allowed_domains` as filter** (§1.4); **proxy** to extraction service (org) or public-only (no call); return `ResolveKnowledgeResponse` with `hasOrgKnowledge`. **Internal use and debugging only** — not for extension overlay. Extraction service schema → **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`**; proxy details → `THIN_SERVER_ROADMAP.md` §3.1, §3.2. **Implementation:** `app/api/knowledge/resolve/route.ts` (Task 2 complete).
+- [x] Implement `GET /api/knowledge/resolve`: validate query params; **`allowed_domains` as filter** (§1.4); **proxy** to extraction service (org) or public-only (no call); return `ResolveKnowledgeResponse` with `hasOrgKnowledge`. **Internal use and debugging only** — not for extension overlay. Extraction service schema → **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`**; proxy details → `THIN_CLIENT_ROADMAP_SERVER.md` §3.1, §3.2. **Implementation:** `app/api/knowledge/resolve/route.ts` (Task 2 complete).
 - [x] Resolve **proxies** to extraction service; no duplicate RAG/storage in Next.js. Org-specific calls use **Tenant ID** and **Active Domain**; no cross-tenant or cross-domain leakage.
 - [ ] Add rate limiting, logging, and error handling for all endpoints.
 - [ ] **CORS:** Allow extension origin (`chrome-extension://<id>`) for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, `/api/knowledge/*` (including preflight `OPTIONS`).
@@ -446,6 +447,7 @@ RAG and action history MUST use **Tenant ID** and **Active Domain** as above to 
 | `/api/v1/auth/login` | POST | None | Login (invite-based); returns `accessToken`. |
 | `/api/v1/auth/logout` | POST | Bearer | Invalidate token. |
 | `/api/v1/auth/session` | GET | Bearer | Check session; return user/tenant. |
+| `/api/v1/user/preferences` | GET/POST | Bearer | User preferences API: fetch/save preferences (theme, etc.) per tenant. For extension settings page. |
 | `/api/agent/interact` | POST | Bearer | Action loop: receive dom/query/url/taskId; RAG + LLM; server-held history; return `NextActionResponse`. Extension gets **only** thought/action — not chunks/citations. |
 | `/api/knowledge/resolve` | GET | Bearer | **Proxy** to extraction service (org) or public-only; return `ResolveKnowledgeResponse`. **Internal use and debugging only** — not for extension overlay. |
 
@@ -460,7 +462,8 @@ RAG and action history MUST use **Tenant ID** and **Active Domain** as above to 
 - **Startup:** Call `GET /api/v1/auth/session`; if 401, show login UI and block task run.
 - **Agent interact:** Call `POST /api/agent/interact` with `{ url, query, dom, taskId? }`; execute returned `NextActionResponse` (click/setValue) or handle finish/fail. Send `taskId` on subsequent requests. During task execution, the extension **never** receives raw knowledge (chunks/citations) — only `thought` and `action`.
 - **Knowledge resolve:** `GET /api/knowledge/resolve` is for **internal use and debugging only**. The extension does **not** use it for overlay, tooltips, or end-user display. Use resolve only in tooling, dashboards, or debugging flows (e.g. “what RAG returns for this URL”).
-- **CORS:** Backend must allow `chrome-extension://<extension-id>` for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, and `/api/knowledge/*`. See `THIN_SERVER_ROADMAP.md` §1.3, §2.4.
+- **User preferences:** Call `GET /api/v1/user/preferences` to fetch preferences; call `POST /api/v1/user/preferences` to save preferences (theme, etc.). Preferences are scoped per tenant. See `THIN_CLIENT_ROADMAP_SERVER.md` §5 for implementation details.
+- **CORS:** Backend must allow `chrome-extension://<extension-id>` for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, and `/api/knowledge/*`. See `THIN_CLIENT_ROADMAP_SERVER.md` §1.3, §2.4.
 
 ---
 
@@ -468,8 +471,8 @@ RAG and action history MUST use **Tenant ID** and **Active Domain** as above to 
 
 | Document | Purpose |
 |----------|---------|
-| **`THIN_SERVER_ROADMAP.md`** | Implementation roadmap: MongoDB, Mongoose, Better Auth, Next.js, Tasks 1–3, auth adapters (§2.4), DB stack (§1.4), interact vs resolve (§1.5). **Keep in sync with this spec.** |
-| **`ENTERPRISE_PLATFORM_SPECIFICATION.md`** §1 | Multi-tenant architecture, hybrid DB (Prisma + Mongoose), tenant model (user / organization), multi-tenancy. |
+| **`THIN_CLIENT_ROADMAP_SERVER.md`** | Implementation roadmap: MongoDB, Mongoose, Better Auth, Next.js, Tasks 1–4 (auth, resolve, interact, preferences), auth adapters (§2.4), DB stack (§1.4), interact vs resolve (§1.5), user preferences API (§5). **Keep in sync with this spec.** |
+| **`ARCHITECTURE.md`** | Hybrid DB (Prisma + Mongoose), tenant model (user / organization), multi-tenancy. |
 | **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`** | **Browser automation / extraction service** `GET /api/knowledge/resolve` request & response schema. Used when Next.js proxies resolve (§5); referenced by Task 2 (§3.1, §3.2) and `lib/knowledge-extraction/resolve-client.ts`. |
 | **Better Auth** | [Browser Extension Guide](https://www.better-auth.com/docs/guides/browser-extension-guide), [Bearer Plugin](https://beta.better-auth.com/docs/plugins/bearer), [trustedOrigins](https://www.better-auth.com/docs/reference/options). |
 | **Next.js** | [Middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware) (CORS), [Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers). |

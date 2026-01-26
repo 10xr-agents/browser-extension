@@ -16,11 +16,15 @@ export type SettingsSlice = {
   tenantId: string | null;
   tenantName: string | null;
   
+  // Theme preference
+  theme: 'light' | 'dark' | 'system';
+  
   actions: {
     update: (values: Partial<SettingsSlice>) => void;
     setUser: (user: SettingsSlice['user']) => void;
     setTenant: (tenantId: string, tenantName: string) => void;
     clearAuth: () => void;
+    setTheme: (theme: 'light' | 'dark' | 'system') => void;
   };
 };
 
@@ -28,6 +32,7 @@ export const createSettingsSlice: MyStateCreator<SettingsSlice> = (set) => ({
   user: null,
   tenantId: null,
   tenantName: null,
+  theme: 'system',
   
   actions: {
     update: (values) => {
@@ -51,6 +56,11 @@ export const createSettingsSlice: MyStateCreator<SettingsSlice> = (set) => ({
         state.settings.user = null;
         state.settings.tenantId = null;
         state.settings.tenantName = null;
+      });
+    },
+    setTheme: (theme) => {
+      set((state) => {
+        state.settings.theme = theme;
       });
     },
   },

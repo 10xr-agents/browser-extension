@@ -1,11 +1,11 @@
 var webpack = require('webpack'),
   path = require('path'),
+  fs = require('fs'),
   fileSystem = require('fs-extra'),
   env = require('./utils/env'),
   CopyWebpackPlugin = require('copy-webpack-plugin'),
   HtmlWebpackPlugin = require('html-webpack-plugin'),
-  TerserPlugin = require('terser-webpack-plugin'),
-  Dotenv = require('dotenv-webpack');
+  TerserPlugin = require('terser-webpack-plugin');
 var { CleanWebpackPlugin } = require('clean-webpack-plugin');
 
 const ASSET_PATH = process.env.ASSET_PATH || '/';
@@ -32,8 +32,49 @@ if (fileSystem.existsSync(secretsPath)) {
   alias['secrets'] = secretsPath;
 }
 
+// Load environment variables BEFORE webpack config evaluation
+// This ensures DefinePlugin can access them
+// Webpack's built-in dotenv loads variables, but DefinePlugin needs them available during config evaluation
+
+function loadEnvFile(filePath) {
+  if (fs.existsSync(filePath)) {
+    const content = fs.readFileSync(filePath, 'utf8');
+    content.split('\n').forEach((line) => {
+      const match = line.match(/^([^#=]+)=(.*)$/);
+      if (match) {
+        const key = match[1].trim();
+        const value = match[2].trim().replace(/^["']|["']$/g, '');
+        if (!process.env[key]) {
+          process.env[key] = value;
+        }
+      }
+    });
+  }
+}
+
+// Load .env files in priority order (later files override earlier ones)
+const mode = process.env.NODE_ENV || 'development';
+loadEnvFile(path.join(__dirname, '.env'));
+loadEnvFile(path.join(__dirname, '.env.local'));
+loadEnvFile(path.join(__dirname, `.env.${mode}`));
+loadEnvFile(path.join(__dirname, `.env.${mode}.local`));
+
 var options = {
-  mode: process.env.NODE_ENV || 'development',
+  mode: mode,
+  // Use Webpack 5.103.0+ built-in dotenv feature
+  // This eliminates conflicts with DefinePlugin and provides better security
+  // Files load in order, with later files overriding earlier ones
+  // Priority: .env < .env.local < .env.[mode] < .env.[mode].local
+  dotenv: {
+    prefix: 'WEBPACK_', // Only expose variables with WEBPACK_ prefix (security best practice)
+    // dir defaults to project root (current directory), so we don't need to specify it
+    template: [
+      '.env',              // Base environment variables
+      '.env.local',        // Local overrides (gitignored, highest priority for local)
+      '.env.[mode]',       // Mode-specific (e.g., .env.development, .env.production)
+      '.env.[mode].local', // Mode-specific local overrides (highest priority)
+    ],
+  },
   entry: {
     newtab: path.join(__dirname, 'src', 'pages', 'Newtab', 'index.jsx'),
     options: path.join(__dirname, 'src', 'pages', 'Options', 'index.jsx'),
@@ -108,19 +149,38 @@ var options = {
       .map((extension) => '.' + extension)
       .concat(['.js', '.jsx', '.ts', '.tsx', '.css']),
   },
+  // Configure node polyfills - process is provided by DefinePlugin, not as a global
+  node: {
+    global: false, // Don't provide global polyfill
+    __filename: false,
+    __dirname: false,
+  },
   plugins: [
     new CleanWebpackPlugin({ verbose: false }),
     new webpack.ProgressPlugin(),
     // expose and write the allowed env vars on the compiled bundle
     new webpack.EnvironmentPlugin(['NODE_ENV']),
-    // Inject API_BASE at build time for Thin Client architecture
+    // Inject environment variables into bundle
+    // Built-in dotenv (above) loads variables from .env files into process.env during build
+    // DefinePlugin replaces process.env.* references with actual string values in the bundle
+    // Note: Built-in dotenv with prefix only exposes WEBPACK_* variables automatically
+    // We use DefinePlugin to explicitly inject all variables we need
     new webpack.DefinePlugin({
+      // API_BASE - read from WEBPACK_API_BASE (loaded by built-in dotenv) or fallback
+      // These will be replaced with actual string values at build time
+      'process.env.WEBPACK_API_BASE': JSON.stringify(
+        process.env.WEBPACK_API_BASE || process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
+      ),
       'process.env.NEXT_PUBLIC_API_BASE': JSON.stringify(
-        process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
+        process.env.WEBPACK_API_BASE || process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
       ),
       'process.env.API_BASE': JSON.stringify(
-        process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
+        process.env.WEBPACK_API_BASE || process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
       ),
+      // DEBUG_MODE - read from .env files (loaded by built-in dotenv, even without prefix)
+      // Built-in dotenv loads ALL variables into process.env during build, but only exposes prefixed ones
+      // So we can read DEBUG_MODE here even though it doesn't have WEBPACK_ prefix
+      'process.env.DEBUG_MODE': JSON.stringify(process.env.DEBUG_MODE || 'false'),
     }),
     new CopyWebpackPlugin({
       patterns: [
@@ -154,16 +214,12 @@ var options = {
       patterns: [
         {
           from: 'src/assets/img/icon-128.png',
-          to: path.join(__dirname, 'build'),
+          to: path.join(__dirname, 'build', 'icon-128.png'),
           force: true,
         },
-      ],
-    }),
-    new CopyWebpackPlugin({
-      patterns: [
         {
           from: 'src/assets/img/icon-34.png',
-          to: path.join(__dirname, 'build'),
+          to: path.join(__dirname, 'build', 'icon-34.png'),
           force: true,
         },
       ],
@@ -198,7 +254,6 @@ var options = {
       chunks: ['panel'],
       cache: false,
     }),
-    new Dotenv({ path: path.resolve(__dirname, '.env') }),
   ],
   infrastructureLogging: {
     level: 'info',

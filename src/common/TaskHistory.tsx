@@ -22,8 +22,9 @@ import {
   ColorProps,
   BackgroundProps,
   Text,
+  useColorModeValue,
 } from '@chakra-ui/react';
-import React from 'react';
+import React, { useMemo } from 'react';
 import { DisplayHistoryEntry } from '../state/currentTask';
 import { useAppState } from '../state/store';
 import CopyButton from './CopyButton';
@@ -37,38 +38,51 @@ const CollapsibleComponent = (props: {
   title: string;
   subtitle?: string;
   text: string;
-}) => (
-  <AccordionItem backgroundColor="white">
-    <Heading as="h4" size="xs">
-      <AccordionButton>
-        <HStack flex="1">
-          <Box>{props.title}</Box>
-          <CopyButton text={props.text} /> <Spacer />
-          {props.subtitle && (
-            <Box as="span" fontSize="xs" color="gray.500" mr={4}>
-              {props.subtitle}
-            </Box>
-          )}
-        </HStack>
-        <AccordionIcon />
-      </AccordionButton>
-    </Heading>
-    <AccordionPanel>
-      {props.text.split('\n').map((line, index) => (
-        <Box key={index} fontSize="xs">
-          {line}
-          <br />
-        </Box>
-      ))}
-    </AccordionPanel>
-  </AccordionItem>
-);
+}) => {
+  const bgColor = useColorModeValue('white', 'gray.800');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const subtitleColor = useColorModeValue('gray.500', 'gray.400');
+  
+  return (
+    <AccordionItem bg={bgColor} _dark={{ bg: 'gray.800' }}>
+      <Heading as="h4" size="xs">
+        <AccordionButton>
+          <HStack flex="1">
+            <Box color={textColor}>{props.title}</Box>
+            <CopyButton text={props.text} /> <Spacer />
+            {props.subtitle && (
+              <Box as="span" fontSize="xs" color={subtitleColor} mr={4}>
+                {props.subtitle}
+              </Box>
+            )}
+          </HStack>
+          <AccordionIcon />
+        </AccordionButton>
+      </Heading>
+      <AccordionPanel>
+        {props.text.split('\n').map((line, index) => (
+          <Box key={index} fontSize="xs" color={textColor}>
+            {line}
+            <br />
+          </Box>
+        ))}
+      </AccordionPanel>
+    </AccordionItem>
+  );
+};
 
 const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
   // Get title from thought
   const itemTitle = entry.thought || 'No thought provided';
 
-  // Determine colors based on action type
+  // Use hooks at component level, not conditionally
+  const errorTextColor = useColorModeValue('red.800', 'red.300');
+  const errorBgColor = useColorModeValue('red.100', 'red.900/30');
+  const successTextColor = useColorModeValue('green.800', 'green.300');
+  const successBgColor = useColorModeValue('green.100', 'green.900/30');
+  const panelBg = useColorModeValue('gray.100', 'gray.800');
+
+  // Determine colors based on action type with dark mode support
   const colors: {
     text: ColorProps['textColor'];
     bg: BackgroundProps['bgColor'];
@@ -78,14 +92,14 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
   };
 
   if ('error' in entry.parsedAction) {
-    colors.text = 'red.800';
-    colors.bg = 'red.100';
+    colors.text = errorTextColor;
+    colors.bg = errorBgColor;
   } else if (entry.parsedAction.parsedAction.name === 'fail') {
-    colors.text = 'red.800';
-    colors.bg = 'red.100';
+    colors.text = errorTextColor;
+    colors.bg = errorBgColor;
   } else if (entry.parsedAction.parsedAction.name === 'finish') {
-    colors.text = 'green.800';
-    colors.bg = 'green.100';
+    colors.text = successTextColor;
+    colors.bg = successBgColor;
   }
 
   // Format usage tokens
@@ -106,7 +120,10 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
           <AccordionIcon />
         </AccordionButton>
       </Heading>
-      <AccordionPanel backgroundColor="gray.100" p="2">
+      <AccordionPanel 
+        bg={panelBg} 
+        p="2"
+      >
         <Accordion allowMultiple allowToggle w="full" defaultIndex={1}>
           <CollapsibleComponent
             title="Thought"
@@ -134,21 +151,23 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
 };
 
 export default function TaskHistory() {
-  const { taskHistory, taskStatus } = useAppState((state) => ({
-    taskStatus: state.currentTask.status,
-    taskHistory: state.currentTask.displayHistory, // Updated to use displayHistory
-  }));
+  // Split selectors to avoid creating new objects on every render (prevents infinite loops)
+  const taskHistory = useAppState((state) => state.currentTask.displayHistory);
+  const taskStatus = useAppState((state) => state.currentTask.status);
+  
+  const headingColor = useColorModeValue('gray.900', 'gray.100');
+  const subtitleColor = useColorModeValue('gray.500', 'gray.400');
 
   if (taskHistory.length === 0 && taskStatus !== 'running') return null;
 
   return (
     <VStack mt={8}>
       <HStack w="full">
-        <Heading as="h3" size="md">
+        <Heading as="h3" size="md" color={headingColor}>
           Action History
         </Heading>
         <Spacer />
-        <Text fontSize="xs" color="gray.500">
+        <Text fontSize="xs" color={subtitleColor}>
           Display-only history. Server owns canonical history.
         </Text>
         <CopyButton text={JSON.stringify(taskHistory, null, 2)} />

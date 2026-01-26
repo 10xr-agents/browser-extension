@@ -9,24 +9,84 @@
  * Reference: THIN_CLIENT_ROADMAP.md §2.1 (Task 1: Authentication & API Client)
  */
 
-import { Box, ChakraProvider, Heading, HStack, Text, Spinner } from '@chakra-ui/react';
+import { 
+  Box, 
+  HStack, 
+  Text, 
+  Spinner,
+  Flex,
+  useColorModeValue,
+  Alert,
+  AlertIcon,
+} from '@chakra-ui/react';
+import { InfoIcon } from '@chakra-ui/icons';
 import React, { useEffect, useState } from 'react';
 import { apiClient } from '../api/client';
 import { useAppState } from '../state/store';
 import Login from './Login';
 import TaskUI from './TaskUI';
 import OptionsDropdown from './OptionsDropdown';
+import SettingsView from './SettingsView';
+import { ThemeProvider } from './ThemeProvider';
+import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
 import logo from '../assets/img/icon-128.png';
+
+type Route = '/' | '/settings';
 
 const App = () => {
   const [checkingSession, setCheckingSession] = useState(true);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [hasOrgKnowledge, setHasOrgKnowledge] = useState<boolean | null>(null);
+  const [currentRoute, setCurrentRoute] = useState<Route>('/');
   
   const setUser = useAppState((state) => state.settings.actions.setUser);
   const setTenant = useAppState((state) => state.settings.actions.setTenant);
   const clearAuth = useAppState((state) => state.settings.actions.clearAuth);
+  // Use user directly from store - this will trigger re-render when login updates it
   const user = useAppState((state) => state.settings.user);
-  const tenantName = useAppState((state) => state.settings.tenantName);
+  
+
+  // Check knowledge availability for current page
+  useEffect(() => {
+    if (!user) {
+      setHasOrgKnowledge(null);
+      return;
+    }
+
+    const checkKnowledge = async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {
+          const response = await apiClient.knowledgeResolve(tab.url);
+          setHasOrgKnowledge(response.hasOrgKnowledge);
+        }
+      } catch (error) {
+        // If resolve fails, assume no org knowledge
+        setHasOrgKnowledge(false);
+      }
+    };
+
+    checkKnowledge();
+
+    // Listen for tab changes
+    const handleTabUpdate = (
+      tabId: number,
+      changeInfo: chrome.tabs.TabChangeInfo,
+      tab: chrome.tabs.Tab
+    ) => {
+      if (changeInfo.status === 'complete' && tab?.url) {
+        if (tab.url.startsWith('http://') || tab.url.startsWith('https://')) {
+          checkKnowledge();
+        }
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(handleTabUpdate);
+    return () => {
+      chrome.tabs.onUpdated.removeListener(handleTabUpdate);
+    };
+  }, [user]);
+
+  const setTheme = useAppState((state) => state.settings.actions.setTheme);
 
   useEffect(() => {
     // Check session on startup
@@ -35,61 +95,118 @@ const App = () => {
         const session = await apiClient.getSession();
         setUser(session.user);
         setTenant(session.tenantId, session.tenantName);
-        setIsAuthenticated(true);
+        
+        // Load theme preferences
+        try {
+          const preferences = await apiClient.getPreferences();
+          if (preferences.preferences?.theme) {
+            setTheme(preferences.preferences.theme);
+          }
+        } catch (prefError) {
+          // Theme loading is optional, continue if it fails
+          console.debug('Could not load theme preferences:', prefError);
+        }
       } catch (error) {
         // 401 or network error - not authenticated
         clearAuth();
-        setIsAuthenticated(false);
       } finally {
         setCheckingSession(false);
       }
     };
 
     checkSession();
-  }, [setUser, setTenant, clearAuth]);
+  }, [setUser, setTenant, setTheme, clearAuth]);
+
+  const bgColor = useColorModeValue('white', 'gray.900');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
 
   if (checkingSession) {
     return (
-      <ChakraProvider>
-        <Box p="8" fontSize="lg" w="full">
-          <HStack spacing={4} justify="center" align="center" minH="200px">
+      <ThemeProvider>
+        <Flex
+          h="100vh"
+          w="100%"
+          direction="column"
+          overflow="hidden"
+          bg={bgColor}
+          align="center"
+          justify="center"
+        >
+          <HStack spacing={4}>
             <Spinner size="lg" />
-            <Text>Checking session...</Text>
+            <Text fontSize="lg" color={useColorModeValue('gray.900', 'gray.100')}>
+              Checking session...
+            </Text>
           </HStack>
-        </Box>
-      </ChakraProvider>
+        </Flex>
+      </ThemeProvider>
     );
   }
 
   return (
-    <ChakraProvider>
-      <Box p="8" fontSize="lg" w="full">
-        <HStack mb={4} alignItems="center">
-          <img
-            src={logo}
-            width={32}
-            height={32}
-            className="App-logo"
-            alt="logo"
-          />
-
-          <Heading as="h1" size="lg" flex={1}>
-            Spadeworks Copilot AI
-          </Heading>
-          {isAuthenticated && (
-            <HStack spacing={2}>
-              {tenantName && (
-                <Text fontSize="sm" color="gray.600">
-                  {tenantName}
-                </Text>
-              )}
-              <OptionsDropdown />
+    <ThemeProvider>
+      {/* Bulletproof Root Container */}
+      <Flex
+        h="100vh"
+        w="100%"
+        direction="column"
+        overflow="hidden"
+        bg={bgColor}
+      >
+        {/* Fixed Header - Never Shrinks */}
+        {user && (
+          <Box
+            as="header"
+            flex="none"
+            zIndex={10}
+            bg={bgColor}
+            borderBottomWidth="1px"
+            borderColor={borderColor}
+            px={4}
+            py={3}
+            shadow="sm"
+          >
+            <HStack spacing={3} alignItems="center" justifyContent="space-between" minW="0">
+              <HStack spacing={3} alignItems="center" minW="0" flex={1}>
+                <img
+                  src={logo}
+                  width={28}
+                  height={28}
+                  className="App-logo"
+                  alt="logo"
+                  style={{ borderRadius: '6px', flexShrink: 0 }}
+                />
+              </HStack>
+              <Box flexShrink={0}>
+                <OptionsDropdown onNavigate={setCurrentRoute} />
+              </Box>
             </HStack>
+          </Box>
+        )}
+
+        {/* Content Area - Let child components handle their own scrolling */}
+        <Box
+          flex="1"
+          overflow="hidden"
+          minW="0"
+          position="relative"
+          bg={bgColor}
+        >
+          {/* Route-based rendering */}
+          {user ? (
+            currentRoute === '/settings' ? (
+              <SettingsView onNavigate={setCurrentRoute} />
+            ) : (
+              <TaskUI hasOrgKnowledge={hasOrgKnowledge} />
+            )
+          ) : (
+            <Box px={4} py={4} bg={bgColor} minH="100%">
+              <Login />
+            </Box>
           )}
-        </HStack>
-        {isAuthenticated ? <TaskUI /> : <Login />}
-      </Box>
-    </ChakraProvider>
+        </Box>
+      </Flex>
+    </ThemeProvider>
   );
 };
 

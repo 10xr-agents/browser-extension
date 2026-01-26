@@ -74,16 +74,20 @@ You are a Senior Frontend Engineer working on Spadeworks Copilot AI, a Chrome br
 
 **3. Component Structure:**
 ```tsx
-// ✅ CORRECT - Standard component pattern
-import React from 'react';
+// ✅ CORRECT - Split selectors to prevent infinite loops
+import React, { useMemo } from 'react';
 import { useAppState } from '../state/store';
 
 const Component = () => {
-  const state = useAppState((state) => ({
-    // Select only needed state
-    value: state.settings.value,
-    action: state.settings.actions.setValue,
-  }));
+  // Split selectors - NEVER return objects from useAppState directly
+  const value = useAppState((state) => state.settings.value);
+  const setValue = useAppState((state) => state.settings.actions.setValue);
+  
+  // If you need to combine values, use useMemo
+  const combined = useMemo(
+    () => ({ value, other: someOtherValue }),
+    [value, someOtherValue]
+  );
 
   return <div>{/* Component JSX */}</div>;
 };
@@ -94,8 +98,13 @@ export default Component;
 **4. Zustand Store Pattern:**
 * Store is split into slices: `currentTask`, `ui`, `settings`
 * Each slice has its own state and actions
+* **⚠️ CRITICAL: NEVER return objects/arrays from useAppState selectors**
+  * ❌ WRONG: `useAppState((state) => ({ value: state.settings.value }))` - Causes infinite loops!
+  * ✅ CORRECT: `useAppState((state) => state.settings.value)` - Returns primitive/stable reference
+  * ✅ CORRECT: Split into multiple selectors, then use `useMemo` if combining needed
 * Use selector pattern: `useAppState((state) => state.settings.value)`
 * Actions are accessed via: `state.settings.actions.actionName`
+* **Why?** Returning new objects/arrays from selectors creates new references on every render, causing Zustand to think state changed, triggering infinite re-renders
 
 ---
 
@@ -161,6 +170,192 @@ toast({
 * Use `size="sm"` for compact buttons/inputs in extension context
 * Use Chakra's spacing scale (multiples of 4px)
 * Prefer Chakra's color schemes over custom colors
+
+### Dark Mode Support
+
+**⚠️ CRITICAL: ALL components MUST support both light and dark modes. Dark mode is a core feature and must work correctly.**
+
+**1. Color Values - Always Use `useColorModeValue`:**
+```tsx
+import { useColorModeValue } from '@chakra-ui/react';
+
+// ✅ CORRECT - All colors use useColorModeValue
+const Component = () => {
+  const bgColor = useColorModeValue('white', 'gray.900');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+  
+  return (
+    <Box bg={bgColor} color={textColor} borderColor={borderColor}>
+      <Text color={textColor}>Primary text</Text>
+      <Text color={descColor}>Secondary text</Text>
+    </Box>
+  );
+};
+
+// ❌ WRONG - Hardcoded colors that don't work in dark mode
+const Component = () => {
+  return (
+    <Box bg="white" color="gray.900">
+      <Text color="gray.600">Text</Text>
+    </Box>
+  );
+};
+```
+
+**2. Standard Dark Mode Color Mappings:**
+* **Main backgrounds:** `white` → `gray.900`
+* **Card/Container backgrounds:** `gray.50` → `gray.800`
+* **Primary text:** `gray.900` → `gray.100`
+* **Secondary text:** `gray.600` → `gray.400`
+* **Tertiary/muted text:** `gray.500` → `gray.400`
+* **Borders:** `gray.200` → `gray.700`
+* **Hover states:** `gray.100` → `gray.700`
+* **Info/Alert backgrounds:** `blue.50` → `blue.900/20`
+* **Info/Alert text:** `blue.800` → `blue.200`
+* **Error backgrounds:** `red.100` → `red.900/30`
+* **Error text:** `red.800` → `red.300`
+* **Success backgrounds:** `green.100` → `green.900/30`
+* **Success text:** `green.800` → `green.300`
+* **Warning backgrounds:** `yellow.50` → `yellow.900/30`
+* **Warning text:** `yellow.800` → `yellow.300`
+
+**3. Using `_dark` Prop for Chakra Components:**
+```tsx
+// ✅ CORRECT - Use _dark prop for component-level dark mode
+<Box
+  bg="white"
+  _dark={{ bg: 'gray.800' }}
+  borderColor="gray.200"
+  _dark={{ borderColor: 'gray.700' }}
+>
+  <Text color="gray.700" _dark={{ color: 'gray.300' }}>
+    Section Title
+  </Text>
+</Box>
+
+// ✅ CORRECT - Combining useColorModeValue with _dark for complex cases
+const cardBg = useColorModeValue('gray.50', 'gray.800');
+<Box bg={cardBg} _dark={{ bg: 'gray.800' }}>
+  {/* content */}
+</Box>
+```
+
+**4. Component-Level Dark Mode Patterns:**
+```tsx
+// ✅ CORRECT - Define all color values at component top level
+const MyComponent = () => {
+  // Define all color values using useColorModeValue
+  const containerBg = useColorModeValue('white', 'gray.900');
+  const cardBg = useColorModeValue('gray.50', 'gray.800');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const hoverBg = useColorModeValue('gray.100', 'gray.700');
+  
+  return (
+    <Box bg={containerBg}>
+      <Box bg={cardBg} borderColor={borderColor} _hover={{ bg: hoverBg }}>
+        <Text color={textColor}>Title</Text>
+        <Text color={descColor}>Description</Text>
+      </Box>
+    </Box>
+  );
+};
+
+// ❌ WRONG - Using useColorModeValue inside map/render loops
+const MyComponent = ({ items }) => {
+  return (
+    <VStack>
+      {items.map((item) => (
+        <Box bg={useColorModeValue('white', 'gray.800')}> {/* WRONG! */}
+          {item.name}
+        </Box>
+      ))}
+    </VStack>
+  );
+};
+
+// ✅ CORRECT - Define color outside map
+const MyComponent = ({ items }) => {
+  const itemBg = useColorModeValue('white', 'gray.800');
+  return (
+    <VStack>
+      {items.map((item) => (
+        <Box bg={itemBg} key={item.id}>
+          {item.name}
+        </Box>
+      ))}
+    </VStack>
+  );
+};
+```
+
+**5. Alert/Info Components:**
+```tsx
+// ✅ CORRECT - Alert components with dark mode
+<Alert
+  status="info"
+  variant="subtle"
+  bg="blue.50"
+  _dark={{ bg: 'blue.900/20' }}
+>
+  <AlertIcon />
+  <Text color="blue.800" _dark={{ color: 'blue.200' }}>
+    Message
+  </Text>
+</Alert>
+```
+
+**6. Accordion/Expandable Components:**
+```tsx
+// ✅ CORRECT - Accordion items with dark mode
+<AccordionItem bg={useColorModeValue('white', 'gray.800')}>
+  <AccordionButton
+    bg={useColorModeValue('white', 'gray.800')}
+    _hover={{ bg: useColorModeValue('gray.50', 'gray.700') }}
+  >
+    <Text color={useColorModeValue('gray.900', 'gray.100')}>
+      Title
+    </Text>
+  </AccordionButton>
+  <AccordionPanel bg={useColorModeValue('gray.100', 'gray.800')}>
+    <Text color={useColorModeValue('gray.900', 'gray.100')}>
+      Content
+    </Text>
+  </AccordionPanel>
+</AccordionItem>
+```
+
+**7. Icon Colors:**
+```tsx
+// ✅ CORRECT - Icons with dark mode support
+const iconColor = useColorModeValue('gray.500', 'gray.400');
+const hoverColor = useColorModeValue('gray.700', 'gray.300');
+
+<Icon
+  color={iconColor}
+  _hover={{ color: hoverColor }}
+/>
+```
+
+**8. Rules for Dark Mode:**
+* **NEVER** hardcode colors like `bg="white"`, `color="gray.900"`, `borderColor="gray.200"` without dark mode equivalents
+* **ALWAYS** use `useColorModeValue(lightValue, darkValue)` for all color props
+* **ALWAYS** define color values at the component top level, not inside render loops or callbacks
+* **ALWAYS** test components in both light and dark modes
+* **ALWAYS** ensure sufficient contrast ratios in both modes (WCAG AA minimum)
+* Use `_dark` prop for Chakra UI components when you need component-specific dark mode overrides
+* For complex nested components, define all color values at the root component level and pass them down as props if needed
+
+**9. Common Dark Mode Mistakes to Avoid:**
+* ❌ Hardcoding `bg="white"` without dark mode equivalent
+* ❌ Using `color="gray.500"` without considering dark mode readability
+* ❌ Defining `useColorModeValue` inside `.map()` or render loops
+* ❌ Forgetting to update borders, shadows, and hover states for dark mode
+* ❌ Using light-only color schemes that become invisible in dark mode
+* ❌ Not testing the actual rendered output in dark mode
 
 ---
 
@@ -382,6 +577,55 @@ const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 chrome.tabs.sendMessage(tabId, message);
 ```
 
+**4. Side Panel API:**
+```typescript
+// ⚠️ CRITICAL: chrome.sidePanel.open() MUST be called synchronously in the same
+// call stack as the user gesture. NEVER call it inside .then(), async/await, or callbacks.
+
+// ✅ CORRECT - Call open() directly in the click handler
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab.id) return;
+  // Call open() synchronously - no async operations before this
+  try {
+    chrome.sidePanel.open({ tabId: tab.id });
+  } catch (error) {
+    // Handle error (panel might be disabled)
+    console.error('Error opening side panel:', error);
+  }
+});
+
+// ❌ WRONG - Calling open() inside .then() breaks user gesture chain
+chrome.action.onClicked.addListener((tab) => {
+  chrome.sidePanel.getOptions({ tabId: tab.id }).then((options) => {
+    chrome.sidePanel.open({ tabId: tab.id }); // ERROR: Not in user gesture context!
+  });
+});
+
+// ✅ CORRECT - Pre-configure panel on tab activation (async is OK here)
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  chrome.sidePanel.setOptions({
+    tabId: activeInfo.tabId,
+    enabled: true,
+    path: 'popup.html',
+  }); // Async is fine - this is not a user gesture
+});
+
+// ✅ CORRECT - Use manifest default_path, then call open() synchronously
+// The manifest's side_panel.default_path handles configuration
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab.id) return;
+  // open() can be called directly if manifest has default_path
+  chrome.sidePanel.open({ tabId: tab.id });
+});
+```
+
+**Side Panel API Rules:**
+* **`chrome.sidePanel.open()`** must be called **synchronously** in the same call stack as the user gesture (e.g., `chrome.action.onClicked` listener)
+* **NEVER** call `open()` inside `.then()`, `.catch()`, `async/await`, or any callback that executes after the user gesture
+* **Pre-configure** the panel using `chrome.sidePanel.setOptions()` in `chrome.tabs.onActivated` or `chrome.tabs.onUpdated` listeners (async is OK here)
+* Use the manifest's `side_panel.default_path` to avoid needing to configure before opening
+* If `open()` fails, handle it gracefully - the panel might need configuration first
+
 ### Error Handling
 
 * Always check `chrome.runtime.lastError`:
@@ -533,11 +777,32 @@ yarn build
 
 9. **No missing Zustand selectors**: Always use selector pattern: `useAppState((state) => state.slice.value)` instead of accessing entire store.
 
-10. **No missing action validation**: All actions must be validated against `availableActions` before execution.
+10. **No object returns from Zustand selectors**: NEVER return objects/arrays from `useAppState` selectors - this causes infinite re-render loops. Split into separate selectors or use `useMemo` to combine values.
+   - ❌ WRONG: `useAppState((state) => ({ value: state.settings.value }))`
+   - ✅ CORRECT: `const value = useAppState((state) => state.settings.value)`
+   - ✅ CORRECT: Split selectors, then `useMemo(() => ({ value, other }), [value, other])` if combining needed
 
-11. **No unsafe type assertions**: Use type guards or proper type narrowing instead of `as` assertions when possible.
+11. **No missing action validation**: All actions must be validated against `availableActions` before execution.
 
-12. **No missing Chrome extension context checks**: Always verify extension context before using Chrome APIs (check if `chrome` is available).
+12. **No unsafe type assertions**: Use type guards or proper type narrowing instead of `as` assertions when possible.
+
+13. **No missing Chrome extension context checks**: Always verify extension context before using Chrome APIs (check if `chrome` is available).
+
+14. **No async calls to `chrome.sidePanel.open()`**: `chrome.sidePanel.open()` MUST be called synchronously in the same call stack as the user gesture. NEVER call it inside `.then()`, `.catch()`, `async/await`, or any callback.
+   - ❌ WRONG: `chrome.sidePanel.getOptions({ tabId }).then(() => chrome.sidePanel.open({ tabId }))`
+   - ✅ CORRECT: Call `open()` directly in the click handler, or pre-configure the panel on tab activation
+   - See §6 (Chrome API Usage - Side Panel API) for correct patterns
+
+15. **No hardcoded colors without dark mode support**: ALL color values (backgrounds, text, borders, icons) MUST use `useColorModeValue(lightValue, darkValue)` or `_dark` props. NEVER hardcode colors like `bg="white"`, `color="gray.900"`, `borderColor="gray.200"` without dark mode equivalents.
+   - ❌ WRONG: `<Box bg="white" color="gray.900">` - No dark mode support
+   - ✅ CORRECT: `const bg = useColorModeValue('white', 'gray.900'); const text = useColorModeValue('gray.900', 'gray.100'); <Box bg={bg} color={text}>`
+   - ✅ CORRECT: `<Box bg="white" _dark={{ bg: 'gray.800' }}>`
+   - See §2 (Chakra UI Design System - Dark Mode Support) for complete patterns
+
+16. **No useColorModeValue inside render loops**: `useColorModeValue` hooks MUST be defined at the component top level, NEVER inside `.map()`, `.filter()`, or any render loop.
+   - ❌ WRONG: `{items.map(item => <Box bg={useColorModeValue('white', 'gray.800')}>)}`
+   - ✅ CORRECT: `const itemBg = useColorModeValue('white', 'gray.800'); {items.map(item => <Box bg={itemBg}>)}`
+   - See §2 (Chakra UI Design System - Dark Mode Support) for correct patterns
 
 ---
 
@@ -562,6 +827,10 @@ yarn build
 - [ ] Chakra UI components used (not raw HTML)
 - [ ] Zustand store used for global state
 - [ ] Selector pattern used for store access
+- [ ] **NO object returns from useAppState** - split selectors to prevent infinite loops
+- [ ] **ALL colors use useColorModeValue** - no hardcoded colors without dark mode support
+- [ ] **Dark mode tested** - component works correctly in both light and dark themes
+- [ ] **Color values defined at component top level** - not inside render loops
 
 **Action System:**
 - [ ] New actions added to `availableActions.ts`
@@ -599,11 +868,17 @@ yarn build
 ### Zustand Store Access
 
 ```tsx
-// ✅ CORRECT - Selector pattern
+// ✅ CORRECT - Split selectors (prevents infinite loops)
 const value = useAppState((state) => state.settings.value);
 const action = useAppState((state) => state.settings.actions.setValue);
 
-// ✅ CORRECT - Multiple values
+// ✅ CORRECT - Multiple values using split selectors + useMemo
+import { useMemo } from 'react';
+const value = useAppState((state) => state.settings.value);
+const other = useAppState((state) => state.ui.other);
+const combined = useMemo(() => ({ value, other }), [value, other]);
+
+// ❌ WRONG - Returning object from selector (causes infinite loops!)
 const state = useAppState((state) => ({
   value: state.settings.value,
   other: state.ui.other,
@@ -664,6 +939,67 @@ chrome.tabs.sendMessage(tab.id!, { type: 'ACTION', payload: data });
 
 // ✅ CORRECT - From Content Script to Background
 chrome.runtime.sendMessage({ type: 'RESULT', payload: data });
+```
+
+### Dark Mode Color Patterns
+
+```tsx
+// ✅ CORRECT - Complete component with dark mode support
+import { Box, Text, useColorModeValue } from '@chakra-ui/react';
+
+const MyComponent = () => {
+  // Define all colors at component top level
+  const containerBg = useColorModeValue('white', 'gray.900');
+  const cardBg = useColorModeValue('gray.50', 'gray.800');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const hoverBg = useColorModeValue('gray.100', 'gray.700');
+  
+  return (
+    <Box bg={containerBg} p={4}>
+      <Box
+        bg={cardBg}
+        borderWidth="1px"
+        borderColor={borderColor}
+        borderRadius="md"
+        p={4}
+        _hover={{ bg: hoverBg }}
+      >
+        <Text color={textColor} fontSize="lg" fontWeight="bold">
+          Title
+        </Text>
+        <Text color={descColor} fontSize="sm">
+          Description text
+        </Text>
+      </Box>
+    </Box>
+  );
+};
+
+// ✅ CORRECT - Using _dark prop for component-specific overrides
+<Box
+  bg="white"
+  _dark={{ bg: 'gray.800' }}
+  borderColor="gray.200"
+  _dark={{ borderColor: 'gray.700' }}
+>
+  <Text color="gray.700" _dark={{ color: 'gray.300' }}>
+    Text
+  </Text>
+</Box>
+
+// ❌ WRONG - Hardcoded colors without dark mode
+<Box bg="white" color="gray.900">
+  <Text color="gray.600">Text</Text>
+</Box>
+
+// ❌ WRONG - useColorModeValue inside render loop
+{items.map(item => (
+  <Box bg={useColorModeValue('white', 'gray.800')}>
+    {item.name}
+  </Box>
+))}
 ```
 
 ---

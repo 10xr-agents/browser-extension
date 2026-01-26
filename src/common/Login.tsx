@@ -2,7 +2,6 @@
  * Login Component for Thin Client Architecture
  * 
  * Replaces SetAPIKey component with email/password login form.
- * Calls POST /api/v1/auth/login and stores token in chrome.storage.local.
  * 
  * Reference: THIN_CLIENT_ROADMAP.md §2.1 (Task 1: Authentication & API Client)
  */
@@ -18,6 +17,7 @@ import {
   Alert,
   AlertIcon,
   useToast,
+  useColorModeValue,
 } from '@chakra-ui/react';
 import React, { useState } from 'react';
 import { apiClient } from '../api/client';
@@ -32,6 +32,7 @@ export const Login: React.FC = () => {
   
   const setUser = useAppState((state) => state.settings.actions.setUser);
   const setTenant = useAppState((state) => state.settings.actions.setTenant);
+  const bgColor = useColorModeValue('white', 'gray.900');
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -69,7 +70,7 @@ export const Login: React.FC = () => {
   };
 
   return (
-    <Box p={4}>
+    <Box p={4} bg={bgColor} minH="100%">
       <VStack spacing={4} as="form" onSubmit={handleLogin}>
         <Text fontSize="lg" fontWeight="bold">
           Sign in to Spadeworks Copilot AI

@@ -41,6 +41,8 @@ export const useAppState = create<StoreType>()(
           user: state.settings.user,
           tenantId: state.settings.tenantId,
           tenantName: state.settings.tenantName,
+          // Theme preference
+          theme: state.settings.theme,
         },
       }),
       merge: (persistedState, currentState) =>
@@ -48,6 +50,28 @@ export const useAppState = create<StoreType>()(
     }
   )
 );
+
+/**
+ * ⚠️ CRITICAL: Zustand Selector Pattern
+ * 
+ * NEVER return objects/arrays from useAppState selectors - this causes infinite re-render loops!
+ * 
+ * ❌ WRONG (causes infinite loops):
+ *   const state = useAppState((state) => ({ value: state.settings.value }));
+ * 
+ * ✅ CORRECT (split selectors):
+ *   const value = useAppState((state) => state.settings.value);
+ * 
+ * ✅ CORRECT (combine with useMemo if needed):
+ *   const value = useAppState((state) => state.settings.value);
+ *   const other = useAppState((state) => state.ui.other);
+ *   const combined = useMemo(() => ({ value, other }), [value, other]);
+ * 
+ * Why? Returning new objects/arrays creates new references on every render,
+ * causing Zustand to think state changed, triggering infinite re-renders.
+ * 
+ * See .cursorrules §4 (Zustand Store Pattern) for more details.
+ */
 
 // @ts-expect-error used for debugging
 window.getState = useAppState.getState;

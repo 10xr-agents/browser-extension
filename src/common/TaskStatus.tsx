@@ -1,15 +1,25 @@
-import React from 'react';
-import { Box } from '@chakra-ui/react';
+import React, { useMemo } from 'react';
+import { Box, useColorModeValue } from '@chakra-ui/react';
 import { CurrentTaskSlice } from '../state/currentTask';
 import { useAppState } from '../state/store';
 
 export default function TaskStatus() {
-  const { taskStatus, actionStatus } = useAppState((state) => ({
-    taskStatus: state.currentTask.status,
-    actionStatus: state.currentTask.actionStatus,
-  }));
+  // Split selectors to avoid creating new objects on every render (prevents infinite loops)
+  const taskStatus = useAppState((state) => state.currentTask.status);
+  const actionStatus = useAppState((state) => state.currentTask.actionStatus);
+  
+  // Memoize combined state to prevent re-renders
+  const state = useMemo(
+    () => ({
+      taskStatus,
+      actionStatus,
+    }),
+    [taskStatus, actionStatus]
+  );
 
-  if (taskStatus !== 'running') {
+  const textColor = useColorModeValue('gray.500', 'gray.400');
+
+  if (state.taskStatus !== 'running') {
     return null;
   }
 
@@ -24,8 +34,8 @@ export default function TaskStatus() {
   };
 
   return (
-    <Box textColor="gray.500" textAlign="center" mb={8} fontSize="sm">
-      {displayedStatus[actionStatus]}
+    <Box textColor={textColor} textAlign="center" mb={8} fontSize="sm">
+      {displayedStatus[state.actionStatus]}
     </Box>
   );
 }

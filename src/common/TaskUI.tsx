@@ -9,43 +9,71 @@
 
 import {
   HStack,
-  Spacer,
-  Textarea,
   useToast,
-  Button,
   VStack,
   Box,
-  Input,
-  InputGroup,
-  InputRightElement,
+  Text,
+  Button,
+  Flex,
+  Icon,
+  useColorModeValue,
+  Alert,
+  AlertIcon,
 } from '@chakra-ui/react';
-import React, { useCallback, useEffect, useState } from 'react';
-import { SearchIcon } from '@chakra-ui/icons';
+import { InfoIcon } from '@chakra-ui/icons';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { BsPlayFill, BsStopFill } from 'react-icons/bs';
 import { debugMode } from '../constants';
 import { useAppState } from '../state/store';
-import RunTaskButton from './RunTaskButton';
 import TaskHistory from './TaskHistory';
 import TaskStatus from './TaskStatus';
 import KnowledgeOverlay from './KnowledgeOverlay';
 import AccessibilityTreeView from './AccessibilityTreeView';
 import HybridElementView from './HybridElementView';
 import CoverageMetricsView from './CoverageMetricsView';
+import AutosizeTextarea from './AutosizeTextarea';
+import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
 
-const TaskUI = () => {
-  const state = useAppState((state) => ({
-    taskHistory: state.currentTask.displayHistory, // Updated to use displayHistory
-    taskStatus: state.currentTask.status,
-    runTask: state.currentTask.actions.runTask,
-    instructions: state.ui.instructions,
-    setInstructions: state.ui.actions.setInstructions,
-    accessibilityTree: state.currentTask.accessibilityTree, // Accessibility tree for display (Task 4)
-    accessibilityElements: state.currentTask.accessibilityElements, // Filtered accessibility elements (Task 5)
-    hybridElements: state.currentTask.hybridElements, // Hybrid elements combining accessibility and DOM (Task 7)
-    coverageMetrics: state.currentTask.coverageMetrics, // Coverage metrics for accessibility-first selection (Task 8)
-  }));
+interface TaskUIProps {
+  hasOrgKnowledge?: boolean | null;
+}
+
+const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
+  // Split selectors to avoid creating new objects on every render (prevents infinite loops)
+  const taskHistory = useAppState((state) => state.currentTask.displayHistory);
+  const taskStatus = useAppState((state) => state.currentTask.status);
+  const runTask = useAppState((state) => state.currentTask.actions.runTask);
+  const instructions = useAppState((state) => state.ui.instructions);
+  const setInstructions = useAppState((state) => state.ui.actions.setInstructions);
+  const accessibilityTree = useAppState((state) => state.currentTask.accessibilityTree);
+  const accessibilityElements = useAppState((state) => state.currentTask.accessibilityElements);
+  const hybridElements = useAppState((state) => state.currentTask.hybridElements);
+  const coverageMetrics = useAppState((state) => state.currentTask.coverageMetrics);
+
+  // Memoize only state values (not action functions) to prevent re-renders
+  // Action functions should be stable and don't need to be in dependencies
+  const state = useMemo(
+    () => ({
+      taskHistory,
+      taskStatus,
+      instructions,
+      accessibilityTree,
+      accessibilityElements,
+      hybridElements,
+      coverageMetrics,
+    }),
+    [
+      taskHistory,
+      taskStatus,
+      instructions,
+      accessibilityTree,
+      accessibilityElements,
+      hybridElements,
+      coverageMetrics,
+    ]
+  );
 
   const [activeUrl, setActiveUrl] = useState<string>('');
-  const [knowledgeQuery, setKnowledgeQuery] = useState<string>('');
   const [showKnowledge, setShowKnowledge] = useState(false);
 
   const taskInProgress = state.taskStatus === 'running';
@@ -103,109 +131,216 @@ const TaskUI = () => {
     [toast]
   );
 
-  const runTask = () => {
-    state.instructions && state.runTask(toastError);
-  };
+  const handleRunTask = useCallback(() => {
+    instructions && runTask(toastError);
+  }, [instructions, runTask, toastError]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      runTask();
+      handleRunTask();
     }
   };
 
-  const handleResolveKnowledge = () => {
-    if (activeUrl) {
-      setShowKnowledge(true);
-    }
-  };
+  const taskState = useAppState((state) => state.currentTask.status);
+  const interruptTask = useAppState((state) => state.currentTask.actions.interrupt);
+  const isRunning = taskState === 'running';
+
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const inputBg = useColorModeValue('white', 'gray.900');
+  const cardBg = useColorModeValue('gray.50', 'gray.800');
+  const contentBg = useColorModeValue('white', 'gray.900');
+  const bannerBg = useColorModeValue('blue.50', 'blue.900/20');
+  const bannerTextColor = useColorModeValue('blue.800', 'blue.200');
 
   return (
-    <VStack spacing={4} align="stretch">
-      {/* Knowledge Resolution Section */}
-      {activeUrl && (
-        <Box p={4} borderWidth={1} borderRadius="md" bg="gray.50">
-          <HStack mb={2}>
-            <InputGroup size="sm">
-              <Input
-                placeholder="Optional query for knowledge search..."
-                value={knowledgeQuery}
-                onChange={(e) => setKnowledgeQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    handleResolveKnowledge();
-                  }
-                }}
-              />
-              <InputRightElement>
-                <Button
-                  size="xs"
-                  onClick={handleResolveKnowledge}
-                  leftIcon={<SearchIcon />}
-                  colorScheme="blue"
+    <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg}>
+      {/* Scrollable Content Area */}
+      <Box flex="1" overflowY="auto" overflowX="hidden" minW="0" px={4} py={3} bg={contentBg}>
+        <VStack spacing={4} align="stretch" minW="0">
+          {/* Status Banner */}
+          {hasOrgKnowledge === false && (
+            <Box minW="0" mb={2}>
+              <Alert
+                status="info"
+                variant="subtle"
+                borderRadius="md"
+                bg={bannerBg}
+                minW="0"
+                py={2}
+                px={3}
+              >
+                <AlertIcon as={InfoIcon} boxSize={3.5} />
+                <Text
+                  fontSize="xs"
+                  color={bannerTextColor}
+                  lineHeight="1.3"
+                  fontWeight="medium"
+                  minW="0"
                 >
-                  Resolve
-                </Button>
-              </InputRightElement>
-            </InputGroup>
-          </HStack>
-          {showKnowledge && (
-            <KnowledgeOverlay url={activeUrl} query={knowledgeQuery || undefined} />
+                  This website is not part of your organization's approved tools. Suggestions are based on general knowledge only.
+                </Text>
+              </Alert>
+            </Box>
           )}
-        </Box>
-      )}
 
-      {/* Accessibility Tree Section (Task 4) */}
-      {state.accessibilityTree && (
-        <Box mt={4}>
-          <AccessibilityTreeView tree={state.accessibilityTree} />
-        </Box>
-      )}
+          {/* Loading State for Knowledge Check */}
+          {hasOrgKnowledge === null && (
+            <Box minW="0">
+              <KnowledgeCheckSkeleton />
+            </Box>
+          )}
 
-              {/* Accessibility Elements Info (Task 5) */}
-              {state.accessibilityElements && state.accessibilityElements.length > 0 && (
-                <Box mt={2} p={2} borderWidth={1} borderRadius="md" bg="blue.50">
-                  <Text fontSize="xs" color="blue.700">
-                    ✓ Using {state.accessibilityElements.length} accessibility-derived interactive elements
-                    (reduces token count by filtering to interactive elements only)
-                  </Text>
-                </Box>
-              )}
+          {/* Knowledge Resolution Section */}
+          {activeUrl && showKnowledge && (
+            <Box minW="0">
+              <KnowledgeOverlay url={activeUrl} />
+            </Box>
+          )}
 
-              {/* Coverage Metrics View (Task 8) */}
-              {state.coverageMetrics && (
-                <Box mt={4}>
-                  <CoverageMetricsView metrics={state.coverageMetrics} />
-                </Box>
-              )}
+          {/* Accessibility Tree Section (Task 4) */}
+          {state.accessibilityTree && (
+            <Box minW="0">
+              <AccessibilityTreeView tree={state.accessibilityTree} />
+            </Box>
+          )}
 
-              {/* Hybrid Elements View (Task 7) */}
-              {state.hybridElements && state.hybridElements.length > 0 && (
-                <Box mt={4}>
-                  <HybridElementView hybridElements={state.hybridElements} />
-                </Box>
-              )}
+          {/* Accessibility Elements Info (Task 5) */}
+          {state.accessibilityElements && state.accessibilityElements.length > 0 && (
+            <Box
+              p={3}
+              borderWidth="1px"
+              borderColor={borderColor}
+              borderRadius="lg"
+              bg="blue.50"
+              _dark={{ bg: 'blue.900/20' }}
+              minW="0"
+            >
+              <Text
+                fontSize="xs"
+                color="blue.700"
+                _dark={{ color: 'blue.300' }}
+                fontWeight="medium"
+                minW="0"
+              >
+                ✓ Using {state.accessibilityElements.length} accessibility-derived interactive elements
+              </Text>
+            </Box>
+          )}
 
-      {/* Task Execution Section */}
-      <Box>
-        <Textarea
-          autoFocus
-          placeholder="Spadeworks Copilot AI uses OpenAI's GPT-4 API to perform actions on the current page. Try telling it to sign up for a newsletter, or to add an item to your cart."
-          value={state.instructions || ''}
-          disabled={taskInProgress}
-          onChange={(e) => state.setInstructions(e.target.value)}
-          mb={2}
-          onKeyDown={onKeyDown}
-        />
-        <HStack>
-          <RunTaskButton runTask={runTask} />
-          <Spacer />
-          {debugMode && <TaskStatus />}
-        </HStack>
+          {/* Coverage Metrics View (Task 8) */}
+          {state.coverageMetrics && (
+            <Box minW="0">
+              <CoverageMetricsView metrics={state.coverageMetrics} />
+            </Box>
+          )}
+
+          {/* Hybrid Elements View (Task 7) */}
+          {state.hybridElements && state.hybridElements.length > 0 && (
+            <Box minW="0">
+              <HybridElementView hybridElements={state.hybridElements} />
+            </Box>
+          )}
+
+          <Box minW="0">
+            <TaskHistory />
+          </Box>
+        </VStack>
       </Box>
 
-      <TaskHistory />
-    </VStack>
+      {/* Fixed Chat Input at Bottom */}
+      <Box
+        flex="none"
+        bg={contentBg}
+        borderTopWidth="1px"
+        borderColor={borderColor}
+        px={4}
+        pt={3}
+        pb={3}
+        minW="0"
+      >
+        {/* Prompt Input Card */}
+        <Box
+          borderWidth="1px"
+          borderColor={borderColor}
+          borderRadius="xl"
+          p={4}
+          bg={cardBg}
+          shadow="sm"
+          minW="0"
+        >
+          <VStack spacing={3} align="stretch" minW="0">
+            <AutosizeTextarea
+              autoFocus
+              placeholder="What would you like me to do on this page?"
+              value={instructions || ''}
+              disabled={isRunning}
+              onChange={(e) => setInstructions(e.target.value)}
+              onKeyDown={onKeyDown}
+              bg={inputBg}
+              borderWidth="1px"
+              borderColor={useColorModeValue('gray.300', 'gray.600')}
+              borderRadius="lg"
+              px={4}
+              py={3}
+              fontSize="sm"
+              resize="none"
+              minW="0"
+              _focus={{
+                borderColor: 'blue.500',
+                _dark: { borderColor: 'blue.400' },
+                boxShadow: '0 0 0 1px var(--chakra-colors-blue-500)',
+              }}
+              _focusVisible={{
+                boxShadow: '0 0 0 1px var(--chakra-colors-blue-500)',
+              }}
+              _disabled={{
+                opacity: 0.6,
+                cursor: 'not-allowed',
+              }}
+              minRows={2}
+              maxRows={6}
+            />
+            
+            <Flex justify="flex-end" gap={2} minW="0" align="center">
+              {debugMode && <TaskStatus />}
+              {isRunning ? (
+                <Button
+                  leftIcon={<Icon as={BsStopFill} />}
+                  onClick={interruptTask}
+                  colorScheme="red"
+                  size="md"
+                  fontWeight="medium"
+                  _focusVisible={{
+                    boxShadow: 'outline',
+                  }}
+                >
+                  Stop
+                </Button>
+              ) : (
+                <Button
+                  leftIcon={<Icon as={BsPlayFill} />}
+                  onClick={handleRunTask}
+                  colorScheme="blue"
+                  size="md"
+                  fontWeight="medium"
+                  isDisabled={!instructions}
+                  _disabled={{
+                    opacity: 0.5,
+                    cursor: 'not-allowed',
+                  }}
+                  _focusVisible={{
+                    boxShadow: 'outline',
+                  }}
+                >
+                  Start Task
+                </Button>
+              )}
+            </Flex>
+          </VStack>
+        </Box>
+      </Box>
+    </Flex>
   );
 };
 

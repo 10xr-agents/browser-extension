@@ -1,11 +1,12 @@
 import React from 'react';
-import { Text } from '@chakra-ui/react';
+import { Text, useColorModeValue } from '@chakra-ui/react';
 import { countTokens } from '../helpers/countTokens';
 import { useAsync } from 'react-use';
 import { useAppState } from '../state/store';
 
 const TokenCount = ({ html }: { html: string }) => {
   const selectedModel = useAppState((state) => state.settings.selectedModel);
+  const textColor = useColorModeValue('gray.500', 'gray.400');
 
   const numTokens =
     useAsync(
@@ -24,7 +25,7 @@ const TokenCount = ({ html }: { html: string }) => {
 
   return (
     <>
-      <Text as="span" fontSize="sm" color="gray.500">
+      <Text as="span" fontSize="sm" color={textColor}>
         {displayedCount}
       </Text>
     </>

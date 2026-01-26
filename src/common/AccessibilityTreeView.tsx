@@ -23,6 +23,7 @@ import {
   Badge,
   Divider,
   Spacer,
+  useColorModeValue,
 } from '@chakra-ui/react';
 import type { AccessibilityTree, AXNode } from '../types/accessibility';
 import CopyButton from './CopyButton';
@@ -50,14 +51,22 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, level }) => {
   const value = node.value?.value || '';
   const isIgnored = node.ignored === true;
 
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const ignoredBg = useColorModeValue('gray.50', 'gray.800');
+  const normalBg = useColorModeValue('white', 'gray.800');
+  const hoverBg = useColorModeValue('gray.50', 'gray.700');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+  const valueColor = useColorModeValue('gray.500', 'gray.500');
+
   return (
-    <Box pl={level * 4} borderLeftWidth={level > 0 ? 1 : 0} borderColor="gray.200">
+    <Box pl={level * 4} borderLeftWidth={level > 0 ? 1 : 0} borderColor={borderColor}>
       <AccordionItem border="none" mb={1}>
         <AccordionButton
           p={2}
-          bg={isIgnored ? 'gray.50' : 'white'}
+          bg={isIgnored ? ignoredBg : normalBg}
           borderRadius="md"
-          _hover={{ bg: isIgnored ? 'gray.100' : 'gray.50' }}
+          _hover={{ bg: isIgnored ? hoverBg : hoverBg }}
         >
           <HStack flex="1" align="start" spacing={2}>
             <Box>
@@ -76,24 +85,24 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, level }) => {
                 )}
               </HStack>
               {name && (
-                <Text fontSize="sm" fontWeight="medium" mt={1}>
+                <Text fontSize="sm" fontWeight="medium" mt={1} color={textColor}>
                   {name}
                 </Text>
               )}
               {description && (
-                <Text fontSize="xs" color="gray.600" mt={0.5}>
+                <Text fontSize="xs" color={descColor} mt={0.5}>
                   {description}
                 </Text>
               )}
               {value && (
-                <Text fontSize="xs" color="gray.500" fontStyle="italic" mt={0.5}>
+                <Text fontSize="xs" color={valueColor} fontStyle="italic" mt={0.5}>
                   Value: {value}
                 </Text>
               )}
             </Box>
             <Spacer />
             {children.length > 0 && (
-              <Text fontSize="xs" color="gray.500">
+              <Text fontSize="xs" color={valueColor}>
                 {children.length} child{children.length !== 1 ? 'ren' : ''}
               </Text>
             )}
@@ -120,10 +129,19 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, level }) => {
 };
 
 const AccessibilityTreeView: React.FC<AccessibilityTreeViewProps> = ({ tree }) => {
+  const emptyBg = useColorModeValue('gray.50', 'gray.800');
+  const emptyTextColor = useColorModeValue('gray.600', 'gray.300');
+  const warningBg = useColorModeValue('yellow.50', 'yellow.900/30');
+  const warningTextColor = useColorModeValue('yellow.800', 'yellow.300');
+  const containerBg = useColorModeValue('white', 'gray.800');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const headingColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+
   if (!tree || !tree.nodes || tree.nodes.length === 0) {
     return (
-      <Box p={4} borderWidth={1} borderRadius="md" bg="gray.50">
-        <Text fontSize="sm" color="gray.600">
+      <Box p={4} borderWidth={1} borderRadius="md" bg={emptyBg} borderColor={borderColor}>
+        <Text fontSize="sm" color={emptyTextColor}>
           No accessibility tree available. Using DOM fallback.
         </Text>
       </Box>
@@ -136,8 +154,8 @@ const AccessibilityTreeView: React.FC<AccessibilityTreeViewProps> = ({ tree }) =
 
   if (!rootNode) {
     return (
-      <Box p={4} borderWidth={1} borderRadius="md" bg="yellow.50">
-        <Text fontSize="sm" color="yellow.800">
+      <Box p={4} borderWidth={1} borderRadius="md" bg={warningBg} borderColor={borderColor}>
+        <Text fontSize="sm" color={warningTextColor}>
           Accessibility tree has no root node.
         </Text>
       </Box>
@@ -145,10 +163,10 @@ const AccessibilityTreeView: React.FC<AccessibilityTreeViewProps> = ({ tree }) =
   }
 
   return (
-    <Box p={4} borderWidth={1} borderRadius="md" bg="white" maxH="600px" overflowY="auto">
+    <Box p={4} borderWidth={1} borderRadius="md" bg={containerBg} borderColor={borderColor} maxH="600px" overflowY="auto">
       <VStack align="stretch" spacing={4}>
         <HStack>
-          <Heading size="sm">Accessibility Tree</Heading>
+          <Heading size="sm" color={headingColor}>Accessibility Tree</Heading>
           <Spacer />
           <Badge colorScheme="green" fontSize="xs">
             {tree.nodes.length} nodes
@@ -156,7 +174,7 @@ const AccessibilityTreeView: React.FC<AccessibilityTreeViewProps> = ({ tree }) =
           <CopyButton text={JSON.stringify(tree, null, 2)} />
         </HStack>
         <Divider />
-        <Text fontSize="xs" color="gray.600">
+        <Text fontSize="xs" color={descColor}>
           Expandable tree view of accessibility nodes. Used for validation and debugging.
         </Text>
         <Accordion allowMultiple allowToggle defaultIndex={[0]}>

@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <title></title>
+    <style>
+      /* Prevent flash of wrong theme */
+      body:not(.chakra-ui-dark) {
+        background-color: white;
+      }
+      body.chakra-ui-dark {
+        background-color: #1a202c;
+      }
+    </style>
   </head>
 
   <body>

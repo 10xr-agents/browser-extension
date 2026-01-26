@@ -25,6 +25,7 @@ import {
   StatHelpText,
   StatGroup,
   Spacer,
+  useColorModeValue,
 } from '@chakra-ui/react';
 import type { CoverageMetrics } from '../helpers/accessibilityFirst';
 import CopyButton from './CopyButton';
@@ -34,10 +35,22 @@ interface CoverageMetricsViewProps {
 }
 
 const CoverageMetricsView: React.FC<CoverageMetricsViewProps> = ({ metrics }) => {
+  const emptyBg = useColorModeValue('gray.50', 'gray.800');
+  const emptyTextColor = useColorModeValue('gray.600', 'gray.300');
+  const containerBg = useColorModeValue('white', 'gray.800');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const headingColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+  const labelColor = useColorModeValue('gray.700', 'gray.300');
+  const summaryBg = useColorModeValue('blue.50', 'blue.900/30');
+  const summaryBorder = useColorModeValue('blue.200', 'blue.700');
+  const summaryText = useColorModeValue('blue.800', 'blue.200');
+  const summaryTextSecondary = useColorModeValue('blue.700', 'blue.300');
+
   if (!metrics) {
     return (
-      <Box p={4} borderWidth={1} borderRadius="md" bg="gray.50">
-        <Text fontSize="sm" color="gray.600">
+      <Box p={4} borderWidth={1} borderRadius="md" bg={emptyBg} borderColor={borderColor}>
+        <Text fontSize="sm" color={emptyTextColor}>
           No coverage metrics available. Using DOM-only approach.
         </Text>
       </Box>
@@ -51,10 +64,10 @@ const CoverageMetricsView: React.FC<CoverageMetricsViewProps> = ({ metrics }) =>
     'red';
 
   return (
-    <Box p={4} borderWidth={1} borderRadius="md" bg="white">
+    <Box p={4} borderWidth={1} borderRadius="md" bg={containerBg} borderColor={borderColor}>
       <VStack align="stretch" spacing={4}>
         <HStack>
-          <Heading size="sm">Accessibility Coverage Metrics</Heading>
+          <Heading size="sm" color={headingColor}>Accessibility Coverage Metrics</Heading>
           <Spacer />
           <Badge colorScheme={coverageColorScheme} fontSize="sm" fontWeight="bold">
             {metrics.axCoverage.toFixed(1)}% Coverage
@@ -62,7 +75,7 @@ const CoverageMetricsView: React.FC<CoverageMetricsViewProps> = ({ metrics }) =>
           <CopyButton text={JSON.stringify(metrics, null, 2)} />
         </HStack>
         <Divider />
-        <Text fontSize="xs" color="gray.600">
+        <Text fontSize="xs" color={descColor}>
           Percentage of interactive elements found in accessibility tree.
           Higher coverage indicates better accessibility-first selection.
         </Text>
@@ -70,11 +83,11 @@ const CoverageMetricsView: React.FC<CoverageMetricsViewProps> = ({ metrics }) =>
         {/* Coverage Progress Bar */}
         <Box>
           <HStack mb={2}>
-            <Text fontSize="xs" fontWeight="bold" color="gray.700">
+            <Text fontSize="xs" fontWeight="bold" color={labelColor}>
               Accessibility Coverage
             </Text>
             <Spacer />
-            <Text fontSize="xs" color="gray.600">
+            <Text fontSize="xs" color={descColor}>
               {metrics.axCoverage.toFixed(1)}%
             </Text>
           </HStack>
@@ -140,11 +153,11 @@ const CoverageMetricsView: React.FC<CoverageMetricsViewProps> = ({ metrics }) =>
         </VStack>
 
         {/* Summary */}
-        <Box p={3} bg="blue.50" borderRadius="md" borderWidth={1} borderColor="blue.200">
-          <Text fontSize="xs" color="blue.800" fontWeight="medium" mb={1}>
+        <Box p={3} bg={summaryBg} borderRadius="md" borderWidth={1} borderColor={summaryBorder}>
+          <Text fontSize="xs" color={summaryText} fontWeight="medium" mb={1}>
             Selection Strategy:
           </Text>
-          <Text fontSize="xs" color="blue.700">
+          <Text fontSize="xs" color={summaryTextSecondary}>
             {metrics.axCoverage >= 50
               ? `✓ Accessibility-first approach working well. ${metrics.axCoverage.toFixed(1)}% of interactive elements found in accessibility tree.`
               : metrics.axCoverage > 0

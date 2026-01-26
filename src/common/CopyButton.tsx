@@ -1,16 +1,18 @@
 import React from 'react';
 import { CopyIcon } from '@chakra-ui/icons';
-import { useToast } from '@chakra-ui/react';
+import { useToast, useColorModeValue } from '@chakra-ui/react';
 import { callRPC } from '../helpers/pageRPC';
 
 export default function CopyButton(props: { text: string }) {
   const toast = useToast();
+  const iconColor = useColorModeValue('gray.500', 'gray.400');
+  const hoverColor = useColorModeValue('gray.700', 'gray.300');
 
   return (
     <CopyIcon
       cursor="pointer"
-      color="gray.500"
-      _hover={{ color: 'gray.700' }}
+      color={iconColor}
+      _hover={{ color: hoverColor }}
       onClick={async (event) => {
         try {
           event.preventDefault();

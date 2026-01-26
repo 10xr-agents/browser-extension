@@ -1,14 +1,23 @@
 import { Button, HStack, Icon } from '@chakra-ui/react';
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useAppState } from '../state/store';
 import { BsPlayFill, BsStopFill } from 'react-icons/bs';
 
 export default function RunTaskButton(props: { runTask: () => void }) {
-  const state = useAppState((state) => ({
-    taskState: state.currentTask.status,
-    instructions: state.ui.instructions,
-    interruptTask: state.currentTask.actions.interrupt,
-  }));
+  // Split selectors to avoid creating new objects on every render (prevents infinite loops)
+  const taskState = useAppState((state) => state.currentTask.status);
+  const instructions = useAppState((state) => state.ui.instructions);
+  const interruptTask = useAppState((state) => state.currentTask.actions.interrupt);
+
+  // Memoize only state values (not action functions) to prevent re-renders
+  // Action functions should be stable and don't need to be in dependencies
+  const state = useMemo(
+    () => ({
+      taskState,
+      instructions,
+    }),
+    [taskState, instructions]
+  );
 
   let button = (
     <Button
@@ -25,7 +34,7 @@ export default function RunTaskButton(props: { runTask: () => void }) {
     button = (
       <Button
         rightIcon={<Icon as={BsStopFill} boxSize={6} />}
-        onClick={state.interruptTask}
+        onClick={interruptTask}
         colorScheme="red"
       >
         Stop

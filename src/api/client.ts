@@ -37,6 +37,18 @@ interface SessionResponse {
   tenantName: string;
 }
 
+interface PreferencesResponse {
+  preferences: {
+    theme: 'light' | 'dark' | 'system';
+  };
+  syncedAt?: string;
+}
+
+interface PreferencesRequest {
+  theme: 'light' | 'dark' | 'system';
+  clientVersion?: string;
+}
+
 interface KnowledgeChunk {
   id: string;
   content: string;
@@ -88,8 +100,15 @@ interface NextActionResponse {
 }
 
 // Get API base URL from environment or use default
-// This will be injected at build time via webpack
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com').replace(/\/$/, '');
+// This is injected at build time via webpack's built-in dotenv feature (5.103.0+)
+// Uses WEBPACK_ prefix for security (only prefixed variables are exposed)
+// Fallback to NEXT_PUBLIC_API_BASE or API_BASE for compatibility
+const API_BASE = (
+  process.env.WEBPACK_API_BASE || 
+  process.env.NEXT_PUBLIC_API_BASE || 
+  process.env.API_BASE || 
+  'https://api.example.com'
+).replace(/\/$/, '');
 
 class ApiClient {
   /**
@@ -290,7 +309,35 @@ class ApiClient {
 
     return this.request<NextActionResponse>('POST', '/api/agent/interact', body);
   }
+
+  /**
+   * Get user preferences
+   * Returns theme and other user preferences from the backend
+   * 
+   * Reference: THIN_SERVER_TO_BE_ROADMAP.md (Settings API)
+   */
+  async getPreferences(): Promise<PreferencesResponse> {
+    return this.request<PreferencesResponse>('GET', '/api/v1/user/preferences');
+  }
+
+  /**
+   * Update user preferences
+   * Saves theme and other preferences to the backend
+   * 
+   * Reference: THIN_SERVER_TO_BE_ROADMAP.md (Settings API)
+   */
+  async updatePreferences(preferences: PreferencesRequest): Promise<PreferencesResponse> {
+    return this.request<PreferencesResponse>('POST', '/api/v1/user/preferences', preferences);
+  }
 }
 
 export const apiClient = new ApiClient();
-export type { ResolveKnowledgeResponse, KnowledgeChunk, Citation, NextActionResponse, AgentInteractRequest };
+export type { 
+  ResolveKnowledgeResponse, 
+  KnowledgeChunk, 
+  Citation, 
+  NextActionResponse, 
+  AgentInteractRequest,
+  PreferencesResponse,
+  PreferencesRequest
+};

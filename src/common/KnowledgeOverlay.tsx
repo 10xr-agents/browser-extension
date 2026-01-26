@@ -24,15 +24,15 @@ import {
   AccordionButton,
   AccordionPanel,
   AccordionIcon,
+  useColorModeValue,
 } from '@chakra-ui/react';
 import { apiClient, type ResolveKnowledgeResponse } from '../api/client';
 
 interface KnowledgeOverlayProps {
   url: string;
-  query?: string;
 }
 
-export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url, query }) => {
+export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url }) => {
   const [knowledge, setKnowledge] = useState<ResolveKnowledgeResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +45,7 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url, query }
       setError(null);
       
       try {
-        const response = await apiClient.knowledgeResolve(url, query);
+        const response = await apiClient.knowledgeResolve(url);
         setKnowledge(response);
       } catch (err) {
         if (err instanceof Error) {
@@ -65,14 +65,21 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url, query }
     };
 
     fetchKnowledge();
-  }, [url, query]);
+  }, [url]);
+
+  const loadingTextColor = useColorModeValue('gray.600', 'gray.300');
+  const headingColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+  const labelColor = useColorModeValue('gray.700', 'gray.300');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const citationBg = useColorModeValue('gray.50', 'gray.800');
 
   if (loading) {
     return (
       <Box p={4}>
         <VStack spacing={2}>
           <Spinner size="md" />
-          <Text fontSize="sm" color="gray.600">
+          <Text fontSize="sm" color={loadingTextColor}>
             Loading knowledge...
           </Text>
         </VStack>
@@ -93,41 +100,21 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url, query }
     return null;
   }
 
-  // Show message if no org knowledge (public-only)
+  // If no org knowledge and no context, return null (banner in App.tsx handles messaging)
   if (!knowledge.hasOrgKnowledge && knowledge.context.length === 0) {
-    return (
-      <Box p={4}>
-        <Alert status="info" borderRadius="md">
-          <AlertIcon />
-          <VStack align="start" spacing={1}>
-            <Text fontSize="sm" fontWeight="bold">
-              No knowledge available for this website
-            </Text>
-            <Text fontSize="xs" color="gray.600">
-              All suggestions are based on publicly available information only.
-            </Text>
-          </VStack>
-        </Alert>
-      </Box>
-    );
+    return null;
   }
 
-  // Show message if no context but hasOrgKnowledge is true (empty results)
+  // If no context but hasOrgKnowledge is true (empty results), return null
   if (knowledge.context.length === 0) {
-    return (
-      <Box p={4}>
-        <Text fontSize="sm" color="gray.600">
-          No knowledge available for this page.
-        </Text>
-      </Box>
-    );
+    return null;
   }
 
   return (
     <Box p={4} maxH="500px" overflowY="auto">
       <VStack spacing={4} align="stretch">
         <Box>
-          <Heading size="sm" mb={2}>
+          <Heading size="sm" mb={2} color={headingColor}>
             Relevant Knowledge
           </Heading>
           {knowledge.hasOrgKnowledge ? (
@@ -139,7 +126,7 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url, query }
               Public Knowledge
             </Badge>
           )}
-          <Text fontSize="xs" color="gray.600" mt={1}>
+          <Text fontSize="xs" color={descColor} mt={1}>
             Domain: {knowledge.domain}
           </Text>
         </Box>
@@ -148,22 +135,22 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url, query }
 
         <Accordion allowToggle>
           {knowledge.context.map((chunk, index) => (
-            <AccordionItem key={chunk.id || index} borderWidth={1} borderRadius="md" mb={2}>
+            <AccordionItem key={chunk.id || index} borderWidth={1} borderRadius="md" mb={2} borderColor={borderColor}>
               <AccordionButton>
                 <Box flex="1" textAlign="left">
-                  <Text fontSize="sm" fontWeight="bold">
+                  <Text fontSize="sm" fontWeight="bold" color={headingColor}>
                     {chunk.documentTitle}
                   </Text>
                 </Box>
                 <AccordionIcon />
               </AccordionButton>
               <AccordionPanel pb={4}>
-                <Text fontSize="sm" whiteSpace="pre-wrap">
+                <Text fontSize="sm" whiteSpace="pre-wrap" color={headingColor}>
                   {chunk.content}
                 </Text>
                 {chunk.metadata && Object.keys(chunk.metadata).length > 0 && (
-                  <Box mt={2} pt={2} borderTopWidth={1}>
-                    <Text fontSize="xs" color="gray.600" fontStyle="italic">
+                  <Box mt={2} pt={2} borderTopWidth={1} borderColor={borderColor}>
+                    <Text fontSize="xs" color={descColor} fontStyle="italic">
                       Metadata: {JSON.stringify(chunk.metadata, null, 2)}
                     </Text>
                   </Box>
@@ -177,22 +164,22 @@ export const KnowledgeOverlay: React.FC<KnowledgeOverlayProps> = ({ url, query }
           <>
             <Divider />
             <Box>
-              <Text fontSize="sm" fontWeight="bold" mb={2}>
+              <Text fontSize="sm" fontWeight="bold" mb={2} color={headingColor}>
                 Sources
               </Text>
               <VStack spacing={1} align="stretch">
                 {knowledge.citations.map((citation, index) => (
-                  <Box key={index} p={2} bg="gray.50" borderRadius="md">
-                    <Text fontSize="xs" fontWeight="medium">
+                  <Box key={index} p={2} bg={citationBg} borderRadius="md">
+                    <Text fontSize="xs" fontWeight="medium" color={headingColor}>
                       {citation.documentTitle}
                     </Text>
                     {citation.section && (
-                      <Text fontSize="xs" color="gray.600">
+                      <Text fontSize="xs" color={descColor}>
                         Section: {citation.section}
                       </Text>
                     )}
                     {citation.page !== undefined && (
-                      <Text fontSize="xs" color="gray.600">
+                      <Text fontSize="xs" color={descColor}>
                         Page: {citation.page}
                       </Text>
                     )}
