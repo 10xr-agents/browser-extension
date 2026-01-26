@@ -1,3 +1,13 @@
+/**
+ * TaskHistory Component for Thin Client Architecture
+ * 
+ * Displays display-only history (thought, action, usage) for UI.
+ * Server owns canonical action history used for prompts.
+ * 
+ * Reference: THIN_CLIENT_ROADMAP.md §4.1 (Task 3: Server-Side Action Loop)
+ * Reference: ENTERPRISE_PLATFORM_SPECIFICATION.md §5.7.3.8 (UI Changes)
+ */
+
 import {
   VStack,
   HStack,
@@ -11,15 +21,16 @@ import {
   Spacer,
   ColorProps,
   BackgroundProps,
+  Text,
 } from '@chakra-ui/react';
 import React from 'react';
-import { TaskHistoryEntry } from '../state/currentTask';
+import { DisplayHistoryEntry } from '../state/currentTask';
 import { useAppState } from '../state/store';
 import CopyButton from './CopyButton';
 
 type TaskHistoryItemProps = {
   index: number;
-  entry: TaskHistoryEntry;
+  entry: DisplayHistoryEntry;
 };
 
 const CollapsibleComponent = (props: {
@@ -54,13 +65,10 @@ const CollapsibleComponent = (props: {
 );
 
 const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
-  let itemTitle = '';
-  if ('error' in entry.action) {
-    itemTitle = `Error: ${entry.action.error}`;
-  } else if (entry.action?.thought) {
-    itemTitle = entry.action.thought;
-  }
+  // Get title from thought
+  const itemTitle = entry.thought || 'No thought provided';
 
+  // Determine colors based on action type
   const colors: {
     text: ColorProps['textColor'];
     bg: BackgroundProps['bgColor'];
@@ -68,16 +76,22 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
     text: undefined,
     bg: undefined,
   };
-  if ('error' in entry.action || entry.action.parsedAction.name === 'fail') {
+
+  if ('error' in entry.parsedAction) {
     colors.text = 'red.800';
     colors.bg = 'red.100';
-  } else if (
-    'parsedAction' in entry.action &&
-    entry.action.parsedAction.name === 'finish'
-  ) {
+  } else if (entry.parsedAction.parsedAction.name === 'fail') {
+    colors.text = 'red.800';
+    colors.bg = 'red.100';
+  } else if (entry.parsedAction.parsedAction.name === 'finish') {
     colors.text = 'green.800';
     colors.bg = 'green.100';
   }
+
+  // Format usage tokens
+  const promptTokens = entry.usage?.promptTokens || 0;
+  const completionTokens = entry.usage?.completionTokens || 0;
+  const totalTokens = promptTokens + completionTokens;
 
   return (
     <AccordionItem>
@@ -95,18 +109,23 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
       <AccordionPanel backgroundColor="gray.100" p="2">
         <Accordion allowMultiple allowToggle w="full" defaultIndex={1}>
           <CollapsibleComponent
-            title="Prompt"
-            subtitle={`${entry.usage.prompt_tokens} tokens`}
-            text={entry.prompt}
-          />
-          <CollapsibleComponent
-            title="Response"
-            subtitle={`${entry.usage.completion_tokens} tokens`}
-            text={entry.response}
+            title="Thought"
+            text={entry.thought}
           />
           <CollapsibleComponent
             title="Action"
-            text={JSON.stringify(entry.action, null, 2)}
+            subtitle={entry.usage ? `${totalTokens} tokens (${promptTokens} prompt + ${completionTokens} completion)` : undefined}
+            text={entry.action}
+          />
+          {entry.usage && (
+            <CollapsibleComponent
+              title="Usage"
+              text={JSON.stringify(entry.usage, null, 2)}
+            />
+          )}
+          <CollapsibleComponent
+            title="Parsed Action"
+            text={JSON.stringify(entry.parsedAction, null, 2)}
           />
         </Accordion>
       </AccordionPanel>
@@ -117,7 +136,7 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
 export default function TaskHistory() {
   const { taskHistory, taskStatus } = useAppState((state) => ({
     taskStatus: state.currentTask.status,
-    taskHistory: state.currentTask.history,
+    taskHistory: state.currentTask.displayHistory, // Updated to use displayHistory
   }));
 
   if (taskHistory.length === 0 && taskStatus !== 'running') return null;
@@ -129,6 +148,9 @@ export default function TaskHistory() {
           Action History
         </Heading>
         <Spacer />
+        <Text fontSize="xs" color="gray.500">
+          Display-only history. Server owns canonical history.
+        </Text>
         <CopyButton text={JSON.stringify(taskHistory, null, 2)} />
       </HStack>
       <Accordion allowMultiple w="full" pb="4">

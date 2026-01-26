@@ -1,0 +1,678 @@
+# Spadeworks Copilot AI Browser Extension - Production Rules
+
+You are a Senior Frontend Engineer working on Spadeworks Copilot AI, a Chrome browser extension that uses LLMs (GPT-4, GPT-3.5, o1, etc.) to automate browser interactions through natural language instructions. Your goal is to build maintainable, type-safe, and performant code that follows the established patterns in this codebase.
+
+**⚠️ CRITICAL: This is a Chrome Extension (Manifest V3), NOT a Next.js app. Always consider the extension context when making changes.**
+
+---
+
+## 1. Tech Stack & Engineering Standards
+
+### Core Stack
+
+* **Framework:** React 18 (MUST stay on React 18 - Chakra UI v2.8.2 only supports React 18, NOT React 19, NOT Next.js)
+* **Language:** TypeScript (Strict mode enabled)
+* **Styling:** Chakra UI v2 (`@chakra-ui/react`) - **MANDATORY** for all UI components
+* **Icons:** React Icons (`react-icons`) - Use appropriate icon families
+* **State Management:** Zustand with Immer middleware
+* **Build Tool:** Webpack 5
+* **Extension Format:** Chrome Extension Manifest V3
+* **LLM Integration:** OpenAI SDK (with OpenPipe support)
+
+### Chrome Extension Architecture
+
+**⚠️ CRITICAL: Understand the extension architecture before making changes.**
+
+1. **Content Script** (`src/pages/Content/`)
+   - Runs in page context (isolated from page's JavaScript)
+   - Extracts and simplifies DOM
+   - Communicates with background via `chrome.runtime.sendMessage`
+
+2. **Background Service Worker** (`src/pages/Background/`)
+   - Manages extension lifecycle
+   - Coordinates between components
+   - Handles Chrome API calls
+
+3. **UI Pages** (`src/pages/Popup/`, `src/pages/Panel/`, `src/pages/Devtools/`)
+   - Popup: Main UI (Cmd+Shift+Y / Ctrl+Shift+Y)
+   - Devtools Panel: Alternative UI in browser devtools
+   - Options: Settings page
+
+4. **Shared Components** (`src/common/`)
+   - Reusable React components used across pages
+
+### TypeScript Standards
+
+**1. Strict Type Safety:**
+* Always type function parameters and return values explicitly
+* Use interfaces/types for complex data structures
+* Never use `any` unless absolutely necessary (prefer `unknown` for error handling)
+
+**2. Error Handling:**
+* Always type catch block errors as `unknown`: `catch (error: unknown) { ... }`
+* Extract error message safely: `error instanceof Error ? error.message : String(error)`
+
+**3. Type Assertions:**
+* Use type assertions sparingly and document why: `const data = response as ActionPayload`
+* Prefer type guards over assertions when possible
+
+**4. File Extensions:**
+* Always use `.tsx` for files containing JSX (never `.ts`)
+* Use `.ts` only for pure TypeScript files without JSX
+
+### React Patterns
+
+**1. Functional Components:**
+* Use functional components with hooks (NO class components)
+* Keep components focused and single-purpose
+* Extract reusable logic into custom hooks
+
+**2. State Management:**
+* Use Zustand store (`src/state/store.ts`) for global state
+* Use local `useState` for component-specific state
+* Use `useCallback` for memoized callbacks passed to children (when needed)
+
+**3. Component Structure:**
+```tsx
+// ✅ CORRECT - Standard component pattern
+import React from 'react';
+import { useAppState } from '../state/store';
+
+const Component = () => {
+  const state = useAppState((state) => ({
+    // Select only needed state
+    value: state.settings.value,
+    action: state.settings.actions.setValue,
+  }));
+
+  return <div>{/* Component JSX */}</div>;
+};
+
+export default Component;
+```
+
+**4. Zustand Store Pattern:**
+* Store is split into slices: `currentTask`, `ui`, `settings`
+* Each slice has its own state and actions
+* Use selector pattern: `useAppState((state) => state.settings.value)`
+* Actions are accessed via: `state.settings.actions.actionName`
+
+---
+
+## 2. Chakra UI Design System
+
+**⚠️ CRITICAL: Chakra UI is MANDATORY for all UI components. Never use raw HTML/CSS or other UI libraries.**
+
+### Component Usage
+
+**1. Buttons:**
+```tsx
+import { Button } from '@chakra-ui/react';
+
+// ✅ CORRECT
+<Button onClick={handleClick} size="sm" colorScheme="blue">
+  Click me
+</Button>
+```
+
+**2. Forms:**
+```tsx
+import { Input, Textarea, FormControl, FormLabel } from '@chakra-ui/react';
+
+// ✅ CORRECT
+<FormControl>
+  <FormLabel>Label</FormLabel>
+  <Input value={value} onChange={handleChange} />
+</FormControl>
+```
+
+**3. Layout:**
+```tsx
+import { Box, HStack, VStack, Spacer } from '@chakra-ui/react';
+
+// ✅ CORRECT
+<Box p={4}>
+  <HStack spacing={4}>
+    <Box>Left</Box>
+    <Spacer />
+    <Box>Right</Box>
+  </HStack>
+</Box>
+```
+
+**4. Feedback:**
+```tsx
+import { useToast } from '@chakra-ui/react';
+
+// ✅ CORRECT
+const toast = useToast();
+toast({
+  title: 'Error',
+  description: message,
+  status: 'error',
+  duration: 5000,
+  isClosable: true,
+});
+```
+
+### Styling Rules
+
+* Use Chakra UI props for styling (spacing, colors, sizes)
+* Use `size="sm"` for compact buttons/inputs in extension context
+* Use Chakra's spacing scale (multiples of 4px)
+* Prefer Chakra's color schemes over custom colors
+
+---
+
+## 3. Action System Architecture
+
+**⚠️ CRITICAL: The action system is the core of the extension. Understand it before modifying.**
+
+### Action Definition
+
+Actions are defined in `src/helpers/availableActions.ts`:
+
+```typescript
+export const availableActions = [
+  {
+    name: 'click',
+    description: 'Clicks on an element',
+    args: [
+      { name: 'elementId', type: 'number' },
+    ],
+  },
+  // ... more actions
+] as const;
+```
+
+### LLM Response Format
+
+The LLM must respond with this exact format:
+
+```xml
+<Thought>Reasoning about what to do next</Thought>
+<Action>click(123)</Action>
+```
+
+Or for completion:
+```xml
+<Thought>Task is complete</Thought>
+<Action>finish()</Action>
+```
+
+### Action Parsing
+
+* Actions are parsed in `src/helpers/parseResponse.ts`
+* Must include both `<Thought>` and `<Action>` tags
+* Action format: `functionName(arg1, arg2, ...)`
+* Arguments are validated against action definitions
+* String arguments must be quoted (single, double, or backtick)
+
+### Action Execution
+
+* Actions are executed via Chrome Debugger API (`src/helpers/chromeDebugger.ts`)
+* DOM manipulation happens in content script context
+* Actions are added to history after execution
+* Maximum 50 actions per task to prevent infinite loops
+
+### Adding New Actions
+
+**⚠️ CRITICAL: Follow this exact pattern when adding new actions.**
+
+1. **Define action in `availableActions.ts`:**
+```typescript
+{
+  name: 'scroll',
+  description: 'Scrolls an element into view',
+  args: [
+    { name: 'elementId', type: 'number' },
+  ],
+}
+```
+
+2. **Implement execution in `chromeDebugger.ts` or `domActions.ts`:**
+```typescript
+export async function executeScroll(tabId: number, elementId: number) {
+  // Implementation using Chrome Debugger API
+}
+```
+
+3. **Update action execution in `currentTask.ts`:**
+```typescript
+case 'scroll':
+  await executeScroll(tabId, parsedAction.args.elementId);
+  break;
+```
+
+4. **System message auto-updates** - The system message in `determineNextAction.ts` automatically includes all actions from `availableActions.ts`
+
+---
+
+## 4. DOM Simplification System
+
+**⚠️ CRITICAL: DOM simplification is essential for token efficiency. Understand the algorithm before modifying.**
+
+### Simplification Process
+
+1. **DOM Extraction** (`src/pages/Content/getAnnotatedDOM.ts`)
+   - Content script extracts full DOM
+   - Elements annotated with visibility and interactivity flags
+   - Unique IDs assigned to interactive elements
+
+2. **Simplification** (`src/helpers/simplifyDom.ts`)
+   - Only interactive or semantically important elements included
+   - Text nodes preserved if meaningful
+   - Attributes filtered to only essential ones: `aria-label`, `data-name`, `name`, `type`, `placeholder`, `value`, `role`, `title`
+
+3. **Templatization** (`src/helpers/shrinkHTML/`)
+   - HTML templatized to reduce token count
+   - Repeated patterns replaced with templates
+   - Self-closing tags used where possible
+
+### Key Rules
+
+* Interactive elements MUST have unique numeric IDs
+* Only visible elements are included (`data-visible="true"`)
+* Text nodes are preserved if they provide context
+* Attributes are whitelisted (see allowed attributes list)
+
+---
+
+## 5. LLM Integration Patterns
+
+### LLM Interaction Flow
+
+1. **Prompt Construction** (`src/helpers/determineNextAction.ts`)
+   - System message defines available actions
+   - User task instructions
+   - Previous action history
+   - Current simplified DOM
+   - Current timestamp
+
+2. **API Call:**
+```typescript
+const completion = await openai.chat.completions.create({
+  model,
+  messages: [
+    { role: 'system', content: systemMessage },
+    { role: 'user', content: prompt },
+  ],
+  max_completion_tokens: 5000,
+  temperature: model === 'o1' ? undefined : 0,
+  reasoning_effort: model === 'o1' ? 'low' : undefined,
+  stop: ['</Action>'],
+  store: openPipeKey ? true : false,
+});
+```
+
+3. **Response Parsing:**
+   - Response parsed for `<Thought>` and `<Action>` tags
+   - Action validated against available actions
+   - Arguments type-checked and parsed
+
+4. **Error Handling:**
+   - Retry logic: Up to 3 attempts for API errors
+   - Invalid responses halt execution (safety-first)
+   - User can stop execution at any time
+
+### Model Support
+
+* GPT-3.5, GPT-4, o1, and other OpenAI models
+* Model selection via `ModelDropdown` component
+* o1 model uses `reasoning_effort` parameter
+* Temperature set to 0 for deterministic models (except o1)
+
+---
+
+## 6. Chrome Extension Specific Patterns
+
+### Manifest V3 Requirements
+
+**1. Service Worker:**
+* Background script is a service worker (not persistent background page)
+* Use `chrome.storage` for persistence (not `localStorage` in service worker)
+* Use message passing for communication
+
+**2. Content Scripts:**
+* Run in isolated world (cannot access page's JavaScript)
+* Communicate via `chrome.runtime.sendMessage`
+* Use `window.postMessage` for page context communication
+
+**3. Permissions:**
+* Request minimal permissions in `manifest.json`
+* Current permissions: `tabs`, `activeTab`, `storage`, `clipboardWrite`, `debugger`, `management`
+* `debugger` permission required for browser automation
+
+### Chrome API Usage
+
+**1. Debugger API:**
+```typescript
+// Attach debugger
+await chrome.debugger.attach({ tabId }, '1.2');
+
+// Enable domains
+await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
+await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+
+// Execute commands
+await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+  expression: 'code to execute',
+});
+
+// Detach when done
+chrome.debugger.detach({ tabId });
+```
+
+**2. Storage API:**
+```typescript
+// Write
+await chrome.storage.local.set({ key: value });
+
+// Read
+const result = await chrome.storage.local.get('key');
+const value = result.key;
+```
+
+**3. Tabs API:**
+```typescript
+// Get current tab
+const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+// Send message to content script
+chrome.tabs.sendMessage(tabId, message);
+```
+
+### Error Handling
+
+* Always check `chrome.runtime.lastError`:
+```typescript
+if (chrome.runtime.lastError) {
+  console.error('Error:', chrome.runtime.lastError.message);
+  // Handle error
+}
+```
+
+---
+
+## 7. Code Organization Patterns
+
+### File Structure
+
+```
+src/
+├── pages/              # Extension pages (Popup, Panel, Devtools, etc.)
+│   ├── Popup/          # Popup UI
+│   ├── Panel/          # Devtools panel UI
+│   ├── Content/        # Content script
+│   └── Background/     # Service worker
+├── common/             # Shared React components
+├── helpers/            # Core logic (LLM, DOM, actions)
+│   ├── determineNextAction.ts  # LLM interaction
+│   ├── parseResponse.ts        # Response parsing
+│   ├── simplifyDom.ts          # DOM simplification
+│   ├── chromeDebugger.ts       # Browser automation
+│   └── availableActions.ts     # Action definitions
+├── state/              # Zustand store and slices
+└── assets/             # Images and static assets
+```
+
+### Naming Conventions
+
+* **Components:** PascalCase (e.g., `TaskUI.tsx`)
+* **Utilities:** camelCase (e.g., `determineNextAction.ts`)
+* **Constants:** UPPER_SNAKE_CASE (in `src/constants.ts`)
+* **Types/Interfaces:** PascalCase (e.g., `ParsedResponseSuccess`)
+
+### Import Organization
+
+```typescript
+// 1. External libraries
+import React from 'react';
+import { Box, Button } from '@chakra-ui/react';
+
+// 2. Internal utilities/helpers
+import { useAppState } from '../state/store';
+import { parseResponse } from '../helpers/parseResponse';
+
+// 3. Types
+import type { ParsedResponse } from '../helpers/parseResponse';
+
+// 4. Assets
+import logo from '../assets/img/icon-128.png';
+```
+
+---
+
+## 8. Testing Patterns
+
+### Unit Tests
+
+* Use Jest for unit tests
+* Test files: `*.test.ts` or `*.test.tsx`
+* Place tests next to source files or in `__tests__` directories
+* Run with `yarn test`
+
+### Test Structure
+
+```typescript
+import { parseResponse } from './parseResponse';
+
+describe('parseResponse', () => {
+  it('should parse valid response', () => {
+    const response = '<Thought>Test</Thought><Action>click(123)</Action>';
+    const result = parseResponse(response);
+    expect(result).toHaveProperty('thought', 'Test');
+    expect(result).toHaveProperty('action', 'click(123)');
+  });
+
+  it('should return error for invalid response', () => {
+    const response = 'invalid';
+    const result = parseResponse(response);
+    expect(result).toHaveProperty('error');
+  });
+});
+```
+
+---
+
+## 9. Build & Development
+
+### Development Workflow
+
+1. **Start dev server:**
+   ```bash
+   yarn start
+   ```
+   - Builds extension to `build/` directory
+   - Watches for changes and rebuilds
+
+2. **Load extension in Chrome:**
+   - Navigate to `chrome://extensions/`
+   - Enable "Developer mode"
+   - Click "Load unpacked"
+   - Select `build/` directory
+
+3. **Debugging:**
+   - Popup: Right-click extension icon → "Inspect popup"
+   - Background: Go to `chrome://extensions/` → "Service worker" link
+   - Content script: Use page's DevTools (runs in page context)
+
+### Production Build
+
+```bash
+yarn build
+```
+
+### Code Quality
+
+* **Linting:** `yarn lint` (ESLint)
+* **Formatting:** Prettier (auto-format on save recommended)
+* **Type checking:** TypeScript compiler
+
+---
+
+## 10. 🛑 Hard Stops (Auto-Reject Code)
+
+**⚠️ CRITICAL: If any of these patterns are detected, the code MUST be rejected and regenerated.**
+
+1. **No Next.js patterns**: This is NOT a Next.js app. No `'use server'`, no Server Components, no App Router patterns.
+
+2. **No `useEffect` for data fetching in extension context**: Extension pages are client-side only. Use appropriate patterns for Chrome Extension APIs.
+
+3. **No arbitrary UI libraries**: Chakra UI is MANDATORY. Never use Tailwind CSS, Material-UI, or other UI libraries.
+
+4. **No direct DOM manipulation in React components**: Use Chakra UI components. If DOM manipulation is needed, do it in content scripts or via Chrome Debugger API.
+
+5. **No missing error handling for Chrome API calls**: Always check `chrome.runtime.lastError` after Chrome API calls.
+
+6. **No missing type safety**: All functions must have explicit types. Never use `any` without justification.
+
+7. **No breaking action system**: When modifying actions, ensure backward compatibility with existing LLM responses.
+
+8. **No hardcoded API keys**: API keys must come from Zustand store (`state.settings.openAIKey`).
+
+9. **No missing Zustand selectors**: Always use selector pattern: `useAppState((state) => state.slice.value)` instead of accessing entire store.
+
+10. **No missing action validation**: All actions must be validated against `availableActions` before execution.
+
+11. **No unsafe type assertions**: Use type guards or proper type narrowing instead of `as` assertions when possible.
+
+12. **No missing Chrome extension context checks**: Always verify extension context before using Chrome APIs (check if `chrome` is available).
+
+---
+
+## 11. Implementation Checklist
+
+*Before outputting code, verify:*
+
+**Architecture:**
+- [ ] Code is appropriate for Chrome Extension (not Next.js/web app)
+- [ ] Correct file location (pages/ vs common/ vs helpers/)
+- [ ] Proper Chrome API usage with error handling
+- [ ] Content script vs background vs UI page context understood
+
+**TypeScript:**
+- [ ] All functions have explicit types
+- [ ] No `any` types (use `unknown` for errors)
+- [ ] File extension correct (.tsx for JSX, .ts for pure TS)
+- [ ] Type guards used instead of assertions when possible
+
+**React & Chakra UI:**
+- [ ] Functional components with hooks
+- [ ] Chakra UI components used (not raw HTML)
+- [ ] Zustand store used for global state
+- [ ] Selector pattern used for store access
+
+**Action System:**
+- [ ] New actions added to `availableActions.ts`
+- [ ] Action execution implemented correctly
+- [ ] Action validation in place
+- [ ] Error handling for failed actions
+
+**DOM & LLM:**
+- [ ] DOM simplification patterns followed
+- [ ] LLM response format correct (`<Thought>` and `<Action>` tags)
+- [ ] Token efficiency considered
+- [ ] Error handling for LLM failures
+
+**Code Quality:**
+- [ ] ESLint rules followed
+- [ ] Prettier formatting applied
+- [ ] No console.logs in production code (use proper logging)
+- [ ] Comments explain "why" not "what"
+
+**Testing:**
+- [ ] Unit tests added for new utilities
+- [ ] Test cases cover edge cases
+- [ ] Tests pass locally
+
+**Extension Specific:**
+- [ ] Chrome API errors handled
+- [ ] Permissions checked before API calls
+- [ ] Message passing used correctly
+- [ ] Storage API used for persistence
+
+---
+
+## 12. Common Patterns Reference
+
+### Zustand Store Access
+
+```tsx
+// ✅ CORRECT - Selector pattern
+const value = useAppState((state) => state.settings.value);
+const action = useAppState((state) => state.settings.actions.setValue);
+
+// ✅ CORRECT - Multiple values
+const state = useAppState((state) => ({
+  value: state.settings.value,
+  other: state.ui.other,
+}));
+
+// ❌ WRONG - Accessing entire store
+const store = useAppState(); // Don't do this
+```
+
+### Chrome API Error Handling
+
+```typescript
+// ✅ CORRECT
+chrome.tabs.query({ active: true }, (tabs) => {
+  if (chrome.runtime.lastError) {
+    console.error('Error:', chrome.runtime.lastError.message);
+    return;
+  }
+  // Use tabs
+});
+
+// ✅ CORRECT - Promise-based
+const tabs = await chrome.tabs.query({ active: true });
+if (chrome.runtime.lastError) {
+  throw new Error(chrome.runtime.lastError.message);
+}
+```
+
+### Action Execution Pattern
+
+```typescript
+// ✅ CORRECT
+const parsed = parseResponse(llmResponse);
+if ('error' in parsed) {
+  // Handle error
+  return;
+}
+
+const { parsedAction } = parsed;
+switch (parsedAction.name) {
+  case 'click':
+    await executeClick(tabId, parsedAction.args.elementId);
+    break;
+  case 'setValue':
+    await executeSetValue(tabId, parsedAction.args.elementId, parsedAction.args.value);
+    break;
+  default:
+    throw new Error(`Unknown action: ${parsedAction.name}`);
+}
+```
+
+### Content Script Communication
+
+```typescript
+// ✅ CORRECT - From UI to Content Script
+const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+chrome.tabs.sendMessage(tab.id!, { type: 'ACTION', payload: data });
+
+// ✅ CORRECT - From Content Script to Background
+chrome.runtime.sendMessage({ type: 'RESULT', payload: data });
+```
+
+---
+
+**Priority Order for References:**
+1. **This file** - Production rules and patterns
+2. **AGENTS.md** - General AI assistant guidelines
+3. **CLAUDE.md** - Claude-specific context
+4. **Chrome Extension Documentation** - Official Chrome Extension APIs
+5. **Chakra UI Documentation** - Component library reference
+
+**When guidelines conflict, prioritize this file for code patterns and Chrome Extension best practices.**

@@ -1,4 +1,4 @@
-export const TAXY_ELEMENT_SELECTOR = 'data-taxy-node-id';
+export const SPADEWORKS_ELEMENT_SELECTOR = 'data-spadeworks-node-id';
 
 // read from env
 export const debugMode = process.env.DEBUG_MODE === 'true';

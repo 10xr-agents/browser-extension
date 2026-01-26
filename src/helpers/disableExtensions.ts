@@ -1,5 +1,5 @@
-// These are extensions that are known to interfere with the operation of Taxy.
-// We'll turn them off temporarily while Taxy is performing actions.
+// These are extensions that are known to interfere with the operation of Spadeworks Copilot AI.
+// We'll turn them off temporarily while Spadeworks Copilot AI is performing actions.
 const incompatibleExtensions = [
   // Dashlane
   'fdjamakpfbbddfjaooikfcpapjohcfmg',

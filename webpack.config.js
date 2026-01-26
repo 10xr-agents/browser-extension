@@ -113,6 +113,15 @@ var options = {
     new webpack.ProgressPlugin(),
     // expose and write the allowed env vars on the compiled bundle
     new webpack.EnvironmentPlugin(['NODE_ENV']),
+    // Inject API_BASE at build time for Thin Client architecture
+    new webpack.DefinePlugin({
+      'process.env.NEXT_PUBLIC_API_BASE': JSON.stringify(
+        process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
+      ),
+      'process.env.API_BASE': JSON.stringify(
+        process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
+      ),
+    }),
     new CopyWebpackPlugin({
       patterns: [
         {

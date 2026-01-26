@@ -37,8 +37,10 @@ export const useAppState = create<StoreType>()(
           instructions: state.ui.instructions,
         },
         settings: {
-          openAIKey: state.settings.openAIKey,
-          selectedModel: state.settings.selectedModel,
+          // Auth state for UI display (tokens stored in chrome.storage.local)
+          user: state.settings.user,
+          tenantId: state.settings.tenantId,
+          tenantName: state.settings.tenantName,
         },
       }),
       merge: (persistedState, currentState) =>
