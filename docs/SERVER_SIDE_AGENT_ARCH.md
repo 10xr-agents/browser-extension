@@ -918,7 +918,7 @@ RAG and action history MUST use **Tenant ID** and **Active Domain** as above to 
 | **`THIN_SERVER_ROADMAP.md`** | Complete implementation roadmap: MongoDB, Mongoose, Better Auth, Next.js, all tasks (auth, resolve, interact, preferences, web search, chat persistence, debug, orchestrator). **Keep in sync with this spec.** |
 | **`ARCHITECTURE.md`** | Hybrid DB (Prisma + Mongoose), tenant model (user / organization), multi-tenancy. |
 | **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`** | **Browser automation / extraction service** `GET /api/knowledge/resolve` request & response schema. Used when Next.js proxies resolve (§5); referenced by Task 2 and `lib/knowledge-extraction/resolve-client.ts`. |
-| **`DEBUG_VIEW_IMPROVEMENTS.md`** | Debug View requirements (client-focused, but server provides debug data). |
+| **`CLIENT_ARCHITECTURE.md`** | Client-side architecture including Debug View (server provides debug data, client displays it). |
 | **`MANUS_ORCHESTRATOR_ARCHITECTURE.md`** | Manus orchestrator architecture specification. |
 | **Better Auth** | [Browser Extension Guide](https://www.better-auth.com/docs/guides/browser-extension-guide), [Bearer Plugin](https://beta.better-auth.com/docs/plugins/bearer), [trustedOrigins](https://www.better-auth.com/docs/reference/options). |
 | **Next.js** | [Middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware) (CORS), [Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers). |

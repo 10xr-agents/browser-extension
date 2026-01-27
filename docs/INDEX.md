@@ -2,32 +2,52 @@
 
 ## Overview
 
-This documentation provides a comprehensive understanding of the Spadeworks Copilot AI browser extension architecture. The documentation has been consolidated into a single comprehensive document for easier navigation and maintenance.
+This documentation provides a comprehensive understanding of the Spadeworks Copilot AI browser extension architecture. The documentation has been reorganized with clear separation between client-side and server-side architecture.
 
-**Architecture Note:** The extension has migrated to a **Thin Client** architecture where DOM processing remains client-side, but LLM inference moves to the server. See [Comprehensive Architecture](./COMPREHENSIVE_ARCHITECTURE.md) and [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for details.
+**Architecture Note:** The extension has migrated to a **Thin Client** architecture where DOM processing remains client-side, but LLM inference moves to the server.
 
 ## Primary Documentation
 
-### [Comprehensive Architecture & Specification](./COMPREHENSIVE_ARCHITECTURE.md) ⭐ **START HERE**
-**Consolidated documentation** covering all aspects of the system:
-- System architecture overview
-- Component architecture
-- Data flow architecture
-- Action system architecture
-- Thin Client architecture
-- Enterprise platform specification
-- DOM processing pipeline
-- Quick reference and implementation status
+### [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) ⭐ **START HERE FOR CLIENT-SIDE**
+**Complete client-side (extension) architecture documentation:**
+- System architecture (extension contexts, communication patterns)
+- Component architecture (all UI components, patterns, dark mode)
+- Data flow architecture (task execution, chat persistence, error flow)
+- Action system architecture (execution, validation, history)
+- Thin Client implementation (authentication, API client, action loop)
+- DOM Processing Pipeline (accessibility integration, token optimization)
+- Reasoning Layer client support (popup handling, NEEDS_USER_INPUT)
+- Debug View architecture (Debug Panel, health signals, developer mode)
+- Manus Orchestrator client support (plan display, verification, correction)
+- Implementation status (Tasks 1-10 complete)
+- Quick reference (key files, patterns, common mistakes)
 
-**Note:** This document consolidates information from the individual architecture documents below. For the most up-to-date information, refer to this comprehensive document.
+**This document consolidates all client-side information from:**
+- `COMPREHENSIVE_ARCHITECTURE.md` (client-side parts)
+- `THIN_CLIENT_ROADMAP.md` (implementation details)
+- `REASONING_LAYER_IMPROVEMENTS.md` (client-side parts)
+- `DEBUG_VIEW_IMPROVEMENTS.md` (client-side implementation)
+- `MANUS_ORCHESTRATOR_ARCHITECTURE.md` (client-side display)
+- `ENTERPRISE_PLATFORM_SPECIFICATION.md` (client-side migration)
+
+**Note:** For detailed task-based implementation reference, see [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md). For server-side architecture, see [Server-Side Agent Architecture](./SERVER_SIDE_AGENT_ARCH.md).
 
 ## Implementation Roadmaps
 
 ### [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md)
-Client-side implementation roadmap with task-based approach:
-- Tasks 1-3: Core Thin Client migration (COMPLETE)
-- Tasks 4-8: DOM processing improvements (COMPLETE)
+**Detailed task-based implementation roadmap** with comprehensive verification checklists:
+- **Part 1: Current Implementation (Tasks 1-10)** — All complete
+  - Tasks 1-3: Core Thin Client migration (Authentication, Knowledge Resolution, Action Loop)
+  - Tasks 4-8: DOM processing improvements (Accessibility Tree integration)
+  - Task 9: Documentation Consolidation
+  - Task 10: Reasoning Layer Client-Side Improvements
+- **Part 2: Future Enhancements** — Debug View & Manus Orchestrator (all complete)
+  - Part A (Tasks 1-5): Debug View Enhancements
+  - Part B (Tasks 6-10): Manus Orchestrator Support
 - Detailed verification and implementation status for each task
+- File-by-file implementation details
+
+**Note:** For architecture overview, see [Client-Side Architecture](./CLIENT_ARCHITECTURE.md). This roadmap provides detailed task-based implementation guidance.
 
 ### [Thin Server Roadmap](./THIN_SERVER_ROADMAP.md)
 Server-side implementation roadmap:
@@ -38,23 +58,56 @@ Server-side implementation roadmap:
 
 ## Detailed Specifications
 
-### [Enterprise Platform Specification](./ENTERPRISE_PLATFORM_SPECIFICATION.md)
-Complete enterprise platform specification covering:
-- Multi-tenant architecture & security
-- Private knowledge injection (RAG pipeline)
-- Contextual overlay mechanics
-- **DOM Processing Pipeline** (§3.5) - Processing stages, element identification, token optimization
-- **DOM Processing Improvements** (§3.6) - Alternative solutions, accessibility tree approach, implementation plan
-- Extension Thin Client Migration (§5.7) - Complete migration guide from client-side to server-side inference
-- Infrastructure requirements
-- Migration path and implementation roadmap
+### [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) ⭐ **PRIMARY CLIENT-SIDE DOC**
+**Complete client-side architecture** - See Primary Documentation above.
+
+### [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md)
+**Detailed task-based implementation roadmap** - See Implementation Roadmaps above.
 
 ### [Server-Side Agent Architecture](./SERVER_SIDE_AGENT_ARCH.md)
-Server-side agent architecture specification:
+**Server-side agent architecture specification:**
 - API endpoints (`POST /api/agent/interact`, `GET /api/knowledge/resolve`)
 - Task and action history management
 - RAG integration
 - Authentication and authorization
+- Session management
+- Error handling
+- Manus-style orchestrator features (planning, verification, self-correction)
+
+### [Manus Orchestrator Architecture](./MANUS_ORCHESTRATOR_ARCHITECTURE.md)
+**Server-side Manus Orchestrator architecture specification:**
+- Architectural decisions and design rationale
+- Reason-Act-Verify loop architecture
+- Planning engine design
+- Verification architecture
+- Self-correction architecture
+- Tool system architecture
+
+**Note:** Client-side display and interaction are in [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §10.
+
+### [Reasoning Layer Improvements](./REASONING_LAYER_IMPROVEMENTS.md)
+**Server-side Reasoning Layer architecture specification:**
+- 4-step reasoning pipeline (Context & Gap Analysis, Execution, Evaluation & Iteration, Final Verification)
+- Dual-model architecture (Smart LLM for thinking, Fast LLM for routine)
+- Confidence scoring and evidence tracking
+- Iterative search refinement
+- Missing information classification
+
+**Note:** Client-side support (popup handling, NEEDS_USER_INPUT) is in [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §8.
+
+### [Enterprise Platform Specification](./ENTERPRISE_PLATFORM_SPECIFICATION.md)
+**Enterprise platform specification** (server-focused):
+- Multi-tenant architecture & security
+- Private knowledge injection (RAG pipeline)
+- Contextual overlay mechanics
+- **DOM Processing Pipeline** (§3.5) - Processing stages, element identification, token optimization (client-side processing details)
+- **DOM Processing Improvements** (§3.6) - Alternative solutions, accessibility tree approach, implementation plan (client-side processing details)
+- Infrastructure requirements
+- Migration path and implementation roadmap
+
+**Note:** 
+- Client-side implementation details are in [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §7 (DOM Processing Pipeline)
+- Extension Thin Client Migration details (§5.7) are in [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §6 (Thin Client Implementation)
 
 
 ## Quick Reference
@@ -129,10 +182,17 @@ Every design decision considers token usage and API cost optimization
 
 ### Understanding the Codebase
 
-1. Start with [Comprehensive Architecture](./COMPREHENSIVE_ARCHITECTURE.md) for complete understanding
-2. Review [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for implementation details
-3. Study [Server-Side Agent Architecture](./SERVER_SIDE_AGENT_ARCH.md) for backend specification
-4. Deep dive into specific areas as needed
+**For Client-Side (Extension) Development:**
+1. Start with [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) ⭐ for complete client-side understanding
+2. Review [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for detailed task-based implementation reference
+3. Deep dive into specific areas as needed
+
+**For Server-Side Development:**
+1. Study [Server-Side Agent Architecture](./SERVER_SIDE_AGENT_ARCH.md) for backend specification
+2. Review [Thin Server Roadmap](./THIN_SERVER_ROADMAP.md) for server implementation details
+3. Check [Backend Missing Items](./BACKEND_MISSING_ITEMS.md) for implementation gaps
+4. Review [Manus Orchestrator Architecture](./MANUS_ORCHESTRATOR_ARCHITECTURE.md) for orchestrator design decisions
+5. Review [Reasoning Layer Improvements](./REASONING_LAYER_IMPROVEMENTS.md) for reasoning layer server-side architecture
 
 ### Making Changes
 
@@ -145,24 +205,26 @@ Every design decision considers token usage and API cost optimization
 
 ### Debugging
 
-1. Review [Comprehensive Architecture](./COMPREHENSIVE_ARCHITECTURE.md) §4 (Data Flow) for execution path
-2. Check [Comprehensive Architecture](./COMPREHENSIVE_ARCHITECTURE.md) §5 (Action System) for execution issues
-3. Review [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for implementation details
+**Client-Side Debugging:**
+1. Review [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §4 (Data Flow) for execution path
+2. Check [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §5 (Action System) for execution issues
+3. Review [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for detailed implementation reference
 4. Use task history for context
+5. Enable Developer Mode in Settings to access Debug Panel
 
 ## Extension Points
 
 ### Adding New Actions
-See [Comprehensive Architecture](./COMPREHENSIVE_ARCHITECTURE.md) §5 (Action System) for details on extending actions
+See [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §5 (Action System Architecture) for details on extending actions
 
 ### Adding UI Components
-See [Comprehensive Architecture](./COMPREHENSIVE_ARCHITECTURE.md) §3 (Component Architecture) for component patterns
+See [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §3 (Component Architecture) for component patterns
 
 ### Modifying DOM Processing
-See [Comprehensive Architecture](./COMPREHENSIVE_ARCHITECTURE.md) §8 (DOM Processing Pipeline) for processing architecture and enhancement strategies
+See [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §7 (DOM Processing Pipeline) for processing architecture and enhancement strategies
 
 ### Thin Client Implementation
-See [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for task-based implementation guide and detailed code examples
+See [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §6 (Thin Client Implementation) for architecture overview, and [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for detailed task-based implementation guide
 
 ## Best Practices
 

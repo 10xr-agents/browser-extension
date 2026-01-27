@@ -1,18 +1,30 @@
 # Manus-Style Agent Orchestrator: Architecture & Design Decisions
 
+**⚠️ CLIENT-SIDE INFORMATION CONSOLIDATED**
+
+**Client-side display and interaction details have been consolidated.** All client-side Manus Orchestrator support (plan display, verification display, correction display, etc.) is now documented in **[CLIENT_ARCHITECTURE.md](./CLIENT_ARCHITECTURE.md)** §10 (Manus Orchestrator Client Support).
+
+**For client-side Manus Orchestrator information, see:**
+- **[CLIENT_ARCHITECTURE.md](./CLIENT_ARCHITECTURE.md)** §10 — Complete Manus Orchestrator client support (Tasks 6-10 complete)
+- **[THIN_CLIENT_ROADMAP.md](./THIN_CLIENT_ROADMAP.md)** Part 2, Tasks 6-10 — Detailed task-based implementation reference
+
+**This document focuses on server-side Manus Orchestrator architecture and design decisions.** Client-side parts are documented in CLIENT_ARCHITECTURE.md.
+
+---
+
 **Document Version:** 1.0  
 **Date:** January 26, 2026  
-**Status:** Architecture Specification  
+**Status:** Architecture Specification — **Server-Side Focus**  
 **Purpose:** Architectural decisions and design rationale for transforming the agent system into a Manus-style autonomous executor
 
 **Target:** Next.js Intelligence Layer (Thin Client backend) - Enhancement to existing `POST /api/agent/interact`
 
-**Sync:** This document defines the **architectural specification** for the Manus-style orchestrator. Implementation details (MongoDB, Mongoose, Better Auth, Next.js patterns) follow `THIN_SERVER_ROADMAP.md` conventions. The current reactive implementation is specified in `SERVER_SIDE_AGENT_ARCH.md` §4. Keep all documents in sync; on conflict, prefer this document for orchestrator architecture decisions, `SERVER_SIDE_AGENT_ARCH.md` for current implementation details, and `THIN_SERVER_ROADMAP.md` for implementation patterns.
+**Sync:** This document defines the **architectural specification** for the Manus-style orchestrator (server-side). Implementation details (MongoDB, Mongoose, Better Auth, Next.js patterns) follow `THIN_SERVER_ROADMAP.md` conventions. The current reactive implementation is specified in `SERVER_SIDE_AGENT_ARCH.md` §4. Keep all documents in sync; on conflict, prefer this document for orchestrator architecture decisions, `SERVER_SIDE_AGENT_ARCH.md` for current implementation details, and `THIN_SERVER_ROADMAP.md` for implementation patterns.
 
 **Reference Documents:**
 - **`SERVER_SIDE_AGENT_ARCH.md`** — Current server-side agent architecture specification. See §4 (`POST /api/agent/interact`) for existing reactive implementation. This orchestrator architecture **extends** the existing endpoint with planning, verification, and self-correction.
 - **`THIN_SERVER_ROADMAP.md`** — Server implementation roadmap. See §1.4 (Database Stack - MongoDB/Mongoose), §2.4 (Better Auth & Next.js patterns), §4.2 (Task 3 implementation patterns) for implementation conventions to follow.
-- **`COMPREHENSIVE_ARCHITECTURE.md`** — Overall system architecture. See §6 (Thin Client Architecture) for client-server separation, §4 (Data Flow Architecture) for current execution flow, §5 (Action System Architecture) for action definitions.
+- **`CLIENT_ARCHITECTURE.md`** — Client-side architecture. See §10 (Manus Orchestrator Client Support) for client-side display and interaction.
 - **`ENTERPRISE_PLATFORM_SPECIFICATION.md`** — Enterprise platform context. See §1 (Multi-Tenant Architecture) for tenant isolation patterns, §2 (RAG Pipeline) for knowledge injection context, §3 (Contextual Overlay) for DOM processing.
 
 ---
@@ -89,7 +101,7 @@ The existing **Thin Client architecture** is actually the **best foundation** fo
 1. **Centralized Intelligence**: All complex logic (planning, verification, correction) lives on the server where it has access to LLMs, tools, and compute
 2. **Lightweight Client**: Extension remains a simple action runner, executing DOM operations
 3. **State Management**: Server already owns task state and action history (see `SERVER_SIDE_AGENT_ARCH.md` §4.4)
-4. **Separation of Concerns**: Clear boundary between "brain" (server) and "body" (client) (see `COMPREHENSIVE_ARCHITECTURE.md` §6)
+4. **Separation of Concerns**: Clear boundary between "brain" (server) and "body" (client) (see `CLIENT_ARCHITECTURE.md` §6)
 
 **The Transformation:**
 Upgrade the server from a "Stateless Reactor" (Input → LLM → Output) to a "Stateful Orchestrator" that manages plans, expectations, and verification. The existing `POST /api/agent/interact` endpoint (see `SERVER_SIDE_AGENT_ARCH.md` §4) will be enhanced with orchestrator logic while maintaining backward compatibility.
@@ -423,7 +435,7 @@ Matches existing API contract for backward compatibility. Minimal changes requir
 
 **Response Body:**
 - `thought`: LLM reasoning (existing — see `SERVER_SIDE_AGENT_ARCH.md` §4.2)
-- `action`: Action string (existing — see `SERVER_SIDE_AGENT_ARCH.md` §4.2, `COMPREHENSIVE_ARCHITECTURE.md` §5 for action definitions)
+- `action`: Action string (existing — see `SERVER_SIDE_AGENT_ARCH.md` §4.2, `CLIENT_ARCHITECTURE.md` §5 for action definitions)
 - `taskId`: Task identifier (existing — see `SERVER_SIDE_AGENT_ARCH.md` §4.2)
 - `hasOrgKnowledge`: RAG indicator (existing — see `SERVER_SIDE_AGENT_ARCH.md` §4.2, §4.5 for RAG context)
 - **New Fields (Optional):**
@@ -454,7 +466,7 @@ Enables client to show appropriate UI. Makes debugging easier. Enables status po
 
 ### 8.1 Verification Strategy
 
-**Reference:** Current DOM processing in `COMPREHENSIVE_ARCHITECTURE.md` §8 (DOM Processing Pipeline). Verification uses the simplified DOM sent by the client, following the same processing pipeline.
+**Reference:** Current DOM processing in `CLIENT_ARCHITECTURE.md` §7 (DOM Processing Pipeline). Verification uses the simplified DOM sent by the client, following the same processing pipeline.
 
 **Hybrid Approach:**
 1. **DOM-Based Checks** (Fast, Structural)
@@ -462,7 +474,7 @@ Enables client to show appropriate UI. Makes debugging easier. Enables status po
    - Text content matching
    - URL change detection
    - Structural comparison
-   - Uses simplified DOM from client (see `COMPREHENSIVE_ARCHITECTURE.md` §8.2)
+   - Uses simplified DOM from client (see `CLIENT_ARCHITECTURE.md` §7.1)
 
 2. **Semantic Verification** (Slow, Intent-Based)
    - LLM analyzes if page state matches expectation
@@ -547,7 +559,7 @@ Prevents infinite retry loops. Ensures task fails gracefully rather than hanging
 - Executed by Chrome Extension
 - Return new DOM state after execution
 - Examples: `click`, `setValue`, `scroll`, `extractText`
-- **Reference:** Current action definitions in `COMPREHENSIVE_ARCHITECTURE.md` §5.2, `SERVER_SIDE_AGENT_ARCH.md` §4.6. These tools are already implemented and used by the existing system.
+- **Reference:** Current action definitions in `CLIENT_ARCHITECTURE.md` §5.1, `SERVER_SIDE_AGENT_ARCH.md` §4.6. These tools are already implemented and used by the existing system.
 
 **Server Tools (Server-Side):**
 - Executed by backend server
@@ -557,7 +569,7 @@ Prevents infinite retry loops. Ensures task fails gracefully rather than hanging
 - **Reference:** Tool integration follows same patterns as RAG integration (see `SERVER_SIDE_AGENT_ARCH.md` §4.5 for server-side tool execution patterns)
 
 **Why This Separation:**
-Clear boundary between client and server responsibilities. DOM tools require page access (client). Server tools require external APIs (server). Matches existing Thin Client architecture separation (see `COMPREHENSIVE_ARCHITECTURE.md` §6).
+Clear boundary between client and server responsibilities. DOM tools require page access (client). Server tools require external APIs (server). Matches existing Thin Client architecture separation (see `CLIENT_ARCHITECTURE.md` §6).
 
 ### 10.2 Tool Selection
 
@@ -866,7 +878,7 @@ The existing Thin Client architecture is **90% ready** for Manus. The transforma
 |----------|---------|--------------|
 | **`SERVER_SIDE_AGENT_ARCH.md`** | Current server-side agent architecture specification | §4 (`POST /api/agent/interact`), §4.4 (action history), §4.5 (RAG pipeline) |
 | **`THIN_SERVER_ROADMAP.md`** | Server implementation roadmap and patterns | §1.4 (Database Stack), §2.4 (Better Auth & Next.js), §4.1 (Task models), §4.2 (API patterns) |
-| **`COMPREHENSIVE_ARCHITECTURE.md`** | Overall system architecture | §6 (Thin Client Architecture), §5 (Action System), §8 (DOM Processing Pipeline) |
+| **`CLIENT_ARCHITECTURE.md`** | Client-side architecture | §6 (Thin Client Implementation), §5 (Action System), §7 (DOM Processing Pipeline) |
 | **`ENTERPRISE_PLATFORM_SPECIFICATION.md`** | Enterprise platform context | §1 (Multi-Tenant Architecture), §2 (RAG Pipeline), §3 (Contextual Overlay) |
 | **`THIN_CLIENT_ROADMAP.md`** | Client-side implementation roadmap | §4.1 (Task 3: Server-Side Action Loop) for client integration patterns |
 

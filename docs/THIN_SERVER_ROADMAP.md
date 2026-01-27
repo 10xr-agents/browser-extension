@@ -1064,7 +1064,7 @@ We **reuse** Better Auth (Prisma) for users, sessions, and organizations. **No n
 - **`THIN_CLIENT_ROADMAP_CLIENT.md`** — Extension integration for Tasks 1-3.
 - **`ARCHITECTURE.md`** — Hybrid DB (Prisma + Mongoose), tenant model (user / organization), multi-tenancy.
 - **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`** — **Browser automation / extraction service** `GET /api/knowledge/resolve` request & response schema. Referenced by Task 2 (§3.1, §3.2) and `lib/knowledge-extraction/resolve-client.ts`.
-- **`DEBUG_VIEW_IMPROVEMENTS.md`** — Debug View requirements (client-focused, but server provides debug data).
+- **`CLIENT_ARCHITECTURE.md`** — Client-side architecture including Debug View (server provides debug data, client displays it).
 - **`MANUS_ORCHESTRATOR_ARCHITECTURE.md`** — Manus orchestrator architecture specification.
 
 ### 21.2 Better Auth

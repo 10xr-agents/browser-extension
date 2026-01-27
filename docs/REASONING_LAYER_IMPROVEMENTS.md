@@ -1,8 +1,20 @@
 # Reasoning Layer Improvements
 
+**⚠️ CLIENT-SIDE INFORMATION CONSOLIDATED**
+
+**Client-side implementation details have been consolidated.** All client-side Reasoning Layer support (popup/dropdown handling, NEEDS_USER_INPUT response handling) is now documented in **[CLIENT_ARCHITECTURE.md](./CLIENT_ARCHITECTURE.md)** §8 (Reasoning Layer Client Support).
+
+**For client-side Reasoning Layer information, see:**
+- **[CLIENT_ARCHITECTURE.md](./CLIENT_ARCHITECTURE.md)** §8 — Complete Reasoning Layer client support (Task 10 complete)
+- **[THIN_CLIENT_ROADMAP.md](./THIN_CLIENT_ROADMAP.md)** §10 — Detailed task-based implementation reference
+
+**This document focuses on server-side Reasoning Layer architecture.** Client-side parts are documented in CLIENT_ARCHITECTURE.md.
+
+---
+
 **Document Version:** 2.0  
 **Date:** January 27, 2026  
-**Status:** Architecture Specification (Enhanced with Confidence Scoring & Dual-Model Routing)  
+**Status:** Architecture Specification (Enhanced with Confidence Scoring & Dual-Model Routing) — **Server-Side Focus**  
 **Author:** Principal AI Architect & Principal AI Engineer
 
 ---

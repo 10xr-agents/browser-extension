@@ -6,7 +6,7 @@
 **Status:** Execution-Ready (Extension) + Implementation Plan (Future Enhancements)
 **Changelog (3.1):** Added Task 10 (Reasoning Layer Client-Side Improvements) — Popup/dropdown handling and NEEDS_USER_INPUT response handling documented as completed. Merged client-side improvements from `REASONING_LAYER_IMPROVEMENTS.md`.
 **Changelog (3.0):** Merged `THIN_CLIENT_TO_BE_ROADMAP.md` into this document. Document now covers both current implementation (Part 1: Tasks 1-10) and future enhancements (Part 2: Debug View & Manus Orchestrator). See Part 1 for completed tasks and Part 2 for planned enhancements.
-**Changelog (2.2):** Task 9 (Documentation Consolidation) **COMPLETE** — All documentation consolidated into `COMPREHENSIVE_ARCHITECTURE.md`, legacy docs deprecated, outdated references removed. See §9.2 for completion status.  
+**Changelog (2.2):** Task 9 (Documentation Consolidation) **COMPLETE** — All documentation consolidated into `CLIENT_ARCHITECTURE.md`, legacy docs deprecated, outdated references removed. See §9.2 for completion status.  
 **Changelog (2.1):** Task 8 (Accessibility-First Element Selection) **COMPLETE** — All implementation items verified and documented. See §9.2 for completion status.  
 **Changelog (2.0):** Task 7 (Hybrid Element Representation) **COMPLETE** — All implementation items verified and documented. See §8.2 for completion status.  
 **Changelog (1.9):** Task 6 (Accessibility-DOM Element Mapping) **COMPLETE** — All implementation items verified and documented. See §7.2 for completion status.  
@@ -16,9 +16,9 @@
 **Changelog (1.5):** Task 2 (Runtime Knowledge Resolution) **COMPLETE** — All implementation items verified and documented. See §3.2 for completion status.  
 **Changelog (1.4):** Task 1 (Authentication & API Client) **COMPLETE** — All implementation items verified and documented. See §2.2 for completion status.  
 **Changelog (1.3):** Added DOM processing improvement tasks (Tasks 4-8): Basic Accessibility Tree Extraction, Accessibility Node Filtering, Accessibility-DOM Element Mapping, Hybrid Element Representation, Accessibility-First Element Selection. These tasks can be implemented incrementally after core Thin Client (Tasks 1-3) is complete.  
-**Source:** `SERVER_SIDE_AGENT_ARCH.md`, `ENTERPRISE_PLATFORM_SPECIFICATION.md` (Extension Migration: §5.7), `DEBUG_VIEW_IMPROVEMENTS.md`, `MANUS_ORCHESTRATOR_ARCHITECTURE.md`
+**Source:** `SERVER_SIDE_AGENT_ARCH.md`, `ENTERPRISE_PLATFORM_SPECIFICATION.md` (Extension Migration: §5.7), `REASONING_LAYER_IMPROVEMENTS.md`, `MANUS_ORCHESTRATOR_ARCHITECTURE.md`
 
-**Sync:** This document is the **complete client-side (extension) implementation roadmap** covering both current implementation (Tasks 1-10) and future enhancements (Debug View & Manus Orchestrator). The **specifications** are `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7 (Extension Thin Client Migration), `REASONING_LAYER_IMPROVEMENTS.md` (Reasoning Layer architecture), `DEBUG_VIEW_IMPROVEMENTS.md`, and `MANUS_ORCHESTRATOR_ARCHITECTURE.md`. Keep all documents in sync.
+**Sync:** This document is the **complete client-side (extension) implementation roadmap** covering both current implementation (Tasks 1-10) and future enhancements (Debug View & Manus Orchestrator). The **specifications** are `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7 (Extension Thin Client Migration), `REASONING_LAYER_IMPROVEMENTS.md` (Reasoning Layer architecture), `MANUS_ORCHESTRATOR_ARCHITECTURE.md` (Manus Orchestrator architecture). All client-side architecture is consolidated in `CLIENT_ARCHITECTURE.md`. Keep all documents in sync.
 
 **Counterpart:** Server-side work (DB, API) is in `THIN_SERVER_ROADMAP.md` (current) and `THIN_SERVER_TO_BE_ROADMAP.md` (future enhancements). Tasks are **sequential**; client and server work for a given task ship together for end-to-end verification.
 
@@ -1062,23 +1062,27 @@ The implementation correctly prioritizes accessibility tree and supplements with
 
 **Objective:** Consolidate all architecture documentation into a single comprehensive document and verify all documentation is up-to-date with current implementation.
 
-**Deliverable:** Single comprehensive architecture document (`COMPREHENSIVE_ARCHITECTURE.md`) that consolidates all architecture, component, data flow, action system, and enterprise specification information. All outdated references removed or updated.
+**Deliverable:** Single comprehensive architecture document (`CLIENT_ARCHITECTURE.md`) that consolidates all client-side architecture, component, data flow, action system, and implementation information. All outdated references removed or updated.
 
 **Prerequisites:** Tasks 1-8 complete (all features implemented and documented).
 
-**Implementation Details:** See `COMPREHENSIVE_ARCHITECTURE.md` for consolidated documentation structure.
+**Implementation Details:** See `CLIENT_ARCHITECTURE.md` for consolidated client-side architecture documentation.
 
 ---
 
 ### 9.1 Documentation Consolidation (Task 9)
 
-- **Comprehensive Document:** Create `COMPREHENSIVE_ARCHITECTURE.md` that merges:
-  - Architecture overview (from `ARCHITECTURE.md`)
-  - Component architecture (from `COMPONENT_ARCHITECTURE.md`)
-  - Data flow (from `DATA_FLOW.md`)
-  - Action system (from `ACTION_SYSTEM.md`)
-  - Enterprise platform specification (key sections from `ENTERPRISE_PLATFORM_SPECIFICATION.md`)
-  - Quick reference (from `INDEX.md`)
+- **Comprehensive Document:** Create `CLIENT_ARCHITECTURE.md` that consolidates all client-side architecture:
+  - System architecture (extension contexts, communication patterns)
+  - Component architecture (all UI components, patterns)
+  - Data flow architecture (task execution, chat persistence, error flow)
+  - Action system architecture (execution, validation, history)
+  - Thin Client implementation (authentication, API client, action loop)
+  - DOM Processing Pipeline (accessibility integration, token optimization)
+  - Reasoning Layer client support
+  - Debug View architecture
+  - Manus Orchestrator client support
+  - Quick reference and implementation status
 
 - **Update INDEX.md:** Point to comprehensive document, mark legacy docs as deprecated
 
@@ -1107,7 +1111,7 @@ The implementation correctly prioritizes accessibility tree and supplements with
 
 ### 9.2 Definition of Done / QA Verification (Task 9 — Client)
 
-- [x] `COMPREHENSIVE_ARCHITECTURE.md` created with all consolidated information. ✅ **VERIFIED** — Comprehensive document created with all architecture, component, data flow, action system, and enterprise specification information.
+- [x] `CLIENT_ARCHITECTURE.md` created with all consolidated client-side information. ✅ **VERIFIED** — Comprehensive document created with all client-side architecture, components, data flow, action system, and implementation details.
 - [x] `INDEX.md` updated to point to comprehensive document. ✅ **VERIFIED** — INDEX.md updated with references to comprehensive document, legacy docs marked as deprecated.
 - [x] All file references verified and current. ✅ **VERIFIED** — All file references in comprehensive document match current implementation.
 - [x] All component names match implementation. ✅ **VERIFIED** — All component names (Login, TaskUI, KnowledgeOverlay, AccessibilityTreeView, HybridElementView, CoverageMetricsView) match implementation.
@@ -1119,10 +1123,10 @@ The implementation correctly prioritizes accessibility tree and supplements with
 - [x] No outdated references to removed components. ✅ **VERIFIED** — All outdated references removed from comprehensive document.
 
 **Implementation Status:**
-- [x] Comprehensive document created — ✅ **COMPLETE** (January 26, 2026) — `COMPREHENSIVE_ARCHITECTURE.md`
-- [x] INDEX.md updated — ✅ **COMPLETE** (January 26, 2026) — Points to comprehensive document
-- [x] Legacy docs removed — ✅ **COMPLETE** (January 26, 2026) — ARCHITECTURE.md, COMPONENT_ARCHITECTURE.md, DATA_FLOW.md, ACTION_SYSTEM.md removed (consolidated into comprehensive document)
-- [x] Outdated references removed — ✅ **COMPLETE** (January 26, 2026) — Fixed outdated reference in COMPREHENSIVE_ARCHITECTURE.md
+- [x] Comprehensive document created — ✅ **COMPLETE** (January 28, 2026) — `CLIENT_ARCHITECTURE.md` consolidates all client-side architecture
+- [x] INDEX.md updated — ✅ **COMPLETE** (January 28, 2026) — Points to CLIENT_ARCHITECTURE.md as primary client-side doc
+- [x] Legacy docs removed — ✅ **COMPLETE** (January 28, 2026) — ARCHITECTURE.md, COMPONENT_ARCHITECTURE.md, DATA_FLOW.md, ACTION_SYSTEM.md, COMPREHENSIVE_ARCHITECTURE.md, DEBUG_VIEW_IMPROVEMENTS.md removed (consolidated into CLIENT_ARCHITECTURE.md)
+- [x] Outdated references removed — ✅ **COMPLETE** (January 28, 2026) — All references updated to CLIENT_ARCHITECTURE.md
 - [x] Missing documentation added — ✅ **COMPLETE** (January 26, 2026) — All Tasks 1-8 features documented in comprehensive document
 
 **Implementation Notes:**
@@ -1133,12 +1137,14 @@ The implementation correctly prioritizes accessibility tree and supplements with
 - Outdated references to removed components (SetAPIKey, ModelDropdown, determineNextAction) removed
 
 **Implementation Files:**
-- ✅ `docs/COMPREHENSIVE_ARCHITECTURE.md` — New comprehensive architecture document
+- ✅ `docs/CLIENT_ARCHITECTURE.md` — New comprehensive client-side architecture document
 - ✅ `docs/INDEX.md` — Updated to point to comprehensive document
-- ✅ `docs/ARCHITECTURE.md` — Removed (consolidated into comprehensive document)
-- ✅ `docs/COMPONENT_ARCHITECTURE.md` — Removed (consolidated into comprehensive document)
-- ✅ `docs/DATA_FLOW.md` — Removed (consolidated into comprehensive document)
-- ✅ `docs/ACTION_SYSTEM.md` — Removed (consolidated into comprehensive document)
+- ✅ `docs/ARCHITECTURE.md` — Removed (consolidated into CLIENT_ARCHITECTURE.md)
+- ✅ `docs/COMPONENT_ARCHITECTURE.md` — Removed (consolidated into CLIENT_ARCHITECTURE.md)
+- ✅ `docs/DATA_FLOW.md` — Removed (consolidated into CLIENT_ARCHITECTURE.md)
+- ✅ `docs/ACTION_SYSTEM.md` — Removed (consolidated into CLIENT_ARCHITECTURE.md)
+- ✅ `docs/COMPREHENSIVE_ARCHITECTURE.md` — Removed (split into CLIENT_ARCHITECTURE.md and SERVER_SIDE_AGENT_ARCH.md)
+- ✅ `docs/DEBUG_VIEW_IMPROVEMENTS.md` — Removed (consolidated into CLIENT_ARCHITECTURE.md)
 
 **References:**
 - **Comprehensive Documentation:** `COMPREHENSIVE_ARCHITECTURE.md`
@@ -1158,28 +1164,28 @@ The implementation correctly prioritizes accessibility tree and supplements with
 - ✅ **Deprecation:** Legacy documents properly marked with deprecation notices
 
 **Detailed Verification Checklist:**
-- ✅ **Comprehensive Document** (`docs/COMPREHENSIVE_ARCHITECTURE.md`): Document created with 10 main sections covering all aspects of architecture, components, data flow, action system, Thin Client, enterprise specification, DOM processing, quick reference, and implementation status. All information from legacy docs consolidated. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
+- ✅ **Comprehensive Document** (`docs/CLIENT_ARCHITECTURE.md`): Document created with 11 main sections covering all client-side architecture, components, data flow, action system, Thin Client implementation, DOM processing, Reasoning Layer support, Debug View, Manus Orchestrator support, quick reference, and implementation status. All client-side information from legacy docs consolidated. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
 - ✅ **INDEX.md Update** (`docs/INDEX.md`): Updated to point to comprehensive document as primary documentation, legacy docs marked as deprecated, all file references updated to match current implementation, development workflow updated. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
 - ✅ **Legacy Document Removal**: ARCHITECTURE.md, COMPONENT_ARCHITECTURE.md, DATA_FLOW.md, ACTION_SYSTEM.md removed after consolidation into comprehensive document. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
 - ✅ **Outdated Reference Removal**: References to SetAPIKey component removed (replaced by Login), references to ModelDropdown component removed (server-side), references to determineNextAction.ts removed (server-side), state persistence references updated (no OpenAI API key), LLM integration references updated (backend API). **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **Missing Documentation Added**: Accessibility tree integration (Tasks 4-8) documented in §6.4 and §8, hybrid element representation (Task 7) documented in §6.4 and §8, coverage metrics (Task 8) documented in §6.4 and §8, accessibility-first selection strategy (Task 8) documented in §6.4 and §8. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
+- ✅ **Missing Documentation Added**: Accessibility tree integration (Tasks 4-8) documented in CLIENT_ARCHITECTURE.md §7, hybrid element representation (Task 7) documented in CLIENT_ARCHITECTURE.md §7, coverage metrics (Task 8) documented in CLIENT_ARCHITECTURE.md §7, accessibility-first selection strategy (Task 8) documented in CLIENT_ARCHITECTURE.md §7. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
 
 **Documentation Consolidation Process:**
-The consolidation correctly merges all architecture documentation:
-1. **Comprehensive Document**: Created `COMPREHENSIVE_ARCHITECTURE.md` with all consolidated information
-2. **INDEX Update**: Updated `INDEX.md` to point to comprehensive document
-3. **Legacy Removal**: Removed legacy docs (ARCHITECTURE.md, COMPONENT_ARCHITECTURE.md, DATA_FLOW.md, ACTION_SYSTEM.md) after consolidation
+The consolidation correctly merges all client-side architecture documentation:
+1. **Comprehensive Document**: Created `CLIENT_ARCHITECTURE.md` with all consolidated client-side information
+2. **INDEX Update**: Updated `INDEX.md` to point to CLIENT_ARCHITECTURE.md as primary client-side document
+3. **Legacy Removal**: Removed legacy docs (ARCHITECTURE.md, COMPONENT_ARCHITECTURE.md, DATA_FLOW.md, ACTION_SYSTEM.md, COMPREHENSIVE_ARCHITECTURE.md, DEBUG_VIEW_IMPROVEMENTS.md) after consolidation
 4. **Reference Updates**: All file references and component names verified and updated, removed references to deleted files
-5. **Content Verification**: All implementation features (Tasks 1-9) documented
+5. **Content Verification**: All implementation features (Tasks 1-10) documented
 
 **Documentation Status:**
-- All architecture information consolidated into single document
+- All client-side architecture information consolidated into CLIENT_ARCHITECTURE.md
 - Legacy documents removed after consolidation (no longer needed)
 - All current implementation features documented
 - All outdated references removed
 - Quick reference and implementation status included
 
-**Reference:** `THIN_CLIENT_ROADMAP.md` §9.1, `COMPREHENSIVE_ARCHITECTURE.md`
+**Reference:** `THIN_CLIENT_ROADMAP.md` §9.1, `CLIENT_ARCHITECTURE.md`
 
 **All Task 9 requirements verified and implemented.**
 
@@ -1372,7 +1378,7 @@ Enables the Reasoning Layer to request missing information from users instead of
 - **`ENTERPRISE_PLATFORM_SPECIFICATION.md`** §3.6 — DOM Processing Improvements (alternative solutions, accessibility tree approach, implementation plan).
 - **`THIN_SERVER_ROADMAP.md`** — Server-side roadmap (DB, API) for Tasks 1–3. Client and server work for a given task ship together. Includes RAG implementation details.
 - **`INDEX.md`** — Documentation index and navigation guide for all architecture and implementation docs.
-- **`COMPREHENSIVE_ARCHITECTURE.md`** — Consolidated architecture documentation covering all aspects (system architecture, components, data flow, action system, Thin Client, enterprise specification, DOM processing).
+- **`CLIENT_ARCHITECTURE.md`** — Complete client-side architecture documentation covering all client-side aspects (system architecture, components, data flow, action system, Thin Client implementation, DOM processing, Reasoning Layer support, Debug View, Manus Orchestrator support).
 
 ### 12.2 Chrome Extension
 
@@ -2614,7 +2620,7 @@ Each task covers **extension integration** only: UI components, state management
 
 **Objective:** Implement client-side Debug Panel UI that displays debug information from server. Separate user-facing content from technical debug information.
 
-**Reference:** `DEBUG_VIEW_IMPROVEMENTS.md` — Complete Debug View requirements and implementation guide.
+**Reference:** `CLIENT_ARCHITECTURE.md` §9 — Complete Debug View architecture (Tasks 1-5 complete).
 
 ---
 
@@ -2627,8 +2633,8 @@ Each task covers **extension integration** only: UI components, state management
 **Status:** ✅ **COMPLETE** — January 26, 2026
 
 **Reference:**
-- `DEBUG_VIEW_IMPROVEMENTS.md` §2 (Task 1: Architectural Separation)
-- `THIN_SERVER_TO_BE_ROADMAP.md` §1 (Task 1: Debug Logging Infrastructure) — Server provides debug data for client display
+- `CLIENT_ARCHITECTURE.md` §9.1 (Debug View Architecture - Task 1: Architectural Separation)
+- `THIN_SERVER_ROADMAP.md` §1 (Task 1: Debug Logging Infrastructure) — Server provides debug data for client display
 
 ---
 
@@ -2741,7 +2747,7 @@ Runtime control of debug mode (no rebuild required). Panel state persists across
 
 **Status:** ✅ **COMPLETE** — January 26, 2026
 
-**Reference:** `DEBUG_VIEW_IMPROVEMENTS.md` §3 (Task 2: Space Utilization & Layout).
+**Reference:** `CLIENT_ARCHITECTURE.md` §9.2 (Debug View Architecture - Task 2: Space Utilization & Layout).
 
 ---
 
@@ -2874,7 +2880,7 @@ Provides quick status overview when panel is collapsed. Easy access to expand pa
 
 **Status:** ✅ **COMPLETE** — January 26, 2026
 
-**Reference:** `DEBUG_VIEW_IMPROVEMENTS.md` §4 (Task 3: Strategic Debug Enhancements).
+**Reference:** `CLIENT_ARCHITECTURE.md` §9.3 (Debug View Architecture - Task 3: Strategic Debug Enhancements).
 
 ---
 
@@ -3094,7 +3100,7 @@ Enables developers to export complete debug session for investigation. Essential
 
 **Status:** ✅ **COMPLETE** — January 26, 2026
 
-**Reference:** `DEBUG_VIEW_IMPROVEMENTS.md` §5 (Task 4: Visual Clarity & Styling).
+**Reference:** `CLIENT_ARCHITECTURE.md` §9.4 (Debug View Architecture - Task 4: Visual Clarity & Styling).
 
 ---
 
@@ -3243,7 +3249,7 @@ Consistent visual language. Quick status recognition. Accessibility compliant.
 
 **Status:** ✅ **COMPLETE** — January 26, 2026
 
-**Reference:** `DEBUG_VIEW_IMPROVEMENTS.md` §6 (Task 5: Control & Interaction).
+**Reference:** `CLIENT_ARCHITECTURE.md` §9.5 (Debug View Architecture - Task 5: Control & Interaction).
 
 ---
 
@@ -4247,25 +4253,24 @@ Handles new orchestrator response format. Stores status and progress. Enables st
 
 | Document | Purpose | Key Sections |
 |----------|---------|--------------|
-| **`DEBUG_VIEW_IMPROVEMENTS.md`** | Debug View requirements and implementation guide | §2 (Architectural Separation), §3 (Space Utilization), §4 (Strategic Enhancements), §5 (Visual Clarity), §6 (Control & Interaction) |
-| **`MANUS_ORCHESTRATOR_ARCHITECTURE.md`** | Manus orchestrator architecture specification | §6 (State Management), §7 (API Protocol), §8 (Verification), §9 (Self-Correction) |
-| **`THIN_CLIENT_ROADMAP.md`** | Current client-side implementation | §2 (Task 1: Authentication), §3 (Task 2: Knowledge Resolution), §4 (Task 3: Action Loop) |
-| **`COMPREHENSIVE_ARCHITECTURE.md`** | Overall system architecture | §2.2 (State Management), §4.1 (State Flow), §6 (Thin Client Architecture) |
+| **`CLIENT_ARCHITECTURE.md`** | Complete client-side architecture | §9 (Debug View Architecture), §10 (Manus Orchestrator Client Support), §2 (System Architecture), §4 (Data Flow), §6 (Thin Client Implementation) |
+| **`MANUS_ORCHESTRATOR_ARCHITECTURE.md`** | Manus orchestrator architecture specification (server-side) | §6 (State Management), §7 (API Protocol), §8 (Verification), §9 (Self-Correction) |
+| **`THIN_CLIENT_ROADMAP.md`** | Current client-side implementation roadmap | §2 (Task 1: Authentication), §3 (Task 2: Knowledge Resolution), §4 (Task 3: Action Loop) |
 
 ### Implementation Patterns to Follow
 
 **State Management:**
-- Use Zustand with Immer middleware (see `COMPREHENSIVE_ARCHITECTURE.md` §2.2)
+- Use Zustand with Immer middleware (see `CLIENT_ARCHITECTURE.md` §2.3)
 - Split selectors to prevent infinite loops (see `.cursorrules` §11)
 - Use `persist` middleware for critical state (see `THIN_CLIENT_ROADMAP.md` §2.1)
 
 **UI Components:**
 - Use Chakra UI for all components (see `.cursorrules` §2)
-- Follow existing component patterns (see `COMPREHENSIVE_ARCHITECTURE.md` §3)
-- Maintain accessibility (see `COMPREHENSIVE_ARCHITECTURE.md` §2.4)
+- Follow existing component patterns (see `CLIENT_ARCHITECTURE.md` §3)
+- Maintain accessibility (see `CLIENT_ARCHITECTURE.md` §2.1)
 
 **API Client:**
-- Follow existing API client patterns (see `THIN_CLIENT_ROADMAP.md` §2.1)
+- Follow existing API client patterns (see `CLIENT_ARCHITECTURE.md` §6.2)
 - Handle new response fields gracefully (backward compatible)
 - Log API calls for debug view (Task 3)
 
