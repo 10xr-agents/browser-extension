@@ -39,6 +39,7 @@ const PlanViewDebug: React.FC = () => {
   const headingColor = useColorModeValue('gray.900', 'gray.100');
   const descColor = useColorModeValue('gray.600', 'gray.400');
   const codeBg = useColorModeValue('gray.100', 'gray.700');
+  const fallbackBg = useColorModeValue('gray.50', 'gray.700');
 
   // Don't render if no plan data
   if (!plan && !currentStep && !totalSteps && !orchestratorStatus) {
@@ -145,7 +146,7 @@ const PlanViewDebug: React.FC = () => {
 
         {/* Plan Steps */}
         {plan && plan.steps && plan.steps.length > 0 ? (
-          <Accordion allowMultiple allowToggle defaultIndex={[]}>
+          <Accordion allowMultiple defaultIndex={[]}>
             {plan.steps.map((step, index) => (
               <AccordionItem key={step.id}>
                 <AccordionButton>
@@ -159,7 +160,18 @@ const PlanViewDebug: React.FC = () => {
                       {step.status}
                     </Badge>
                     <Text fontSize="xs" fontWeight="medium" color={headingColor} flex="1">
-                      Step {index + 1}: {step.description}
+                      Step {index + 1}: {(() => {
+                        try {
+                          const desc = step?.description;
+                          if (typeof desc === 'string') return desc;
+                          if (typeof desc === 'object' && desc !== null && 'description' in desc) {
+                            return String(desc.description || '');
+                          }
+                          return String(desc || 'No description');
+                        } catch (e) {
+                          return 'Invalid description';
+                        }
+                      })()}
                     </Text>
                     {step.toolType && (
                       <Badge colorScheme="purple" fontSize="xs">
@@ -221,7 +233,7 @@ const PlanViewDebug: React.FC = () => {
 
         {/* Fallback: Show current step info if plan structure not available */}
         {(!plan || !plan.steps || plan.steps.length === 0) && currentStep && totalSteps && (
-          <Box p={3} bg={useColorModeValue('gray.50', 'gray.700')} borderRadius="md">
+          <Box p={3} bg={fallbackBg} borderRadius="md">
             <Text fontSize="xs" color={textColor}>
               <strong>Current Step:</strong> {currentStep} of {totalSteps}
             </Text>

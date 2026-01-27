@@ -23,6 +23,7 @@ import { DownloadIcon } from '@chakra-ui/icons';
 import { useAppState } from '../state/store';
 import DebugPanel from './DebugPanel';
 import { exportDebugSession } from '../helpers/exportDebugSession';
+import ErrorBoundary from './ErrorBoundary';
 
 const SystemView: React.FC = () => {
   const developerMode = useAppState((state) => state.settings.developerMode);
@@ -176,9 +177,11 @@ const SystemView: React.FC = () => {
 
       {/* Debug Panel Content - Scrollable */}
       <Box flex="1" overflowY="auto" overflowX="hidden" minW="0" bg={bgColor}>
-        <Box px={4} py={4}>
-          <DebugPanel hideHeader={true} />
-        </Box>
+        <ErrorBoundary>
+          <Box px={4} py={4}>
+            <DebugPanel hideHeader={true} />
+          </Box>
+        </ErrorBoundary>
       </Box>
     </Flex>
   );

@@ -1,8 +1,9 @@
 # Spadeworks Copilot AI - Comprehensive Architecture & Specification
 
-**Document Version:** 1.0  
-**Last Updated:** January 26, 2026  
+**Document Version:** 1.1  
+**Last Updated:** January 27, 2026  
 **Status:** Comprehensive Documentation  
+**Changelog (1.1):** Added chat persistence architecture, error propagation flow, UI refactor (ChatStream/ExecutionDetails), connection handling improvements, and updated task execution flow with error tracking. See implementation details in codebase.  
 **Purpose:** Consolidated architecture, component, data flow, action system, and enterprise specification documentation
 
 **Note:** This document consolidates information from previously separate architecture documents:
@@ -263,6 +264,25 @@ The main application component that serves as the root for all UI pages. It prov
 - Shows thought, action, usage statistics, and parsed action
 - Token usage display
 - Copy functionality for debugging
+- **Updated:** Uses `ChatStream` component for new message-based structure
+- **Updated:** Falls back to legacy `displayHistory` for backward compatibility
+
+**ChatStream Component (New)**
+- User-facing chat interface with message bubbles
+- Separates user messages (right-aligned) from assistant messages (left-aligned)
+- Clean, conversational UI similar to ChatGPT/Claude
+- Integrates with `ExecutionDetails` for technical logs
+- Status-based coloring (error = red, success = green)
+- Processing indicator when task is running
+
+**ExecutionDetails Component (New)**
+- Collapsible accordion for technical execution logs
+- Nested inside assistant messages in `ChatStream`
+- Shows action steps with status badges
+- Displays error information when actions fail
+- Shows execution duration
+- Color-coded by status (success = green, failure = red)
+- Hidden by default (collapsed) to keep main view clean
 
 **TaskStatus Component**
 - Debug mode status indicator
@@ -415,8 +435,16 @@ State updates follow this pattern:
 Only specific state is persisted:
 - User authentication (token, user, tenantId, tenantName) - Settings slice
 - User instructions (UI slice)
+- Conversation history (previous completed tasks) - ConversationHistory slice
+- Chat messages (per session) - Saved to `chrome.storage.local` with key `session_messages_${sessionId}`
 
-Task history and runtime state are not persisted, ensuring fresh state on each session.
+**Chat Persistence:**
+- Messages are saved to `chrome.storage.local` periodically during task execution
+- Messages are loaded on component mount if `sessionId` exists
+- Falls back to API call (`GET /api/session/:sessionId/messages`) if not in storage
+- Enables chat history restoration across extension reloads
+
+**Legacy:** `displayHistory` is maintained for backward compatibility but is being replaced by the `messages` array structure.
 
 ### 4.2 Task Execution Flow (Thin Client)
 
@@ -465,20 +493,33 @@ Task history and runtime state are not persisted, ensuring fresh state on each s
    - User instructions (`query`)
    - Current simplified DOM (`dom`)
    - Current URL (`url`)
-   - Optional task ID (`taskId`) for history continuity
+   - Optional task ID (`taskId`) for history continuity (legacy)
+   - Optional session ID (`sessionId`) for new chat persistence structure
+   - **Error reporting fields** (if previous action failed):
+     - `lastActionStatus` - 'success' | 'failure' | 'pending'
+     - `lastActionError` - Error details (message, code, action, elementId)
+     - `lastActionResult` - Execution result (success, actualState)
 3. Request sent to `POST /api/agent/interact`
 4. Backend handles:
+   - **Web search** (for new tasks) - Searches web to understand how to complete task
+   - **Session resolution** - Creates or loads session from database
+   - **History loading** - Loads conversation history from database (not client-provided)
+   - **Error detection** - Detects client-reported failures and injects into LLM context
    - RAG context injection (tenant-scoped, domain-filtered)
    - Action history context (server-owned)
-   - LLM inference
+   - LLM inference with user-friendly message generation
    - Token usage tracking
 5. Response received with:
-   - `thought` - LLM reasoning
+   - `thought` - LLM reasoning (user-friendly, non-technical language)
    - `action` - Action string (e.g., "click(123)", "finish()")
    - `usage` - Token usage statistics
-   - `taskId` - Server-assigned task ID
+   - `taskId` - Server-assigned task ID (legacy)
+   - `sessionId` - Session ID for chat persistence
    - `hasOrgKnowledge` - Whether org-specific RAG was used
-6. Response stored in display-only history
+6. Response stored in:
+   - Display-only history (backward compatibility)
+   - Messages array (new chat structure)
+   - Assistant message added to chat with action payload
 
 #### Action Parsing Phase
 
@@ -493,31 +534,44 @@ Task history and runtime state are not persisted, ensuring fresh state on each s
 #### Action Execution Phase
 
 1. Action type determined (click, setValue, finish, fail)
-2. For click actions:
+2. **Action execution wrapped in try/catch for error tracking**
+3. For click actions:
    - Element ID resolved (uses accessibility mapping if available, Task 6)
    - Element located via Chrome Debugger API
    - Element scrolled into view
    - Center coordinates calculated
    - Mouse events dispatched
    - Visual ripple effect triggered
-3. For setValue actions:
+   - **Execution result captured** (success/failure with error details)
+4. For setValue actions:
    - Element located and scrolled into view
    - Text selected (triple-click)
    - New text typed character by character
    - Element blurred after typing
-4. Action completion logged
+   - **Execution result captured** (success/failure with error details)
+5. **Action execution result stored:**
+   - Result stored in `lastActionResult` state field
+   - Action step added to assistant message's `meta.steps` array
+   - Message status updated based on execution result
+   - **If action failed:** Error details stored for next API call
+6. **Error propagation:**
+   - Failed actions do NOT stop task execution
+   - Error information sent to server in next API call
+   - Server receives failure context and generates correction strategy
 
 #### Action Cycle Completion
 
 1. Action status set to "waiting"
-2. System waits 2 seconds for page to settle
-3. Check if task should continue:
+2. **Messages saved to chrome.storage.local** (periodic persistence)
+3. System waits 2 seconds for page to settle
+4. Check if task should continue:
    - Task not stopped by user
    - Action limit not reached (50 max)
-   - No errors occurred
    - Action not "finish" or "fail"
-4. If continuing, cycle repeats from DOM extraction
-5. If stopping, status updated to "success" or "error"
+   - **Note:** Errors do NOT stop execution - server handles corrections
+5. If continuing, cycle repeats from DOM extraction
+6. If stopping, status updated to "success" or "error"
+7. **Final message save** before task completion
 
 #### Task Completion
 
@@ -532,13 +586,19 @@ Task history and runtime state are not persisted, ensuring fresh state on each s
 #### UI to Content Script
 
 1. UI component needs page data
-2. `callRPC` function called with method name and payload
-3. Active tab queried via Chrome Tabs API
-4. Message sent via `chrome.tabs.sendMessage`
+2. `callRPC` function called with method name, payload, and **explicit tabId**
+3. **Tab ID resolved:**
+   - Uses explicit `tabId` parameter if provided (from task state)
+   - Falls back to querying active tab if not provided (legacy behavior)
+4. Message sent via `chrome.tabs.sendMessage` to specific tab
 5. Content script receives message
 6. RPC method executed in content script context
 7. Response sent back via `sendResponse`
 8. Promise resolved with response data
+9. **Error handling:**
+   - "Extension context invalidated" errors trigger popup auto-reload
+   - Content script injection retry logic (up to maxTries)
+   - Improved error messages guide user to solution
 
 #### Content Script to Page Context
 
@@ -561,14 +621,22 @@ Task history and runtime state are not persisted, ensuring fresh state on each s
    - `GET /api/v1/auth/session` - Session check
    - `POST /api/v1/auth/logout` - Logout
    - `GET /api/knowledge/resolve` - Knowledge resolution
-   - `POST /api/agent/interact` - Action loop
-5. Response processed with error handling:
+   - `POST /api/agent/interact` - Action loop (with error reporting)
+   - `GET /api/session/:sessionId/messages` - Get conversation history
+   - `GET /api/session/latest` - Get latest active session
+5. **Error reporting in POST /api/agent/interact:**
+   - Includes `lastActionStatus` if previous action executed
+   - Includes `lastActionError` if action failed
+   - Includes `lastActionResult` with execution details
+   - Server uses this to detect failures and generate corrections
+6. Response processed with error handling:
    - 401 UNAUTHORIZED - Token invalid/expired
    - 403 DOMAIN_NOT_ALLOWED - Domain not in allowlist
    - 404 NOT_FOUND - Task not found
    - 409 CONFLICT - Task conflict
    - 5xx - Server errors
-6. Usage statistics and response content processed
+7. Usage statistics and response content processed
+8. **Session ID stored** if returned in response
 
 ### 4.4 Error Flow
 
@@ -577,27 +645,46 @@ Task history and runtime state are not persisted, ensuring fresh state on each s
 Errors can occur at multiple points:
 - Backend API failures
 - Invalid action responses
-- Action execution failures
+- **Action execution failures** (element not found, timeout, etc.)
 - DOM extraction failures
 - Chrome API errors
 - Accessibility extraction failures (Task 4+)
+- Content script connection failures
 
 #### Error Handling
 
+**Action Execution Errors (New):**
+1. **DOM actions wrapped in try/catch:**
+   - `callDOMAction` returns `ActionExecutionResult` with success/failure status
+   - Errors captured with error codes (`ELEMENT_NOT_FOUND`, `TIMEOUT`, `NETWORK_ERROR`, etc.)
+   - Error details include: message, code, action string, elementId
+2. **Error propagation to server:**
+   - Execution result stored in `lastActionResult` state field
+   - Error information sent to server in next `POST /api/agent/interact` call
+   - Server receives failure context and generates correction strategy
+   - **Task continues** - server decides next action based on error
+3. **Action steps tracked:**
+   - Each action execution creates an `ActionStep` in message's `meta.steps`
+   - Steps include execution result, duration, error details
+   - Technical logs nested in collapsible accordion (ExecutionDetails component)
+
+**Other Errors:**
 1. Error caught in try-catch block
 2. Error message extracted
 3. Error callback invoked (toast notification)
-4. Task status set to "error"
+4. Task status set to "error" (for non-action errors)
 5. Cleanup operations executed
-6. Error logged in display-only history
+6. Error logged in display-only history and messages array
 
 #### Error Recovery
 
+- **Action failures:** Do NOT stop task - server handles corrections
 - Retry logic for transient failures (up to 3 attempts)
 - User notification for all errors
 - Graceful degradation where possible
 - State cleanup on error
 - Fallback to DOM-only approach when accessibility fails (Task 4+)
+- **Auto-recovery:** Extension context invalidated errors trigger popup auto-reload
 
 ### 4.5 Data Transformation Pipeline
 
@@ -1044,22 +1131,111 @@ Centralized API client for all backend communication:
    - `url` - Current page URL
    - `query` - User instructions
    - `dom` - Simplified DOM
-   - `taskId` - Optional task ID for history continuity
+   - `taskId` - Optional task ID for history continuity (legacy)
+   - `sessionId` - Optional session ID for chat persistence (new)
+   - **Error reporting fields** (if previous action executed):
+     - `lastActionStatus` - 'success' | 'failure' | 'pending'
+     - `lastActionError` - Error details if action failed
+     - `lastActionResult` - Execution result
 3. Server handles:
+   - **Web search** (for new tasks) - Searches web to understand task
+   - **Session resolution** - Creates or loads session from database
+   - **History loading** - Loads conversation history from database (not client-provided)
+   - **Error detection** - Detects client-reported failures and injects into LLM context
    - RAG context injection (tenant-scoped, domain-filtered)
    - Action history context (server-owned)
-   - LLM inference
+   - LLM inference with **user-friendly message generation**
    - Token usage tracking
+   - **Finish() validation** - Prevents premature completion after errors
 4. Server returns `NextActionResponse`:
-   - `thought` - LLM reasoning
+   - `thought` - LLM reasoning (**user-friendly, non-technical language**)
    - `action` - Action string
    - `usage` - Token usage
-   - `taskId` - Server-assigned task ID
+   - `taskId` - Server-assigned task ID (legacy)
+   - `sessionId` - Server-assigned session ID (new)
    - `hasOrgKnowledge` - RAG usage indicator
-5. Client parses action and executes
+5. Client:
+   - Parses action and executes
+   - **Tracks execution result** (success/failure with error details)
+   - **Adds message to chat** (user message on start, assistant message on response)
+   - **Adds action step** to assistant message's technical logs
+   - **Saves messages** to chrome.storage.local periodically
 6. Process repeats until `finish()` or `fail()`
+7. **On reload:** Messages loaded from chrome.storage.local or API, chat history restored
 
-### 6.4 DOM Processing Enhancements (Tasks 4-8)
+### 6.4 Chat Persistence & Error Propagation
+
+#### Chat Message Structure
+
+**ChatMessage Type:**
+- `id` - Unique message identifier
+- `role` - 'user' | 'assistant' | 'system'
+- `content` - Main text/thought (user instruction or assistant thought)
+- `status` - 'sending' | 'sent' | 'error' | 'success' | 'failure' | 'pending'
+- `timestamp` - When message was created
+- `actionPayload` - Structured action data (for assistant messages)
+- `meta.steps` - Technical execution logs (ActionStep array)
+- `error` - Error information if message represents a failure
+
+**ActionStep Type:**
+- `id` - Unique step identifier
+- `action` - Action string (e.g., "click(123)")
+- `parsedAction` - Parsed action object
+- `status` - 'success' | 'failure' | 'pending'
+- `error` - Error details if step failed
+- `executionResult` - ActionExecutionResult with success/failure
+- `timestamp` - When step was executed
+- `duration` - Execution duration in milliseconds
+
+#### Message Persistence
+
+**Storage:**
+- Messages saved to `chrome.storage.local` with key `session_messages_${sessionId}`
+- Saved periodically during task execution
+- Saved on task completion
+- Date serialization/deserialization handled automatically
+
+**Loading:**
+- Messages loaded on component mount if `sessionId` exists
+- First attempts to load from `chrome.storage.local`
+- Falls back to API call (`GET /api/session/:sessionId/messages`) if not in storage
+- Enables chat history restoration across extension reloads
+
+#### Error Propagation Architecture
+
+**Action Execution Error Tracking:**
+1. DOM actions wrapped in try/catch
+2. `callDOMAction` returns `ActionExecutionResult` with success/failure status
+3. Errors captured with error codes (`ELEMENT_NOT_FOUND`, `TIMEOUT`, `NETWORK_ERROR`, etc.)
+4. Execution result stored in `lastActionResult` state field
+5. Error information sent to server in next `POST /api/agent/interact` call:
+   - `lastActionStatus` - 'success' | 'failure' | 'pending'
+   - `lastActionError` - Error details (message, code, action, elementId)
+   - `lastActionResult` - Execution result (success, actualState)
+6. Server receives failure context and generates correction strategy
+7. **Task continues** - server decides next action based on error (prevents "lying agent")
+
+**Action Step Tracking:**
+- Each action execution creates an `ActionStep` in message's `meta.steps` array
+- Steps include execution result, duration, error details
+- Technical logs nested in collapsible accordion (ExecutionDetails component)
+- User-facing messages remain clean in main chat view
+
+#### Connection Handling Improvements
+
+**Explicit Tab Targeting:**
+- `callRPC` accepts explicit `tabId` parameter
+- Prevents connection to wrong tabs (like DevTools)
+- Uses tabId from task state for reliable targeting
+- Falls back to querying active tab if tabId not provided (legacy behavior)
+
+**Auto-Recovery:**
+- "Extension context invalidated" errors trigger popup auto-reload
+- Content script injection retry logic (up to maxTries)
+- Improved error messages guide user to solution
+- Prevents "Content script not ready" errors from breaking task execution
+
+### 6.5 DOM Processing Enhancements (Tasks 4-8)
 
 #### Task 4: Basic Accessibility Tree Extraction
 
@@ -1352,13 +1528,20 @@ The DOM processing pipeline transforms complex web page DOM structures into toke
 - `src/state/ui.ts` - UI state
 
 #### Core Logic
-- `src/api/client.ts` - API client (auth, agentInteract, knowledgeResolve) **[Thin Client]**
+- `src/api/client.ts` - API client (auth, agentInteract with error reporting, knowledgeResolve, getSessionMessages, getLatestSession) **[Thin Client]**
 - `src/helpers/simplifyDom.ts` - DOM simplification with accessibility integration (Tasks 4-8)
 - `src/helpers/parseAction.ts` - Action string parser **[Thin Client]**
-- `src/helpers/domActions.ts` - Action execution with accessibility mapping (Task 6)
+- `src/helpers/domActions.ts` - Action execution with error tracking (returns ActionExecutionResult) and accessibility mapping (Task 6)
+- `src/helpers/pageRPC.ts` - RPC communication with explicit tabId parameter and auto-recovery on extension reload
 - `src/helpers/chromeDebugger.ts` - Debugger API integration
 - `src/helpers/availableActions.ts` - Action definitions
 - `src/helpers/accessibilityTree.ts` - Accessibility tree extraction (Task 4)
+
+#### Chat & UI Components
+- `src/common/ChatStream.tsx` - User-facing chat interface with message bubbles (user/assistant separation)
+- `src/common/ExecutionDetails.tsx` - Collapsible technical execution logs (nested in assistant messages)
+- `src/common/TaskHistoryUser.tsx` - Task history with chat persistence support (uses ChatStream when messages available)
+- `src/types/chatMessage.ts` - ChatMessage and ActionStep type definitions for persistent conversation threads
 - `src/helpers/accessibilityFilter.ts` - Accessibility node filtering (Task 5)
 - `src/helpers/accessibilityMapping.ts` - Accessibility-DOM mapping (Task 6)
 - `src/helpers/hybridElement.ts` - Hybrid element creation (Task 7)
@@ -1447,6 +1630,16 @@ Every design decision considers token usage and API cost optimization
 **Tasks 4-8: DOM Processing Improvements (COMPLETE)**
 - ✅ Task 4: Basic Accessibility Tree Extraction
 - ✅ Task 5: Accessibility Node Filtering
+- ✅ Task 6: Accessibility-DOM Element Mapping
+- ✅ Task 7: Hybrid Element Representation
+- ✅ Task 8: Accessibility-First Selection
+
+**Client-Side Improvements (COMPLETE)**
+- ✅ Error Propagation: DOM actions return execution results, errors sent to server
+- ✅ Chat Persistence: Messages saved to chrome.storage.local, loaded on mount
+- ✅ UI Refactor: ChatStream and ExecutionDetails components for clean chat interface
+- ✅ Connection Handling: Explicit tabId in callRPC, auto-recovery on extension reload
+- ✅ Conversation History: Previous tasks displayed in accordion, persisted across sessions
 - ✅ Task 6: Accessibility-DOM Element Mapping
 - ✅ Task 7: Hybrid Element Representation
 - ✅ Task 8: Accessibility-First Element Selection

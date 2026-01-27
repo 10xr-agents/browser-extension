@@ -6,6 +6,7 @@
  * 
  * Reference: THIN_CLIENT_ROADMAP.md §4.1 (Task 3: Server-Side Action Loop)
  * Reference: SERVER_SIDE_AGENT_ARCH.md §4.2 (POST /api/agent/interact)
+ * Reference: CHROME_TAB_ACTIONS.md
  */
 
 import { ActionPayload, availableActions } from './availableActions';
@@ -21,6 +22,64 @@ export type ParsedAction =
   | {
       error: string;
     };
+
+/**
+ * Parse a single argument value based on its type
+ */
+function parseArgValue(
+  argString: string,
+  expectedType: string,
+  isArray: boolean = false
+): string | number | boolean | string[] {
+  const trimmed = argString.trim();
+  
+  if (isArray) {
+    // Parse array: ["item1", "item2"] or [item1, item2]
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      const content = trimmed.slice(1, -1).trim();
+      if (!content) return [];
+      
+      const items = content.split(',').map(item => {
+        const itemTrimmed = item.trim();
+        if ((itemTrimmed.startsWith('"') && itemTrimmed.endsWith('"')) ||
+            (itemTrimmed.startsWith("'") && itemTrimmed.endsWith("'")) ||
+            (itemTrimmed.startsWith('`') && itemTrimmed.endsWith('`'))) {
+          return itemTrimmed.slice(1, -1);
+        }
+        return itemTrimmed;
+      });
+      return items;
+    }
+    return [trimmed];
+  }
+  
+  if (expectedType === 'number') {
+    const numberValue = Number(trimmed);
+    if (isNaN(numberValue)) {
+      throw new Error(`Expected a number, got: ${trimmed}`);
+    }
+    return numberValue;
+  }
+  
+  if (expectedType === 'boolean') {
+    const lower = trimmed.toLowerCase();
+    if (lower === 'true') return true;
+    if (lower === 'false') return false;
+    throw new Error(`Expected a boolean (true/false), got: ${trimmed}`);
+  }
+  
+  // String type
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+    (trimmed.startsWith('`') && trimmed.endsWith('`'))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  
+  // Unquoted string (for backward compatibility)
+  return trimmed;
+}
 
 /**
  * Parse action string (e.g. "click(123)", "setValue(123, \"x\")", "finish()", "fail()")
@@ -91,53 +150,86 @@ export function parseAction(actionString: string): ParsedAction {
     };
   }
 
-  // Parse arguments
-  const argsArray = actionArgsString
-    .split(',')
-    .map((arg) => arg.trim())
-    .filter((arg) => arg !== '');
+  // Parse arguments - handle quoted strings, nested parentheses, etc.
+  const argsArray: string[] = [];
+  let currentArg = '';
+  let depth = 0;
+  let inString = false;
+  let stringChar = '';
+  
+  for (let i = 0; i < actionArgsString.length; i++) {
+    const char = actionArgsString[i];
+    const prevChar = i > 0 ? actionArgsString[i - 1] : '';
+    
+    if (!inString && (char === '"' || char === "'" || char === '`')) {
+      inString = true;
+      stringChar = char;
+      currentArg += char;
+    } else if (inString && char === stringChar && prevChar !== '\\') {
+      inString = false;
+      stringChar = '';
+      currentArg += char;
+    } else if (!inString && char === '(') {
+      depth++;
+      currentArg += char;
+    } else if (!inString && char === ')') {
+      depth--;
+      currentArg += char;
+    } else if (!inString && char === ',' && depth === 0) {
+      argsArray.push(currentArg.trim());
+      currentArg = '';
+    } else {
+      currentArg += char;
+    }
+  }
+  
+  // Add the last argument
+  if (currentArg.trim()) {
+    argsArray.push(currentArg.trim());
+  }
 
-  if (argsArray.length !== availableAction.args.length) {
+  // Filter out empty arguments (from trailing commas, etc.)
+  const nonEmptyArgs = argsArray.filter(arg => arg !== '');
+
+  // Count required arguments
+  const requiredArgs = availableAction.args.filter(arg => !arg.optional);
+  
+  if (nonEmptyArgs.length < requiredArgs.length) {
     return {
-      error: `Invalid number of arguments: Expected ${availableAction.args.length} for action "${actionName}", but got ${argsArray.length}.`,
+      error: `Invalid number of arguments: Expected at least ${requiredArgs.length} for action "${actionName}", but got ${nonEmptyArgs.length}.`,
+    };
+  }
+  
+  if (nonEmptyArgs.length > availableAction.args.length) {
+    return {
+      error: `Invalid number of arguments: Expected at most ${availableAction.args.length} for action "${actionName}", but got ${nonEmptyArgs.length}.`,
     };
   }
 
-  const parsedArgs: Record<string, number | string> = {};
+  const parsedArgs: Record<string, number | string | boolean | string[] | undefined> = {};
 
-  for (let i = 0; i < argsArray.length; i++) {
-    const arg = argsArray[i];
+  for (let i = 0; i < availableAction.args.length; i++) {
     const expectedArg = availableAction.args[i];
+    const argValue = nonEmptyArgs[i];
 
-    if (expectedArg.type === 'number') {
-      const numberValue = Number(arg);
+    // Handle optional arguments
+    if (expectedArg.optional && argValue === undefined) {
+      continue; // Skip optional arguments that weren't provided
+    }
 
-      if (isNaN(numberValue)) {
-        return {
-          error: `Invalid argument type: Expected a number for argument "${expectedArg.name}", but got "${arg}".`,
-        };
-      }
-
-      parsedArgs[expectedArg.name] = numberValue;
-    } else if (expectedArg.type === 'string') {
-      const stringValue =
-        (arg.startsWith('"') && arg.endsWith('"')) ||
-        (arg.startsWith("'") && arg.endsWith("'")) ||
-        (arg.startsWith('`') && arg.endsWith('`'))
-          ? arg.slice(1, -1)
-          : null;
-
-      if (stringValue === null) {
-        return {
-          error: `Invalid argument type: Expected a string for argument "${expectedArg.name}", but got "${arg}".`,
-        };
-      }
-
-      parsedArgs[expectedArg.name] = stringValue;
-    } else {
+    if (!expectedArg.optional && argValue === undefined) {
       return {
-        // @ts-expect-error this is here to make sure we don't forget to update this code if we add a new arg type
-        error: `Invalid argument type: Unknown type "${expectedArg.type}" for argument "${expectedArg.name}".`,
+        error: `Missing required argument: "${expectedArg.name}" for action "${actionName}".`,
+      };
+    }
+
+    try {
+      const parsedValue = parseArgValue(argValue, expectedArg.type, expectedArg.array);
+      parsedArgs[expectedArg.name] = parsedValue;
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        error: `Invalid argument type for "${expectedArg.name}": ${errorMessage}`,
       };
     }
   }

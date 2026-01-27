@@ -23,10 +23,12 @@ import { useAppState } from '../state/store';
 const CorrectionView: React.FC = () => {
   const correctionHistory = useAppState((state) => state.currentTask.correctionHistory);
 
+  // Dark mode colors - ALL defined at component top level (before any conditional returns)
   const warningColor = useColorModeValue('orange.600', 'orange.400');
   const textColor = useColorModeValue('gray.700', 'gray.300');
   const bgColor = useColorModeValue('white', 'gray.800');
   const borderColor = useColorModeValue('gray.200', 'gray.700');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
 
   // Get the most recent correction result
   const latestCorrection = correctionHistory.length > 0
@@ -38,7 +40,15 @@ const CorrectionView: React.FC = () => {
     return null;
   }
 
-  const stepNumber = latestCorrection.stepIndex + 1; // Convert 0-indexed to 1-indexed for display
+  // Get current step from state as fallback if stepIndex is invalid
+  const currentStep = useAppState((state) => state.currentTask.currentStep);
+  
+  // Use stepIndex if valid, otherwise fall back to currentStep, otherwise show "current"
+  const stepIndex = typeof latestCorrection.stepIndex === 'number' && !isNaN(latestCorrection.stepIndex)
+    ? latestCorrection.stepIndex
+    : (typeof currentStep === 'number' ? currentStep : null);
+  
+  const stepNumber = stepIndex !== null ? stepIndex + 1 : 'current'; // Convert 0-indexed to 1-indexed for display
 
   // Format strategy name for display
   const formatStrategy = (strategy: string): string => {
@@ -67,7 +77,7 @@ const CorrectionView: React.FC = () => {
         </Badge>
       </HStack>
       {latestCorrection.reason && (
-        <Text fontSize="xs" color={useColorModeValue('gray.600', 'gray.400')} mt={1} pl={6}>
+        <Text fontSize="xs" color={descColor} mt={1} pl={6}>
           {latestCorrection.reason}
         </Text>
       )}

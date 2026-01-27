@@ -76,15 +76,26 @@ const CollapsibleComponent = (props: {
 };
 
 const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
-  // Get title from thought
-  const itemTitle = entry.thought || 'No thought provided';
-
   // Use hooks at component level, not conditionally
+  // NOTE: All hooks MUST be called before any early returns to comply with Rules of Hooks
   const errorTextColor = useColorModeValue('red.800', 'red.300');
   const errorBgColor = useColorModeValue('red.100', 'red.900/30');
   const successTextColor = useColorModeValue('green.800', 'green.300');
   const successBgColor = useColorModeValue('green.100', 'green.900/30');
   const panelBg = useColorModeValue('gray.100', 'gray.800');
+  
+  // Expected outcome colors (for conditional rendering)
+  const expectedOutcomeBg = useColorModeValue('blue.50', 'blue.900/20');
+  const expectedOutcomeTextColor = useColorModeValue('blue.800', 'blue.200');
+  const expectedOutcomeCodeBg = useColorModeValue('white', 'gray.800');
+  const expectedOutcomeCodeColor = useColorModeValue('blue.900', 'blue.200');
+
+  // GUARD CLAUSE: Return null if entry is undefined or null
+  // This must come AFTER all hooks are called
+  if (!entry) return null;
+
+  // Get title from thought - ensure it's always a string
+  const itemTitle = String(entry.thought || 'No thought provided');
 
   // Determine colors based on action type with dark mode support
   const colors: {
@@ -95,15 +106,20 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
     bg: undefined,
   };
 
-  if ('error' in entry.parsedAction) {
-    colors.text = errorTextColor;
-    colors.bg = errorBgColor;
-  } else if (entry.parsedAction.parsedAction.name === 'fail') {
-    colors.text = errorTextColor;
-    colors.bg = errorBgColor;
-  } else if (entry.parsedAction.parsedAction.name === 'finish') {
-    colors.text = successTextColor;
-    colors.bg = successBgColor;
+  // Check if parsedAction exists before accessing it
+  if (entry.parsedAction) {
+    if ('error' in entry.parsedAction) {
+      colors.text = errorTextColor;
+      colors.bg = errorBgColor;
+    } else if ('parsedAction' in entry.parsedAction) {
+      if (entry.parsedAction.parsedAction.name === 'fail') {
+        colors.text = errorTextColor;
+        colors.bg = errorBgColor;
+      } else if (entry.parsedAction.parsedAction.name === 'finish') {
+        colors.text = successTextColor;
+        colors.bg = successBgColor;
+      }
+    }
   }
 
   // Format usage tokens
@@ -128,22 +144,22 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
         bg={panelBg} 
         p="2"
       >
-        <Accordion allowMultiple allowToggle w="full" defaultIndex={1}>
+        <Accordion allowMultiple w="full" defaultIndex={1}>
           <CollapsibleComponent
             title="Thought"
-            text={entry.thought}
+            text={String(entry.thought || '')}
           />
           <CollapsibleComponent
             title="Action"
             subtitle={entry.usage ? `${totalTokens} tokens (${promptTokens} prompt + ${completionTokens} completion)` : undefined}
-            text={entry.action}
+            text={String(entry.action || '')}
           />
           {entry.expectedOutcome && (
-            <AccordionItem bg={useColorModeValue('blue.50', 'blue.900/20')} _dark={{ bg: 'blue.900/20' }}>
+            <AccordionItem bg={expectedOutcomeBg} _dark={{ bg: 'blue.900/20' }}>
               <Heading as="h4" size="xs">
                 <AccordionButton>
                   <HStack flex="1">
-                    <Box color={useColorModeValue('blue.800', 'blue.200')} fontWeight="medium">
+                    <Box color={expectedOutcomeTextColor} fontWeight="medium">
                       Expected Outcome
                     </Box>
                     <Badge colorScheme="blue" fontSize="xs">
@@ -160,11 +176,11 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
                   fontSize="xs"
                   display="block"
                   whiteSpace="pre-wrap"
-                  bg={useColorModeValue('white', 'gray.800')}
+                  bg={expectedOutcomeCodeBg}
                   fontFamily="mono"
-                  color={useColorModeValue('blue.900', 'blue.200')}
+                  color={expectedOutcomeCodeColor}
                 >
-                  {entry.expectedOutcome}
+                  {String(entry.expectedOutcome || '')}
                 </Code>
               </AccordionPanel>
             </AccordionItem>
@@ -177,7 +193,7 @@ const TaskHistoryItem = ({ index, entry }: TaskHistoryItemProps) => {
           )}
           <CollapsibleComponent
             title="Parsed Action"
-            text={JSON.stringify(entry.parsedAction, null, 2)}
+            text={entry.parsedAction ? JSON.stringify(entry.parsedAction, null, 2) : 'No parsed action available'}
           />
         </Accordion>
       </AccordionPanel>
@@ -208,9 +224,12 @@ export default function TaskHistoryDebug() {
         <CopyButton text={JSON.stringify(taskHistory, null, 2)} />
       </HStack>
       <Accordion allowMultiple w="full" pb="4">
-        {taskHistory.map((entry, index) => (
-          <TaskHistoryItem key={index} index={index} entry={entry} />
-        ))}
+        {taskHistory.map((entry, index) => {
+          // GUARD CLAUSE: Return null if entry is undefined or null
+          if (!entry) return null;
+          
+          return <TaskHistoryItem key={index} index={index} entry={entry} />;
+        })}
       </Accordion>
     </VStack>
   );

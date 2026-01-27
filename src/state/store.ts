@@ -6,12 +6,14 @@ import { createCurrentTaskSlice, CurrentTaskSlice } from './currentTask';
 import { createUiSlice, UiSlice } from './ui';
 import { createSettingsSlice, SettingsSlice } from './settings';
 import { createDebugSlice, DebugSlice } from './debug';
+import { createConversationHistorySlice, ConversationHistorySlice } from './conversationHistory';
 
 export type StoreType = {
   currentTask: CurrentTaskSlice;
   ui: UiSlice;
   settings: SettingsSlice;
   debug: DebugSlice;
+  conversationHistory: ConversationHistorySlice;
 };
 
 export type MyStateCreator<T> = StateCreator<
@@ -29,6 +31,7 @@ export const useAppState = create<StoreType>()(
         ui: createUiSlice(...a),
         settings: createSettingsSlice(...a),
         debug: createDebugSlice(...a),
+        conversationHistory: createConversationHistorySlice(...a),
       }))
     ),
     {
@@ -50,9 +53,38 @@ export const useAppState = create<StoreType>()(
           // Developer mode (runtime control)
           developerMode: state.settings.developerMode,
         },
+        conversationHistory: {
+          conversations: state.conversationHistory.conversations.map((conv) => ({
+            ...conv,
+            createdAt: conv.createdAt.toISOString(),
+            completedAt: conv.completedAt.toISOString(),
+          })),
+        },
       }),
-      merge: (persistedState, currentState) =>
-        merge(currentState, persistedState),
+      merge: (persistedState, currentState) => {
+        const merged = merge(currentState, persistedState);
+        // Convert ISO strings back to Date objects for conversation history
+        if (merged.conversationHistory?.conversations) {
+          merged.conversationHistory.conversations = merged.conversationHistory.conversations.map((conv: any) => {
+            const createdAt = conv.createdAt instanceof Date 
+              ? conv.createdAt 
+              : typeof conv.createdAt === 'string' 
+              ? new Date(conv.createdAt) 
+              : new Date();
+            const completedAt = conv.completedAt instanceof Date 
+              ? conv.completedAt 
+              : typeof conv.completedAt === 'string' 
+              ? new Date(conv.completedAt) 
+              : new Date();
+            return {
+              ...conv,
+              createdAt,
+              completedAt,
+            };
+          });
+        }
+        return merged;
+      },
     }
   )
 );

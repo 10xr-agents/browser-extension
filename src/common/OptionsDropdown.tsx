@@ -20,10 +20,12 @@ const OptionsDropdown: React.FC<OptionsDropdownProps> = ({ onNavigate }) => {
   const user = useAppState((state) => state.settings.user);
 
   // Dark mode colors - defined at component top level
+  // NOTE: All hooks MUST be called before any early returns to comply with Rules of Hooks
   const borderColor = useColorModeValue('gray.300', 'gray.600');
   const bgColor = useColorModeValue('white', 'gray.800');
   const hoverBg = useColorModeValue('gray.100', 'gray.700');
   const iconColor = useColorModeValue('gray.700', 'gray.300');
+  const hoverBorderColor = useColorModeValue('gray.400', 'gray.500');
 
   if (!user) return null;
 
@@ -43,7 +45,7 @@ const OptionsDropdown: React.FC<OptionsDropdownProps> = ({ onNavigate }) => {
       color={iconColor}
       _hover={{
         bg: hoverBg,
-        borderColor: useColorModeValue('gray.400', 'gray.500'),
+        borderColor: hoverBorderColor,
       }}
       _focusVisible={{
         boxShadow: 'outline',

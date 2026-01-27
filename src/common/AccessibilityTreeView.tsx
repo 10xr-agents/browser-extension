@@ -177,7 +177,7 @@ const AccessibilityTreeView: React.FC<AccessibilityTreeViewProps> = ({ tree }) =
         <Text fontSize="xs" color={descColor}>
           Expandable tree view of accessibility nodes. Used for validation and debugging.
         </Text>
-        <Accordion allowMultiple allowToggle defaultIndex={[0]}>
+        <Accordion allowMultiple defaultIndex={[0]}>
           <TreeNode node={rootNode} allNodes={tree.nodes} level={0} />
         </Accordion>
       </VStack>

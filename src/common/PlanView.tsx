@@ -43,7 +43,13 @@ const PlanView: React.FC = () => {
   // Get current step description
   const getCurrentStepDescription = (): string => {
     if (plan && plan.steps && plan.currentStepIndex >= 0 && plan.currentStepIndex < plan.steps.length) {
-      return plan.steps[plan.currentStepIndex].description;
+      const stepDesc = plan.steps[plan.currentStepIndex].description;
+      // Defensive check: ensure description is always a string
+      return typeof stepDesc === 'string' 
+        ? stepDesc 
+        : (typeof stepDesc === 'object' && stepDesc !== null && 'description' in stepDesc)
+          ? String(stepDesc.description || '')
+          : String(stepDesc || 'Processing...');
     }
     if (currentStep && totalSteps) {
       return `Step ${currentStep} of ${totalSteps}`;

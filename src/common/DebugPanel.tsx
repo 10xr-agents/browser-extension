@@ -28,6 +28,7 @@ import StateInspectorView from './StateInspectorView';
 import PlanViewDebug from './PlanViewDebug';
 import VerificationViewDebug from './VerificationViewDebug';
 import CorrectionViewDebug from './CorrectionViewDebug';
+import ErrorBoundary from './ErrorBoundary';
 
 interface DebugPanelProps {
   hideHeader?: boolean;
@@ -88,72 +89,94 @@ const DebugPanel: React.FC<DebugPanelProps> = ({ hideHeader = false }) => {
     <VStack align="stretch" spacing={5} w="100%">
         {/* Execution Status */}
         {(taskStatus === 'running' || actionStatus !== 'idle') && (
-          <DebugCard title="Execution Status">
-            <TaskStatus />
-          </DebugCard>
+          <ErrorBoundary>
+            <DebugCard title="Execution Status">
+              <TaskStatus />
+            </DebugCard>
+          </ErrorBoundary>
         )}
 
         {/* Action Plan (Manus Orchestrator) */}
         {(plan || currentStep || totalSteps) && (
-          <DebugCard title="Action Plan">
-            <PlanViewDebug />
-          </DebugCard>
+          <ErrorBoundary>
+            <DebugCard title="Action Plan">
+              <PlanViewDebug />
+            </DebugCard>
+          </ErrorBoundary>
         )}
 
         {/* Verification Results (Manus Orchestrator) */}
         {verificationHistory && verificationHistory.length > 0 && (
-          <DebugCard title="Verification Results">
-            <VerificationViewDebug />
-          </DebugCard>
+          <ErrorBoundary>
+            <DebugCard title="Verification Results">
+              <VerificationViewDebug />
+            </DebugCard>
+          </ErrorBoundary>
         )}
 
         {/* Correction Results (Manus Orchestrator) */}
         {correctionHistory && correctionHistory.length > 0 && (
-          <DebugCard title="Correction Results">
-            <CorrectionViewDebug />
-          </DebugCard>
+          <ErrorBoundary>
+            <DebugCard title="Correction Results">
+              <CorrectionViewDebug />
+            </DebugCard>
+          </ErrorBoundary>
         )}
 
         {/* Network/API Trace */}
-        <DebugCard title="Network/API Trace">
-          <NetworkTraceView />
-        </DebugCard>
+        <ErrorBoundary>
+          <DebugCard title="Network/API Trace">
+            <NetworkTraceView />
+          </DebugCard>
+        </ErrorBoundary>
 
         {/* Raw Logs */}
-        <DebugCard title="Raw Logs">
-          <TaskHistoryDebug />
-        </DebugCard>
+        <ErrorBoundary>
+          <DebugCard title="Raw Logs">
+            <TaskHistoryDebug />
+          </DebugCard>
+        </ErrorBoundary>
 
         {/* RAG Context */}
-        <DebugCard title="RAG Context">
-          <RAGContextView />
-        </DebugCard>
+        <ErrorBoundary>
+          <DebugCard title="RAG Context">
+            <RAGContextView />
+          </DebugCard>
+        </ErrorBoundary>
 
         {/* Page Structure (Accessibility Tree) */}
         {accessibilityTree && (
-          <DebugCard title="Page Structure">
-            <AccessibilityTreeView tree={accessibilityTree} />
-          </DebugCard>
+          <ErrorBoundary>
+            <DebugCard title="Page Structure">
+              <AccessibilityTreeView tree={accessibilityTree} />
+            </DebugCard>
+          </ErrorBoundary>
         )}
 
         {/* Interaction Coverage (Coverage Metrics) */}
         {coverageMetrics && (
-          <DebugCard title="Interaction Coverage">
-            <CoverageMetricsView metrics={coverageMetrics} />
-          </DebugCard>
+          <ErrorBoundary>
+            <DebugCard title="Interaction Coverage">
+              <CoverageMetricsView metrics={coverageMetrics} />
+            </DebugCard>
+          </ErrorBoundary>
         )}
 
         {/* Element Sources (Hybrid Elements) */}
         {hybridElements && hybridElements.length > 0 && (
-          <DebugCard title="Element Sources">
-            <HybridElementView hybridElements={hybridElements} />
-          </DebugCard>
+          <ErrorBoundary>
+            <DebugCard title="Element Sources">
+              <HybridElementView hybridElements={hybridElements} />
+            </DebugCard>
+          </ErrorBoundary>
         )}
 
         {/* State Inspector */}
-        <DebugCard title="State Inspector">
-          <StateInspectorView />
-        </DebugCard>
+        <ErrorBoundary>
+          <DebugCard title="State Inspector">
+            <StateInspectorView />
+          </DebugCard>
+        </ErrorBoundary>
       </VStack>
   );
 };

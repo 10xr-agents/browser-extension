@@ -16,12 +16,8 @@ import {
   Flex,
   Icon,
   useColorModeValue,
-  Alert,
-  AlertIcon,
   IconButton,
-  Code,
 } from '@chakra-ui/react';
-import { InfoIcon } from '@chakra-ui/icons';
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { BsStopFill } from 'react-icons/bs';
 import { FiSend } from 'react-icons/fi';
@@ -30,9 +26,7 @@ import TaskHistory from './TaskHistory';
 import KnowledgeOverlay from './KnowledgeOverlay';
 import AutosizeTextarea from './AutosizeTextarea';
 import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
-import PlanView from './PlanView';
-import VerificationView from './VerificationView';
-import CorrectionView from './CorrectionView';
+import ErrorBoundary from './ErrorBoundary';
 
 interface TaskUIProps {
   hasOrgKnowledge?: boolean | null;
@@ -68,6 +62,16 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
   const [showKnowledge, setShowKnowledge] = useState(false);
 
   const taskInProgress = state.taskStatus === 'running';
+  const sessionId = useAppState((state) => state.currentTask.sessionId);
+  const loadMessages = useAppState((state) => state.currentTask.actions.loadMessages);
+  const messages = useAppState((state) => state.currentTask.messages);
+
+  // Load messages on mount if sessionId exists
+  useEffect(() => {
+    if (sessionId && messages.length === 0) {
+      loadMessages(sessionId);
+    }
+  }, [sessionId, messages.length, loadMessages]);
 
   // Get active tab URL on mount and when tab changes
   useEffect(() => {
@@ -141,6 +145,11 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
   const contextPillText = useColorModeValue('gray.700', 'gray.300');
   const floatingInputBg = useColorModeValue('white', 'gray.800');
   const floatingInputBorder = useColorModeValue('gray.300', 'gray.600');
+  
+  // System notice colors (for organization knowledge warning)
+  const systemNoticeBg = useColorModeValue('orange.50', 'orange.900/20');
+  const systemNoticeBorderColor = useColorModeValue('orange.400', 'orange.500');
+  const systemNoticeTextColor = useColorModeValue('orange.800', 'orange.300');
 
   // Get current context (active URL domain or task name)
   const getCurrentContext = () => {
@@ -198,38 +207,26 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
         pb="100px" // Add padding bottom to account for floating input
       >
         <VStack spacing={4} align="stretch" minW="0">
-          {/* Plan View (Manus Orchestrator) */}
-          <PlanView />
-
-          {/* Verification View (Manus Orchestrator) */}
-          <VerificationView />
-
-          {/* Correction View (Manus Orchestrator) */}
-          <CorrectionView />
-
-          {/* Status Banner */}
+          {/* System Notice - Slim, inline style */}
           {hasOrgKnowledge === false && (
-            <Box minW="0" mb={2}>
-              <Alert
-                status="info"
-                variant="subtle"
-                borderRadius="md"
-                bg={bannerBg}
+            <Box
+              minW="0"
+              bg={systemNoticeBg}
+              borderLeftWidth="4px"
+              borderLeftColor={systemNoticeBorderColor}
+              px={3}
+              py={2}
+              borderRadius="sm"
+            >
+              <Text
+                fontSize="xs"
+                color={systemNoticeTextColor}
+                lineHeight="1.3"
+                fontWeight="medium"
                 minW="0"
-                py={2}
-                px={3}
               >
-                <AlertIcon as={InfoIcon} boxSize={3.5} />
-                <Text
-                  fontSize="xs"
-                  color={bannerTextColor}
-                  lineHeight="1.3"
-                  fontWeight="medium"
-                  minW="0"
-                >
-                  This website is not part of your organization's approved tools. Suggestions are based on general knowledge only.
-                </Text>
-              </Alert>
+                This website is not part of your organization's approved tools. Suggestions are based on general knowledge only.
+              </Text>
             </Box>
           )}
 
@@ -242,38 +239,19 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
 
           {/* Knowledge Resolution Section */}
           {activeUrl && showKnowledge && (
+            <ErrorBoundary>
+              <Box minW="0">
+                <KnowledgeOverlay url={activeUrl} />
+              </Box>
+            </ErrorBoundary>
+          )}
+
+          {/* Task History - User-facing view with message bubbles */}
+          <ErrorBoundary>
             <Box minW="0">
-              <KnowledgeOverlay url={activeUrl} />
+              <TaskHistory />
             </Box>
-          )}
-
-          {/* Accessibility Elements Info (Task 5) - User-facing indicator only */}
-          {state.accessibilityElements && state.accessibilityElements.length > 0 && (
-            <Box
-              p={3}
-              borderWidth="1px"
-              borderColor={borderColor}
-              borderRadius="lg"
-              bg="blue.50"
-              _dark={{ bg: 'blue.900/20' }}
-              minW="0"
-            >
-              <Text
-                fontSize="xs"
-                color="blue.700"
-                _dark={{ color: 'blue.300' }}
-                fontWeight="medium"
-                minW="0"
-              >
-                ✓ Using {state.accessibilityElements.length} accessibility-derived interactive elements
-              </Text>
-            </Box>
-          )}
-
-          {/* Task History - User-facing view only */}
-          <Box minW="0">
-            <TaskHistory />
-          </Box>
+          </ErrorBoundary>
         </VStack>
       </Box>
 

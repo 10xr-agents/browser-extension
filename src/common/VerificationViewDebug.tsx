@@ -37,6 +37,7 @@ const VerificationViewDebug: React.FC = () => {
   const headingColor = useColorModeValue('gray.900', 'gray.100');
   const descColor = useColorModeValue('gray.600', 'gray.400');
   const codeBg = useColorModeValue('gray.100', 'gray.700');
+  const progressBg = useColorModeValue('gray.200', 'gray.700');
 
   // Don't render if no verification data
   if (!verificationHistory || verificationHistory.length === 0) {
@@ -82,7 +83,7 @@ const VerificationViewDebug: React.FC = () => {
         <Divider />
 
         {/* Verification Results */}
-        <Accordion allowMultiple allowToggle defaultIndex={[]}>
+        <Accordion allowMultiple defaultIndex={[]}>
           {verificationHistory.map((verification, index) => (
             <AccordionItem key={index}>
               <AccordionButton>
@@ -126,7 +127,7 @@ const VerificationViewDebug: React.FC = () => {
                       colorScheme={getConfidenceColor(verification.confidence)}
                       size="sm"
                       borderRadius="full"
-                      bg={useColorModeValue('gray.200', 'gray.700')}
+                      bg={progressBg}
                     />
                   </Box>
 
@@ -137,7 +138,7 @@ const VerificationViewDebug: React.FC = () => {
                         Reason:
                       </Text>
                       <Text color={textColor} whiteSpace="pre-wrap">
-                        {verification.reason}
+                        {String(verification.reason)}
                       </Text>
                     </Box>
                   )}
@@ -149,7 +150,7 @@ const VerificationViewDebug: React.FC = () => {
                         Expected State:
                       </Text>
                       <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={codeBg} fontFamily="mono">
-                        {verification.expectedState}
+                        {String(verification.expectedState)}
                       </Code>
                     </Box>
                   )}
@@ -161,7 +162,7 @@ const VerificationViewDebug: React.FC = () => {
                         Actual State:
                       </Text>
                       <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={codeBg} fontFamily="mono">
-                        {verification.actualState}
+                        {String(verification.actualState)}
                       </Code>
                     </Box>
                   )}

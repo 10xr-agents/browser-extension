@@ -12,7 +12,8 @@
     "clipboardWrite",
     "debugger",
     "management",
-    "sidePanel"
+    "sidePanel",
+    "scripting"
   ],
   "action": {
     "default_icon": "icon-34.png"

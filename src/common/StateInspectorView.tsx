@@ -112,7 +112,7 @@ const StateInspectorView: React.FC = () => {
       </HStack>
 
       {/* State by Slice */}
-      <Accordion allowMultiple allowToggle>
+      <Accordion allowMultiple>
         {/* Current Task Slice */}
         <AccordionItem>
           <AccordionButton>

@@ -76,17 +76,17 @@ const HybridElementItem: React.FC<{ element: HybridElement; index: number }> = (
             </HStack>
             {element.name && (
               <Text fontSize="sm" fontWeight="medium" mt={1} color={textColor}>
-                {element.name}
+                {String(element.name)}
               </Text>
             )}
             {element.description && (
               <Text fontSize="xs" color={descColor} mt={0.5}>
-                {element.description}
+                {String(element.description)}
               </Text>
             )}
             {element.value && (
               <Text fontSize="xs" color={valueColor} fontStyle="italic" mt={0.5}>
-                Value: {element.value}
+                Value: {String(element.value)}
               </Text>
             )}
           </Box>
@@ -204,7 +204,7 @@ const HybridElementView: React.FC<HybridElementViewProps> = ({ hybridElements })
           Unified element representation combining accessibility tree and DOM data.
           Prefers accessibility data when available, supplements with DOM when needed.
         </Text>
-        <Accordion allowMultiple allowToggle defaultIndex={[]}>
+        <Accordion allowMultiple defaultIndex={[]}>
           {hybridElements.map((element, index) => (
             <HybridElementItem key={element.id} element={element} index={index} />
           ))}

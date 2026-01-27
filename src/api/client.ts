@@ -75,12 +75,26 @@ interface ResolveKnowledgeResponse {
  * Request body for POST /api/agent/interact
  * Reference: THIN_CLIENT_ROADMAP.md §4.1 (Task 3: Server-Side Action Loop)
  * Reference: SERVER_SIDE_AGENT_ARCH.md §4.2 (POST /api/agent/interact)
+ * Reference: BACKEND_WEB_SEARCH_CHANGES.md §4.1 (Error Handling)
  */
 interface AgentInteractRequest {
   url: string;
   query: string;
   dom: string;
   taskId?: string | null;
+  sessionId?: string | null; // New: Session ID (replaces taskId for new structure)
+  // New fields for error reporting
+  lastActionStatus?: 'success' | 'failure' | 'pending';
+  lastActionError?: {
+    message: string;
+    code: string; // e.g., 'ELEMENT_NOT_FOUND', 'TIMEOUT', 'NETWORK_ERROR'
+    action: string; // The action that failed (e.g., "click(123)")
+    elementId?: number; // Element ID that failed (if applicable)
+  };
+  lastActionResult?: {
+    success: boolean;
+    actualState?: string; // What actually happened (for verification)
+  };
 }
 
 /**
@@ -146,7 +160,8 @@ interface NextActionResponse {
     promptTokens: number;
     completionTokens: number;
   };
-  taskId?: string; // if server creates task; client should send this on later steps
+  taskId?: string; // if server creates task; client should send this on later steps (legacy)
+  sessionId?: string; // Session ID for new chat persistence structure
   hasOrgKnowledge?: boolean; // Optional. true when org-specific RAG was used; false when public-only
   // Orchestrator enhancements (optional, backward compatible)
   plan?: ActionPlan; // Action plan from orchestrator
@@ -459,6 +474,18 @@ class ApiClient {
     query: string,
     dom: string,
     taskId?: string | null,
+    sessionId?: string | null,
+    lastActionStatus?: 'success' | 'failure' | 'pending',
+    lastActionError?: {
+      message: string;
+      code: string;
+      action: string;
+      elementId?: number;
+    },
+    lastActionResult?: {
+      success: boolean;
+      actualState?: string;
+    },
     logger?: (log: {
       method: string;
       endpoint: string;
@@ -473,6 +500,10 @@ class ApiClient {
       query,
       dom: dom.substring(0, 50000), // Truncate large DOM for logging
       taskId: taskId || undefined,
+      sessionId: sessionId || undefined,
+      lastActionStatus,
+      lastActionError,
+      lastActionResult,
     };
 
     return this.request<NextActionResponse>('POST', '/api/agent/interact', body, logger);
@@ -496,6 +527,85 @@ class ApiClient {
    */
   async updatePreferences(preferences: PreferencesRequest): Promise<PreferencesResponse> {
     return this.request<PreferencesResponse>('POST', '/api/v1/user/preferences', preferences);
+  }
+
+  /**
+   * Get session messages
+   * Retrieves conversation history for a session
+   * 
+   * Reference: BACKEND_WEB_SEARCH_CHANGES.md §3.2 (Task 3: Chat Persistence)
+   */
+  async getSessionMessages(
+    sessionId: string,
+    limit?: number,
+    since?: Date
+  ): Promise<{
+    sessionId: string;
+    messages: Array<{
+      messageId: string;
+      role: 'user' | 'assistant' | 'system';
+      content: string;
+      actionPayload?: object;
+      actionString?: string;
+      status?: 'success' | 'failure' | 'pending';
+      error?: object;
+      timestamp: string;
+      metadata?: object;
+    }>;
+    total: number;
+  }> {
+    const params = new URLSearchParams();
+    if (limit) params.append('limit', limit.toString());
+    if (since) params.append('since', since.toISOString());
+    
+    const queryString = params.toString();
+    const path = `/api/session/${sessionId}/messages${queryString ? `?${queryString}` : ''}`;
+    
+    return this.request<{
+      sessionId: string;
+      messages: Array<{
+        messageId: string;
+        role: 'user' | 'assistant' | 'system';
+        content: string;
+        actionPayload?: object;
+        actionString?: string;
+        status?: 'success' | 'failure' | 'pending';
+        error?: object;
+        timestamp: string;
+        metadata?: object;
+      }>;
+      total: number;
+    }>('GET', path);
+  }
+
+  /**
+   * Get latest session
+   * Gets the most recent active session for the user
+   * 
+   * Reference: BACKEND_WEB_SEARCH_CHANGES.md §3.2 (Task 3: Chat Persistence)
+   */
+  async getLatestSession(status?: string): Promise<{
+    sessionId: string;
+    url: string;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+    messageCount: number;
+  }> {
+    const params = new URLSearchParams();
+    if (status) params.append('status', status);
+    
+    const queryString = params.toString();
+    const path = `/api/session/latest${queryString ? `?${queryString}` : ''}`;
+    
+    return this.request<{
+      sessionId: string;
+      url: string;
+      status: string;
+      createdAt: string;
+      updatedAt: string;
+      messageCount: number;
+    }>('GET', path);
   }
 }
 

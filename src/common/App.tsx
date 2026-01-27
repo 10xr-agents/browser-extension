@@ -33,6 +33,7 @@ import OptionsDropdown from './OptionsDropdown';
 import SettingsView from './SettingsView';
 import { ThemeProvider } from './ThemeProvider';
 import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
+import ErrorBoundary from './ErrorBoundary';
 import logo from '../assets/img/icon-128.png';
 
 type Route = '/' | '/settings';
@@ -201,90 +202,96 @@ const App = () => {
 
   return (
     <ThemeProvider>
-      {/* Bulletproof Root Container */}
-      <Flex
-        h="100vh"
-        w="100%"
-        direction="column"
-        overflow="hidden"
-        bg={bgColor}
-      >
-        {/* Fixed Header - Never Shrinks */}
-        {user && (
-          <Box
-            as="header"
-            flex="none"
-            zIndex={10}
-            bg={headerBg}
-            borderBottomWidth="1px"
-            borderColor={headerBorder}
-            px={4}
-            py={3}
-            shadow="sm"
-          >
-            <HStack spacing={3} alignItems="center" justifyContent="space-between" minW="0">
-              <HStack spacing={3} alignItems="center" minW="0" flex={1}>
-                <img
-                  src={logo}
-                  width={28}
-                  height={28}
-                  className="App-logo"
-                  alt="logo"
-                  style={{ borderRadius: '6px', flexShrink: 0 }}
-                />
-              </HStack>
-              <HStack spacing={2} flexShrink={0}>
-                {/* Debug Toggle Button - Only visible when developer mode is enabled */}
-                {developerMode && (
-                  <IconButton
-                    aria-label={isDebugViewOpen ? 'Switch to Chat view' : 'Switch to Debug view'}
-                    icon={<Icon as={FaBug} />}
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setIsDebugViewOpen(!isDebugViewOpen)}
-                    bg={isDebugViewOpen ? debugButtonActiveBg : debugButtonBg}
-                    borderColor={isDebugViewOpen ? debugButtonActiveBorderColor : debugButtonBorderColor}
-                    color={isDebugViewOpen ? debugButtonActiveColor : debugButtonIconColor}
-                    _hover={{
-                      bg: isDebugViewOpen ? debugButtonActiveBg : debugButtonHoverBg,
-                      borderColor: isDebugViewOpen ? debugButtonActiveBorderColor : useColorModeValue('gray.400', 'gray.500'),
-                    }}
-                    _focusVisible={{
-                      boxShadow: 'outline',
-                    }}
-                  />
-                )}
-                <OptionsDropdown onNavigate={setCurrentRoute} />
-              </HStack>
-            </HStack>
-          </Box>
-        )}
-
-        {/* Content Area - Let child components handle their own scrolling */}
-        <Box
-          flex="1"
+      <ErrorBoundary>
+        {/* Bulletproof Root Container */}
+        <Flex
+          h="100vh"
+          w="100%"
+          direction="column"
           overflow="hidden"
-          minW="0"
-          position="relative"
           bg={bgColor}
         >
-          {/* Route-based rendering */}
-          {user ? (
-            currentRoute === '/settings' ? (
-              <SettingsView onNavigate={setCurrentRoute} />
-            ) : (
-              // Conditional rendering based on debug toggle
-              isDebugViewOpen ? (
-                <SystemView />
-              ) : (
-                <TaskUI hasOrgKnowledge={hasOrgKnowledge} />
-              )
-            )
-          ) : (
-            <Login />
+          {/* Fixed Header - Never Shrinks */}
+          {user && (
+            <ErrorBoundary>
+              <Box
+                as="header"
+                flex="none"
+                zIndex={10}
+                bg={headerBg}
+                borderBottomWidth="1px"
+                borderColor={headerBorder}
+                px={4}
+                py={3}
+                shadow="sm"
+              >
+                <HStack spacing={3} alignItems="center" justifyContent="space-between" minW="0">
+                  <HStack spacing={3} alignItems="center" minW="0" flex={1}>
+                    <img
+                      src={logo}
+                      width={28}
+                      height={28}
+                      className="App-logo"
+                      alt="logo"
+                      style={{ borderRadius: '6px', flexShrink: 0 }}
+                    />
+                  </HStack>
+                  <HStack spacing={2} flexShrink={0}>
+                    {/* Debug Toggle Button - Only visible when developer mode is enabled */}
+                    {developerMode && (
+                      <IconButton
+                        aria-label={isDebugViewOpen ? 'Switch to Chat view' : 'Switch to Debug view'}
+                        icon={<Icon as={FaBug} />}
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setIsDebugViewOpen(!isDebugViewOpen)}
+                        bg={isDebugViewOpen ? debugButtonActiveBg : debugButtonBg}
+                        borderColor={isDebugViewOpen ? debugButtonActiveBorderColor : debugButtonBorderColor}
+                        color={isDebugViewOpen ? debugButtonActiveColor : debugButtonIconColor}
+                        _hover={{
+                          bg: isDebugViewOpen ? debugButtonActiveBg : debugButtonHoverBg,
+                          borderColor: isDebugViewOpen ? debugButtonActiveBorderColor : useColorModeValue('gray.400', 'gray.500'),
+                        }}
+                        _focusVisible={{
+                          boxShadow: 'outline',
+                        }}
+                      />
+                    )}
+                    <OptionsDropdown onNavigate={setCurrentRoute} />
+                  </HStack>
+                </HStack>
+              </Box>
+            </ErrorBoundary>
           )}
-        </Box>
-      </Flex>
+
+          {/* Content Area - Let child components handle their own scrolling */}
+          <Box
+            flex="1"
+            overflow="hidden"
+            minW="0"
+            position="relative"
+            bg={bgColor}
+          >
+            <ErrorBoundary>
+              {/* Route-based rendering */}
+              {user ? (
+                currentRoute === '/settings' ? (
+                  <SettingsView onNavigate={setCurrentRoute} />
+                ) : (
+                  // Conditional rendering based on debug toggle
+                  isDebugViewOpen ? (
+                    <SystemView />
+                  ) : (
+                    <TaskUI hasOrgKnowledge={hasOrgKnowledge} />
+                  )
+                )
+              ) : (
+                <Login />
+              )}
+            </ErrorBoundary>
+          </Box>
+        </Flex>
+      </ErrorBoundary>
     </ThemeProvider>
   );
 };

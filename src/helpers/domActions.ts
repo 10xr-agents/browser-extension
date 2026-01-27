@@ -70,7 +70,8 @@ async function getObjectId(originalId: number): Promise<string> {
   }
 
   // Fallback to DOM-based approach (existing implementation)
-  const uniqueId = await callRPC('getUniqueElementSelectorId', [originalId]);
+  // Pass explicit tabId to callRPC
+  const uniqueId = await callRPC('getUniqueElementSelectorId', [originalId], 1, tabId);
   // get node id
   const document = (await sendCommand('DOM.getDocument')) as any;
   const { nodeId } = (await sendCommand('DOM.querySelector', {
@@ -113,7 +114,8 @@ async function clickAtPosition(
   y: number,
   clickCount = 1
 ): Promise<void> {
-  callRPC('ripple', [x, y]);
+  const tabId = useAppState.getState().currentTask.tabId;
+  callRPC('ripple', [x, y], 1, tabId);
   await sendCommand('Input.dispatchMouseEvent', {
     type: 'mousePressed',
     x,
@@ -191,11 +193,60 @@ export type DOMActions = typeof domActions;
 type ActionName = keyof DOMActions;
 type ActionPayload<T extends ActionName> = Parameters<DOMActions[T]>[0];
 
+/**
+ * Action execution result
+ * Used to report success/failure status to the server
+ */
+export type ActionExecutionResult = {
+  success: boolean;
+  error?: {
+    message: string;
+    code: string;
+    action: string;
+    elementId?: number;
+  };
+  actualState?: string; // What actually happened (for verification)
+};
+
 // Call this function from the content script
 export const callDOMAction = async <T extends ActionName>(
   type: T,
   payload: ActionPayload<T>
-): Promise<void> => {
-  // @ts-expect-error - we know that the type is valid
-  await domActions[type](payload);
+): Promise<ActionExecutionResult> => {
+  const actionString = `${type}(${JSON.stringify(payload).slice(1, -1)})`; // e.g., "click(123)"
+  const elementId = 'elementId' in payload ? (payload as { elementId: number }).elementId : undefined;
+  
+  try {
+    // @ts-expect-error - we know that the type is valid
+    await domActions[type](payload);
+    
+    return {
+      success: true,
+    };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Determine error code based on error message
+    let errorCode = 'ACTION_FAILED';
+    if (errorMessage.includes('not found') || errorMessage.includes('Could not find')) {
+      errorCode = 'ELEMENT_NOT_FOUND';
+    } else if (errorMessage.includes('timeout') || errorMessage.includes('Timeout')) {
+      errorCode = 'TIMEOUT';
+    } else if (errorMessage.includes('network') || errorMessage.includes('connection')) {
+      errorCode = 'NETWORK_ERROR';
+    } else if (errorMessage.includes('Content script is not loaded')) {
+      errorCode = 'CONTENT_SCRIPT_NOT_READY';
+    }
+    
+    return {
+      success: false,
+      error: {
+        message: errorMessage,
+        code: errorCode,
+        action: actionString,
+        elementId,
+      },
+      actualState: errorMessage, // Use error message as actual state for verification
+    };
+  }
 };

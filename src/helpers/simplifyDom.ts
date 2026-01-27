@@ -101,7 +101,17 @@ export async function getSimplifiedDom(tabId?: number): Promise<SimplifiedDomRes
   }
 
   // Fallback to DOM approach (always used, or as fallback)
-  const fullDom = await callRPC('getAnnotatedDOM', [], 3);
+  // Use more retries for DOM extraction as content script may need time to load
+  let fullDom: string | null = null;
+  try {
+    fullDom = await callRPC('getAnnotatedDOM', [], 5); // Increased retries for initial DOM load
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('Failed to get annotated DOM:', errorMessage);
+    // Return null to let caller handle the error
+    return null;
+  }
+  
   if (!fullDom) return null;
 
   const dom = new DOMParser().parseFromString(fullDom, 'text/html');

@@ -87,7 +87,7 @@ const CorrectionViewDebug: React.FC = () => {
         <Divider />
 
         {/* Correction Results */}
-        <Accordion allowMultiple allowToggle defaultIndex={[]}>
+        <Accordion allowMultiple defaultIndex={[]}>
           {correctionHistory.map((correction, index) => (
             <AccordionItem key={index}>
               <AccordionButton>
@@ -101,7 +101,9 @@ const CorrectionViewDebug: React.FC = () => {
                     {formatStrategy(correction.strategy)}
                   </Badge>
                   <Text fontSize="xs" fontWeight="medium" color={headingColor} flex="1">
-                    Step {correction.stepIndex + 1} Correction
+                    Step {typeof correction.stepIndex === 'number' && !isNaN(correction.stepIndex) 
+                      ? correction.stepIndex + 1 
+                      : 'current'} Correction
                   </Text>
                   <Badge colorScheme="orange" fontSize="xs">
                     Attempt {correction.attemptNumber}
@@ -133,7 +135,7 @@ const CorrectionViewDebug: React.FC = () => {
                         Reason:
                       </Text>
                       <Text color={textColor} whiteSpace="pre-wrap">
-                        {correction.reason}
+                        {String(correction.reason)}
                       </Text>
                     </Box>
                   )}
@@ -155,7 +157,7 @@ const CorrectionViewDebug: React.FC = () => {
                         Original Step:
                       </Text>
                       <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={codeBg} fontFamily="mono">
-                        {correction.originalStep}
+                        {String(correction.originalStep)}
                       </Code>
                     </Box>
                   )}
@@ -167,7 +169,7 @@ const CorrectionViewDebug: React.FC = () => {
                         Corrected Step:
                       </Text>
                       <Code p={2} fontSize="xs" display="block" whiteSpace="pre-wrap" bg={codeBg} fontFamily="mono" color="green.600" _dark={{ color: 'green.400' }}>
-                        {correction.correctedStep}
+                        {String(correction.correctedStep)}
                       </Code>
                     </Box>
                   )}
