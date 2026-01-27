@@ -4,7 +4,7 @@
  * Exports complete debug session data as JSON file.
  * Masks sensitive information (API keys, tokens).
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §3.5 (Task 3: Session Export)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §3.5 (Task 3: Session Export)
  * Reference: DEBUG_VIEW_IMPROVEMENTS.md §4.5 (Session Export)
  */
 

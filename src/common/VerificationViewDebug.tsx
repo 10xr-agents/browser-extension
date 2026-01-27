@@ -4,7 +4,7 @@
  * Displays detailed verification results in debug panel.
  * Shows confidence scores, expected vs actual state, and verification history.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §7.2 (Task 7: Verification Display Component)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §7.2 (Task 7: Verification Display Component)
  * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §6.4 (Verification Result Model)
  */
 

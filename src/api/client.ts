@@ -714,6 +714,100 @@ class ApiClient {
       messageCount: number;
     }>('GET', path);
   }
+
+  /**
+   * List all sessions for the authenticated user
+   * Supports filtering by status and pagination
+   * 
+   * Reference: SERVER_SIDE_AGENT_ARCH.md §4.8.2 (GET /api/session)
+   */
+  async listSessions(options?: {
+    status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
+    includeArchived?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    success: boolean;
+    data: {
+      sessions: Array<{
+        sessionId: string;
+        url: string;
+        status: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
+        createdAt: string;
+        updatedAt: string;
+        messageCount: number;
+        metadata?: {
+          taskType?: string;
+          initialQuery?: string;
+          [key: string]: unknown;
+        };
+      }>;
+      pagination: {
+        total: number;
+        limit: number;
+        offset: number;
+        hasMore: boolean;
+      };
+    };
+  }> {
+    const params = new URLSearchParams();
+    if (options?.status) params.append('status', options.status);
+    if (options?.includeArchived !== undefined) params.append('includeArchived', String(options.includeArchived));
+    if (options?.limit) params.append('limit', options.limit.toString());
+    if (options?.offset) params.append('offset', options.offset.toString());
+    
+    const queryString = params.toString();
+    const path = `/api/session${queryString ? `?${queryString}` : ''}`;
+    
+    return this.request<{
+      success: boolean;
+      data: {
+        sessions: Array<{
+          sessionId: string;
+          url: string;
+          status: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
+          createdAt: string;
+          updatedAt: string;
+          messageCount: number;
+          metadata?: {
+            taskType?: string;
+            initialQuery?: string;
+            [key: string]: unknown;
+          };
+        }>;
+        pagination: {
+          total: number;
+          limit: number;
+          offset: number;
+          hasMore: boolean;
+        };
+      };
+    }>('GET', path);
+  }
+
+  /**
+   * Archive a session
+   * Marks a session as archived (excluded from Chrome extension queries)
+   * 
+   * Reference: SERVER_SIDE_AGENT_ARCH.md §4.8.3 (POST /api/session)
+   */
+  async archiveSession(sessionId: string): Promise<{
+    success: boolean;
+    data: {
+      sessionId: string;
+      status: 'archived';
+      message: string;
+    };
+  }> {
+    return this.request<{
+      success: boolean;
+      data: {
+        sessionId: string;
+        status: 'archived';
+        message: string;
+      };
+    }>('POST', '/api/session', { sessionId });
+  }
 }
 
 export const apiClient = new ApiClient();

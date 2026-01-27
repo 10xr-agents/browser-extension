@@ -4,7 +4,7 @@
  * Full technical debug view showing all details: tokens, parsed action JSON,
  * raw LLM thoughts/reasoning, execution timestamps, error stack traces.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §1.2 (Task 1: Task History Refactor)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §1.2 (Task 1: Task History Refactor)
  * Reference: DEBUG_VIEW_IMPROVEMENTS.md §2.3 (Task History Refactor - Debug View)
  */
 

@@ -4,7 +4,7 @@
  * User-centric chat interface with message bubbles, action cards, and collapsible technical details.
  * Similar to ChatGPT/Claude with clean, modern conversation stream.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §1.2 (Task 1: Task History Refactor)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §1.2 (Task 1: Task History Refactor)
  * Reference: UX Refactor - User-Centric Chat Design
  */
 

@@ -4,7 +4,7 @@
  * Displays full action plan structure in debug panel.
  * Shows all steps with status, reasoning, tool types, and expected outcomes.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §6.2 (Task 6: Plan Visualization Component)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §6.2 (Task 6: Plan Visualization Component)
  * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §6.2 (Action Plan Structure)
  */
 

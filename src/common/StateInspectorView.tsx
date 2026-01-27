@@ -4,7 +4,7 @@
  * Displays read-only JSON tree of the current Zustand store.
  * Helps diagnose state desync issues and debug store state.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §3.3 (Task 3: State Inspector)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §3.3 (Task 3: State Inspector)
  * Reference: DEBUG_VIEW_IMPROVEMENTS.md §4.3 (State Slice Snapshot)
  */
 

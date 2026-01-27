@@ -4,7 +4,7 @@
  * Displays RAG (Retrieval-Augmented Generation) context and decision logic.
  * Shows why org-specific vs public-only knowledge was used.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §3.2 (Task 3: RAG Context Debugger)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §3.2 (Task 3: RAG Context Debugger)
  * Reference: DEBUG_VIEW_IMPROVEMENTS.md §4.2 (RAG & Knowledge Context Debugger)
  */
 

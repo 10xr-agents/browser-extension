@@ -20,6 +20,8 @@
 
 /**
  * Session object matching backend schema
+ * 
+ * Reference: SERVER_SIDE_AGENT_ARCH.md §4.8.2 (GET /api/session)
  */
 export interface Session {
   sessionId: string;
@@ -28,7 +30,7 @@ export interface Session {
   url: string;
   updatedAt?: number; // Unix timestamp (milliseconds)
   messageCount?: number;
-  status?: 'active' | 'completed' | 'failed';
+  status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
 }
 
 /**
@@ -105,43 +107,64 @@ function generateMessageId(): string {
 
 /**
  * List all chat sessions
- * Tries backend API first, falls back to chrome.storage.local
- * Returns sessions sorted by createdAt (most recent first)
+ * Uses GET /api/session to fetch all active sessions from backend
+ * Falls back to chrome.storage.local if API unavailable
+ * Returns sessions sorted by updatedAt (most recent first)
  * 
- * Note: Backend doesn't have a "list all sessions" endpoint yet.
- * For now, we use getLatestSession() to get the most recent session,
- * and fall back to local storage for the full list.
+ * Reference: SERVER_SIDE_AGENT_ARCH.md §4.8.2 (GET /api/session)
  */
-export async function listSessions(): Promise<Session[]> {
+export async function listSessions(options?: {
+  status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
+  includeArchived?: boolean;
+  limit?: number;
+}): Promise<Session[]> {
   try {
-    // Try to get latest session from API to populate the list
+    // Try API first - GET /api/session with filtering
     const { apiClient } = await import('../api/client');
     try {
-      const latestSession = await apiClient.getLatestSession('active');
-      if (latestSession) {
+      const response = await apiClient.listSessions({
+        status: options?.status || 'active',
+        includeArchived: options?.includeArchived || false,
+        limit: options?.limit || 50,
+        offset: 0,
+      });
+      
+      if (response.success && response.data.sessions.length > 0) {
         // Convert API response to Session format
-        const session: Session = {
-          sessionId: latestSession.sessionId,
-          title: 'Latest session', // Will be updated when messages are loaded
-          createdAt: new Date(latestSession.createdAt).getTime(),
-          url: latestSession.url,
-          updatedAt: new Date(latestSession.updatedAt).getTime(),
-          messageCount: latestSession.messageCount,
-          status: latestSession.status as 'active' | 'completed' | 'failed',
-        };
+        const apiSessions: Session[] = response.data.sessions.map((s) => ({
+          sessionId: s.sessionId,
+          title: s.metadata?.initialQuery 
+            ? (typeof s.metadata.initialQuery === 'string' && s.metadata.initialQuery.length > 50
+                ? s.metadata.initialQuery.substring(0, 50) + '...'
+                : String(s.metadata.initialQuery || 'New Task'))
+            : 'New Task',
+          createdAt: new Date(s.createdAt).getTime(),
+          url: s.url,
+          updatedAt: new Date(s.updatedAt).getTime(),
+          messageCount: s.messageCount,
+          status: s.status,
+        }));
         
-        // Merge with local storage sessions
+        // Merge with local storage sessions (for offline support)
         const localSessions = await getLocalSessions();
-        const allSessions = [session, ...localSessions.filter(s => s.sessionId !== session.sessionId)];
-        return allSessions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        const localSessionIds = new Set(apiSessions.map(s => s.sessionId));
+        const uniqueLocalSessions = localSessions.filter(s => !localSessionIds.has(s.sessionId));
+        
+        // Combine and sort by updatedAt descending
+        // Filter out archived sessions (they should already be excluded by API, but filter as safeguard)
+        const allSessions = [...apiSessions, ...uniqueLocalSessions]
+          .filter(s => s.status !== 'archived')
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        return allSessions;
       }
     } catch (apiError) {
       // API failed, fall back to local storage
       console.debug('API unavailable, using local storage:', apiError);
     }
     
-    // Fallback to local storage
-    return await getLocalSessions();
+    // Fallback to local storage - filter out archived sessions
+    const localSessions = await getLocalSessions();
+    return localSessions.filter(s => s.status !== 'archived');
   } catch (error) {
     console.error('Error listing sessions:', error);
     return [];
@@ -355,12 +378,51 @@ export async function updateSession(
 }
 
 /**
+ * Archive a session
+ * Marks a session as archived on the backend (excluded from Chrome extension queries)
+ * Also updates local storage
+ * 
+ * Reference: SERVER_SIDE_AGENT_ARCH.md §4.8.3 (POST /api/session)
+ */
+export async function archiveSession(sessionId: string): Promise<void> {
+  try {
+    // Try API first
+    const { apiClient } = await import('../api/client');
+    try {
+      await apiClient.archiveSession(sessionId);
+    } catch (apiError) {
+      // API failed, but continue to update local storage
+      console.debug('API unavailable, archiving in local storage only:', apiError);
+    }
+    
+    // Update local storage - mark as archived
+    const existingSessions = await getLocalSessions();
+    const sessionIndex = existingSessions.findIndex(s => s.sessionId === sessionId);
+    
+    if (sessionIndex >= 0) {
+      existingSessions[sessionIndex] = {
+        ...existingSessions[sessionIndex],
+        status: 'archived',
+        updatedAt: Date.now(),
+      };
+      
+      await chrome.storage.local.set({
+        [SESSIONS_INDEX_KEY]: existingSessions,
+      });
+    }
+  } catch (error) {
+    console.error(`Error archiving session ${sessionId}:`, error);
+    throw error;
+  }
+}
+
+/**
  * Delete a session and all its messages
  */
 export async function deleteSession(sessionId: string): Promise<void> {
   try {
     // Remove from index
-    const existingSessions = await listSessions();
+    const existingSessions = await getLocalSessions();
     const filteredSessions = existingSessions.filter(s => s.sessionId !== sessionId);
     
     await chrome.storage.local.set({

@@ -4,7 +4,7 @@
  * Stores debug-specific state: network logs, RAG context, etc.
  * Not persisted (debug data is ephemeral).
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §3.1 (Task 3: Network/API Trace Inspector)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §3.1 (Task 3: Network/API Trace Inspector)
  */
 
 import { MyStateCreator } from './store';

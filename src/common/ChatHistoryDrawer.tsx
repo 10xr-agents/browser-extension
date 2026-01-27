@@ -21,7 +21,14 @@ import {
   HStack,
   useColorModeValue,
   Tooltip,
+  IconButton,
+  Menu,
+  MenuButton,
+  MenuList,
+  MenuItem,
+  useToast,
 } from '@chakra-ui/react';
+import { FiMoreVertical, FiArchive } from 'react-icons/fi';
 import { useAppState } from '../state/store';
 import type { ChatSession } from '../state/sessions';
 import { fromTimestamp } from '../services/sessionService';
@@ -35,18 +42,23 @@ const ChatHistoryDrawer: React.FC<ChatHistoryDrawerProps> = ({ isOpen, onClose }
   const sessions = useAppState((state) => state.sessions.sessions);
   const currentSessionId = useAppState((state) => state.sessions.currentSessionId);
   const loadSessions = useAppState((state) => state.sessions.actions.loadSessions);
+  const archiveSession = useAppState((state) => state.sessions.actions.archiveSession);
   const switchSession = useAppState((state) => state.sessions.actions.switchSession);
   const setInstructions = useAppState((state) => state.ui.actions.setInstructions);
   const interruptTask = useAppState((state) => state.currentTask.actions.interrupt);
   const taskStatus = useAppState((state) => state.currentTask.status);
+  const toast = useToast();
 
-  // Load sessions when drawer opens
+  // Load sessions when drawer opens (always exclude archived)
   useEffect(() => {
-    if (isOpen && sessions.length === 0) {
-      loadSessions();
+    if (isOpen) {
+      loadSessions({
+        status: 'active',
+        includeArchived: false,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, sessions.length]); // loadSessions is stable from Zustand, no need in deps
+  }, [isOpen]); // loadSessions is stable from Zustand, no need in deps
 
   // Color definitions - ALL at component top level
   const bgColor = useColorModeValue('white', 'gray.900');
@@ -124,6 +136,36 @@ const ChatHistoryDrawer: React.FC<ChatHistoryDrawerProps> = ({ isOpen, onClose }
     onClose();
   };
 
+  const handleArchiveSession = async (sessionId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent triggering session click
+    
+    try {
+      await archiveSession(sessionId);
+      toast({
+        title: 'Session archived',
+        description: 'The session has been archived and will no longer appear in active chats.',
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      });
+      
+      // Reload sessions to refresh the list (archived sessions excluded)
+      await loadSessions({
+        status: 'active',
+        includeArchived: false,
+      });
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toast({
+        title: 'Failed to archive session',
+        description: errorMessage,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+
   return (
     <Drawer isOpen={isOpen} placement="left" onClose={onClose} size="sm">
       <DrawerOverlay />
@@ -143,54 +185,76 @@ const ChatHistoryDrawer: React.FC<ChatHistoryDrawerProps> = ({ isOpen, onClose }
             </Box>
           ) : (
             <VStack align="stretch" spacing={0}>
-              {sessions.map((session) => {
-                const isActive = session.sessionId === currentSessionId;
-                return (
-                  <Tooltip
-                    key={session.sessionId}
-                    label={typeof session.title === 'string' ? session.title : String(session.title || 'Untitled Chat')}
-                    placement="right"
-                    openDelay={500}
-                  >
-                    <Box
-                      px={4}
-                      py={3}
-                      bg={isActive ? itemActiveBg : itemBg}
-                      borderLeftWidth={isActive ? '3px' : '0'}
-                      borderLeftColor={isActive ? itemActiveBorder : 'transparent'}
-                      borderBottomWidth="1px"
-                      borderBottomColor={borderColor}
-                      cursor="pointer"
-                      _hover={{ bg: itemHoverBg }}
-                      onClick={() => handleSessionClick(session)}
+              {sessions
+                .filter((session) => session.status !== 'archived') // Filter out archived sessions
+                .map((session) => {
+                  const isActive = session.sessionId === currentSessionId;
+                  
+                  return (
+                    <Tooltip
+                      key={session.sessionId}
+                      label={typeof session.title === 'string' ? session.title : String(session.title || 'Untitled Chat')}
+                      placement="right"
+                      openDelay={500}
                     >
-                      <VStack align="stretch" spacing={1}>
-                        <Text
-                          fontSize="sm"
-                          fontWeight={isActive ? 'semibold' : 'medium'}
-                          color={textColor}
-                          noOfLines={2}
-                        >
-                          {/* SAFETY: Ensure title is always a string to prevent React error #130 */}
-                          {typeof session.title === 'string' 
-                            ? session.title 
-                            : String(session.title || 'Untitled Chat')}
-                        </Text>
-                        <HStack spacing={2} justify="space-between">
-                          <Text fontSize="xs" color={descColor}>
-                            {formatRelativeTime(session.updatedAt || session.createdAt)}
+                      <HStack
+                        px={4}
+                        py={3}
+                        bg={isActive ? itemActiveBg : itemBg}
+                        borderLeftWidth={isActive ? '3px' : '0'}
+                        borderLeftColor={isActive ? itemActiveBorder : 'transparent'}
+                        borderBottomWidth="1px"
+                        borderBottomColor={borderColor}
+                        cursor="pointer"
+                        _hover={{ bg: itemHoverBg }}
+                        onClick={() => handleSessionClick(session)}
+                        spacing={2}
+                      >
+                        <VStack align="stretch" spacing={1} flex={1}>
+                          <Text
+                            fontSize="sm"
+                            fontWeight={isActive ? 'semibold' : 'medium'}
+                            color={textColor}
+                            noOfLines={2}
+                          >
+                            {/* SAFETY: Ensure title is always a string to prevent React error #130 */}
+                            {typeof session.title === 'string' 
+                              ? session.title 
+                              : String(session.title || 'Untitled Chat')}
                           </Text>
-                          {(session.messageCount || 0) > 0 && (
+                          <HStack spacing={2} justify="space-between">
                             <Text fontSize="xs" color={descColor}>
-                              {session.messageCount} messages
+                              {formatRelativeTime(session.updatedAt || session.createdAt)}
                             </Text>
-                          )}
-                        </HStack>
-                      </VStack>
-                    </Box>
-                  </Tooltip>
-                );
-              })}
+                            {(session.messageCount || 0) > 0 && (
+                              <Text fontSize="xs" color={descColor}>
+                                {session.messageCount} messages
+                              </Text>
+                            )}
+                          </HStack>
+                        </VStack>
+                        <Menu>
+                          <MenuButton
+                            as={IconButton}
+                            icon={<FiMoreVertical />}
+                            variant="ghost"
+                            size="sm"
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="Session options"
+                          />
+                          <MenuList>
+                            <MenuItem
+                              icon={<FiArchive />}
+                              onClick={(e) => handleArchiveSession(session.sessionId, e)}
+                            >
+                              Archive
+                            </MenuItem>
+                          </MenuList>
+                        </Menu>
+                      </HStack>
+                    </Tooltip>
+                  );
+                })}
             </VStack>
           )}
         </DrawerBody>

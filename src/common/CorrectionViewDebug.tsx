@@ -4,7 +4,7 @@
  * Displays detailed self-correction information in debug panel.
  * Shows correction strategies, reasons, retry attempts, and step comparisons.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §8.2 (Task 8: Correction Display Component)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §8.2 (Task 8: Correction Display Component)
  * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §9 (Self-Correction Architecture)
  */
 

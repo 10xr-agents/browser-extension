@@ -4,7 +4,7 @@
  * Displays API request/response logs for debugging.
  * Shows request, response, headers, duration, and status for each API call.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §3.1 (Task 3: Network/API Trace Inspector)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §3.1 (Task 3: Network/API Trace Inspector)
  * Reference: DEBUG_VIEW_IMPROVEMENTS.md §4.1 (API & Network Trace Inspector)
  */
 

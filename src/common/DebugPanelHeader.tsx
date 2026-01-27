@@ -4,7 +4,7 @@
  * Compact header showing health signals when Debug Panel is collapsed.
  * Clickable to expand/collapse the panel.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §2.3 (Task 2: Compact Headers)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §2.3 (Task 2: Compact Headers)
  * Reference: DEBUG_VIEW_IMPROVEMENTS.md §3.3 (Compact Headers)
  */
 

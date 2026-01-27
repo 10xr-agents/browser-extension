@@ -872,7 +872,7 @@ We're seeking **5-10 design partners** who:
 
 ### Supporting Technical Documentation
 - **Architecture:** `docs/SERVER_SIDE_AGENT_ARCH.md`, `docs/COMPREHENSIVE_ARCHITECTURE.md`
-- **Implementation:** `docs/THIN_SERVER_ROADMAP.md`, `docs/THIN_CLIENT_TO_BE_ROADMAP.md`
+- **Implementation:** `docs/THIN_SERVER_ROADMAP.md`, `docs/THIN_CLIENT_ROADMAP.md` (Part 2: Future Enhancements)
 - **AI Reasoning:** `docs/REASONING_LAYER_IMPROVEMENTS.md`
 - **Enterprise Spec:** `docs/ENTERPRISE_PLATFORM_SPECIFICATION.md`
 

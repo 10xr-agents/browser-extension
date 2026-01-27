@@ -24,10 +24,11 @@ export type SessionsSlice = {
   isHistoryOpen: boolean; // UI toggle for history drawer
   
   actions: {
-    loadSessions: () => Promise<void>; // Load from sessionService
+    loadSessions: (options?: { status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived'; includeArchived?: boolean }) => Promise<void>; // Load from sessionService
     createNewChat: (initialUrl?: string) => Promise<string>; // Create new session, returns sessionId
     switchSession: (sessionId: string) => Promise<Message[]>; // Switch to session, load messages, returns messages
     updateSession: (sessionId: string, updates: Partial<ChatSession>) => Promise<void>; // Update via service
+    archiveSession: (sessionId: string) => Promise<void>; // Archive session via service
     deleteSession: (sessionId: string) => Promise<void>; // Delete via service
     setCurrentSession: (sessionId: string | null) => void; // Set current session ID
     setHistoryOpen: (open: boolean) => void; // Toggle history drawer
@@ -40,40 +41,16 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
   isHistoryOpen: false,
   
   actions: {
-    loadSessions: async () => {
+    loadSessions: async (options?: { status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived'; includeArchived?: boolean }) => {
       try {
-        // Try to get latest session from API first
-        const { apiClient } = await import('../api/client');
-        try {
-          const latestSession = await apiClient.getLatestSession('active');
-          if (latestSession) {
-            // Convert API response to Session format
-            const session: ChatSession = {
-              sessionId: latestSession.sessionId,
-              title: 'Latest session', // Will be updated when messages are loaded
-              createdAt: new Date(latestSession.createdAt).getTime(),
-              url: latestSession.url,
-              updatedAt: new Date(latestSession.updatedAt).getTime(),
-              messageCount: latestSession.messageCount,
-              status: latestSession.status as 'active' | 'completed' | 'failed',
-            };
-            
-            // Merge with local sessions
-            const localSessions = await sessionService.listSessions();
-            const allSessions = [session, ...localSessions.filter(s => s.sessionId !== session.sessionId)];
-            
-            set((state) => {
-              state.sessions.sessions = allSessions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-            });
-            return;
-          }
-        } catch (apiError) {
-          // API unavailable, fall back to local storage
-          console.debug('API unavailable, using local storage for sessions:', apiError);
-        }
+        // Use sessionService.listSessions which handles API with fallback
+        // Default to active sessions, exclude archived unless explicitly requested
+        const sessions = await sessionService.listSessions({
+          status: options?.status || 'active',
+          includeArchived: options?.includeArchived || false,
+          limit: 50,
+        });
         
-        // Fallback to local storage
-        const sessions = await sessionService.listSessions();
         set((state) => {
           state.sessions.sessions = sessions;
         });
@@ -147,6 +124,35 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         });
       } catch (error) {
         console.error(`Error updating session ${sessionId}:`, error);
+        throw error;
+      }
+    },
+    
+    archiveSession: async (sessionId: string) => {
+      try {
+        await sessionService.archiveSession(sessionId);
+        
+        // Update local state - mark as archived
+        set((state) => {
+          const index = state.sessions.sessions.findIndex(s => s.sessionId === sessionId);
+          if (index >= 0) {
+            state.sessions.sessions[index] = {
+              ...state.sessions.sessions[index],
+              status: 'archived',
+              updatedAt: Date.now(),
+            };
+          }
+          
+          // If archiving current session, clear currentSessionId
+          if (state.sessions.currentSessionId === sessionId) {
+            state.sessions.currentSessionId = null;
+          }
+        });
+        
+        // Reload sessions to refresh the list (archived sessions excluded by default)
+        await get().sessions.actions.loadSessions();
+      } catch (error) {
+        console.error(`Error archiving session ${sessionId}:`, error);
         throw error;
       }
     },

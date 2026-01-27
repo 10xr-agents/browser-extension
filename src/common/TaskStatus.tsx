@@ -4,7 +4,7 @@
  * Displays current task execution status.
  * Supports both linear (current) and tree (future Manus) views.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §3.4 (Task 3: Manus Orchestration Pre-Visualization)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §3.4 (Task 3: Manus Orchestration Pre-Visualization)
  * Reference: DEBUG_VIEW_IMPROVEMENTS.md §4.4 (Manus Orchestration Pre-Visualization)
  */
 

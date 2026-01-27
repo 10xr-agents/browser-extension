@@ -4,7 +4,7 @@
  * Displays self-correction information in a simple, user-friendly format.
  * Shows when corrections occur and what strategies were used.
  * 
- * Reference: THIN_CLIENT_TO_BE_ROADMAP.md §8.2 (Task 8: Correction Display Component)
+ * Reference: THIN_CLIENT_ROADMAP.md Part 2 §8.2 (Task 8: Correction Display Component)
  * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §9 (Self-Correction Architecture)
  */
 
