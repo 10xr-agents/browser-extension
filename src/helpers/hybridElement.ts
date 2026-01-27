@@ -47,6 +47,10 @@ export function createHybridElement(
     attributes: { ...axElement.attributes },
     source: domElement ? 'hybrid' : 'accessibility',
     backendDOMNodeId: axElement.backendDOMNodeId,
+    // Critical: Include popup/dropdown indicators for expected outcome generation
+    // When hasPopup is set, clicking opens a popup instead of navigating
+    hasPopup: axElement.hasPopup,
+    expanded: axElement.expanded,
   };
 
   // Supplement with DOM data if available and enabled
@@ -108,6 +112,8 @@ export function createHybridElement(
       'data-id',
       'data-interactive',
       'data-visible',
+      'aria-haspopup', // Critical for dropdown detection
+      'aria-expanded', // Critical for dropdown state
     ];
 
     domAttributes.forEach((attr) => {
@@ -119,6 +125,25 @@ export function createHybridElement(
         }
       }
     });
+    
+    // Supplement hasPopup from DOM if not in accessibility
+    // This is critical for expected outcome generation
+    if (!hybrid.hasPopup) {
+      const domHasPopup = domElement.getAttribute('aria-haspopup');
+      if (domHasPopup) {
+        hybrid.hasPopup = domHasPopup;
+        hybrid.attributes['aria-haspopup'] = domHasPopup;
+      }
+    }
+    
+    // Supplement expanded from DOM if not in accessibility
+    if (hybrid.expanded === undefined) {
+      const domExpanded = domElement.getAttribute('aria-expanded');
+      if (domExpanded !== null) {
+        hybrid.expanded = domExpanded === 'true';
+        hybrid.attributes['aria-expanded'] = domExpanded;
+      }
+    }
 
     // Update source to hybrid if we have both
     if (hybrid.axElement && domElement) {
@@ -233,6 +258,19 @@ export function hybridElementToDOM(hybrid: HybridElement): HTMLElement {
   // Add accessibility node ID if available
   if (hybrid.axElement) {
     element.setAttribute('data-ax-node-id', hybrid.axElement.axNodeId);
+  }
+  
+  // Add hasPopup attribute (critical for expected outcome generation)
+  // When hasPopup is set, clicking this element opens a popup instead of navigating
+  if (hybrid.hasPopup) {
+    element.setAttribute('aria-haspopup', hybrid.hasPopup);
+    // Also add as data attribute for easy parsing
+    element.setAttribute('data-has-popup', hybrid.hasPopup);
+  }
+  
+  // Add expanded state
+  if (hybrid.expanded !== undefined) {
+    element.setAttribute('aria-expanded', hybrid.expanded.toString());
   }
 
   return element;

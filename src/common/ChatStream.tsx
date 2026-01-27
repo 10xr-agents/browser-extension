@@ -54,7 +54,9 @@ const ChatStream: React.FC<ChatStreamProps> = ({ messages, isProcessing = false 
                 maxW="80%"
               >
                 <Text fontSize="sm" color={textColor}>
-                  {message.content}
+                  {typeof message.content === 'string' 
+                    ? message.content 
+                    : String(message.content || '')}
                 </Text>
               </Box>
             </Box>
@@ -83,7 +85,9 @@ const ChatStream: React.FC<ChatStreamProps> = ({ messages, isProcessing = false 
                     lineHeight="1.6"
                     color={isError ? errorText : isSuccess ? successColor : textColor}
                   >
-                    {message.content}
+                    {typeof message.content === 'string' 
+                      ? message.content 
+                      : String(message.content || '')}
                   </Text>
                 </Box>
               </Box>

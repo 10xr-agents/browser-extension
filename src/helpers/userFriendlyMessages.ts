@@ -10,12 +10,15 @@
 /**
  * Transforms a developer-centric message into a user-friendly message
  */
-export function transformToUserFriendly(thought: string): string {
-  if (!thought || !thought.trim()) {
-    return thought;
+export function transformToUserFriendly(thought: string | undefined | null): string {
+  // Ensure we always return a string
+  const thoughtStr = typeof thought === 'string' ? thought : String(thought || '');
+  
+  if (!thoughtStr || !thoughtStr.trim()) {
+    return thoughtStr;
   }
 
-  let transformed = thought;
+  let transformed = thoughtStr;
 
   // Replace technical terms with user-friendly equivalents
   const replacements: Array<[RegExp, string]> = [
@@ -64,6 +67,20 @@ export function transformToUserFriendly(thought: string): string {
     [/Failed to/gi, 'Unable to'],
     [/could not/gi, 'could not'],
     
+    // Task failure messages (for max retries, verification failures, etc.)
+    [/MAX_RETRIES_EXCEEDED:?\s*/gi, ''],
+    [/VERIFICATION_FAILED:?\s*/gi, ''],
+    [/ELEMENT_NOT_FOUND:?\s*/gi, ''],
+    [/INVALID_ACTION:?\s*/gi, ''],
+    [/BAD_REQUEST:?\s*/gi, ''],
+    [/max retries exceeded/gi, 'multiple attempts were made but the task could not be completed'],
+    [/maximum retries exceeded/gi, 'multiple attempts were made but the task could not be completed'],
+    [/after multiple attempts/gi, 'after trying several times'],
+    [/could not be verified/gi, 'did not complete as expected'],
+    [/action could not be verified/gi, 'action did not work as expected'],
+    [/page may have changed/gi, 'the page may have updated'],
+    [/simplify your request/gi, 'try a simpler instruction'],
+    
     // Action descriptions
     [/setValue\(/gi, 'entering text into'],
     [/click\(/gi, 'clicking'],
@@ -105,15 +122,20 @@ export function transformToUserFriendly(thought: string): string {
 /**
  * Transforms a thought message while preserving important context
  */
-export function transformThought(thought: string, preserveTechnicalDetails: boolean = false): string {
-  if (!thought || !thought.trim()) {
-    return thought;
+export function transformThought(thought: string | undefined | null, preserveTechnicalDetails: boolean = false): string {
+  // Ensure we always return a string
+  const thoughtStr = typeof thought === 'string' ? thought : String(thought || '');
+  
+  if (!thoughtStr || !thoughtStr.trim()) {
+    return thoughtStr;
   }
 
   // If we want to preserve technical details (for debug mode), return as-is
   if (preserveTechnicalDetails) {
-    return thought;
+    return thoughtStr;
   }
 
-  return transformToUserFriendly(thought);
+  const transformed = transformToUserFriendly(thoughtStr);
+  // Ensure transformToUserFriendly returns a string
+  return typeof transformed === 'string' ? transformed : String(transformed || '');
 }

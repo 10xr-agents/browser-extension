@@ -1,8 +1,9 @@
 # Spadeworks Copilot AI - Comprehensive Architecture & Specification
 
-**Document Version:** 1.1  
+**Document Version:** 1.2  
 **Last Updated:** January 27, 2026  
 **Status:** Comprehensive Documentation  
+**Changelog (1.2):** Added Reasoning Layer v2.0 architecture with confidence scoring, evidence tracking, iterative search visualization, and enhanced missing information classification. See §6.6 for details.  
 **Changelog (1.1):** Added chat persistence architecture, error propagation flow, UI refactor (ChatStream/ExecutionDetails), connection handling improvements, and updated task execution flow with error tracking. See implementation details in codebase.  
 **Purpose:** Consolidated architecture, component, data flow, action system, and enterprise specification documentation
 
@@ -20,6 +21,7 @@ All architecture documentation has been consolidated into this single comprehens
 - `THIN_CLIENT_ROADMAP.md` - Client-side implementation roadmap (Tasks 1-9 complete)
 - `THIN_SERVER_ROADMAP.md` - Server-side implementation roadmap
 - `SERVER_SIDE_AGENT_ARCH.md` - Server-side agent architecture specification
+- `REASONING_LAYER_IMPROVEMENTS.md` - Reasoning layer v2.0 specification with confidence scoring and dual-model routing
 
 ---
 
@@ -33,8 +35,9 @@ All architecture documentation has been consolidated into this single comprehens
 6. [Thin Client Architecture](#6-thin-client-architecture)
 7. [Enterprise Platform Specification](#7-enterprise-platform-specification)
 8. [DOM Processing Pipeline](#8-dom-processing-pipeline)
-9. [Quick Reference](#9-quick-reference)
-10. [Implementation Status](#10-implementation-status)
+9. [Reasoning Layer Architecture](#9-reasoning-layer-architecture)
+10. [Quick Reference](#10-quick-reference)
+11. [Implementation Status](#11-implementation-status)
 
 ---
 
@@ -1270,6 +1273,224 @@ Centralized API client for all backend communication:
 
 ### 6.5 State Management Updates
 
+### 6.6 Reasoning Layer Architecture (v2.0)
+
+#### 6.6.1 Overview
+
+The Reasoning Layer is a client-side visualization and handling system for the backend's enhanced reasoning pipeline. The backend performs a 4-step reasoning process (Context & Gap Analysis, Execution, Evaluation & Iteration, Final Verification) that determines the best source for information (MEMORY, PAGE, WEB_SEARCH, or ASK_USER) with confidence scoring and evidence tracking.
+
+**Reference:** See `REASONING_LAYER_IMPROVEMENTS.md` for complete backend specification.
+
+**Key Features:**
+- **Confidence Scoring:** All reasoning outputs include confidence scores (0.0 - 1.0) based on evidence quality
+- **Evidence Tracking:** Evidence sources, quality (high/medium/low), and gaps are tracked and displayed
+- **Iterative Search Visualization:** Search attempts, refined queries, and evaluation results are shown
+- **Enhanced Missing Information:** Missing fields classified as EXTERNAL_KNOWLEDGE (searchable) vs PRIVATE_DATA (user input required)
+- **User Input Handling:** Seamless pause/resume when agent needs user information
+
+#### 6.6.2 Enhanced Data Structures
+
+**ReasoningData Interface:**
+```typescript
+interface ReasoningData {
+  source: 'MEMORY' | 'PAGE' | 'WEB_SEARCH' | 'ASK_USER';
+  confidence: number; // 0.0 to 1.0 (REQUIRED) - Model's certainty based on evidence
+  reasoning: string; // User-friendly explanation
+  missingInfo?: MissingInfoField[]; // Enhanced structure with type classification
+  evidence?: ReasoningEvidence; // Evidence supporting the decision
+  searchIteration?: {
+    attempt: number; // Current search attempt (1-indexed)
+    maxAttempts: number; // Maximum attempts allowed
+    refinedQuery?: string; // Refined query for this iteration
+    evaluationResult?: {
+      solved: boolean; // Whether results solved the problem
+      shouldRetry: boolean; // Whether to retry with refined query
+      shouldAskUser: boolean; // Whether to ask user instead
+      confidence: number; // Confidence in evaluation
+    };
+  };
+}
+```
+
+**MissingInfoField Interface:**
+```typescript
+interface MissingInfoField {
+  field: string; // e.g., "patient_dob"
+  type: 'EXTERNAL_KNOWLEDGE' | 'PRIVATE_DATA'; // Can be found via search vs must ask user
+  description: string; // Human-readable description
+}
+```
+
+**ReasoningEvidence Interface:**
+```typescript
+interface ReasoningEvidence {
+  sources: string[]; // e.g., ["chat_history", "page_dom", "rag_knowledge"]
+  quality: 'high' | 'medium' | 'low'; // Quality of evidence
+  gaps: string[]; // Missing information or uncertainties
+}
+```
+
+**NextActionResponse Enhancement:**
+The `NextActionResponse` interface includes:
+- `reasoning?: ReasoningData` - Enhanced reasoning metadata
+- `userQuestion?: string` - Question to ask user (when status is 'needs_user_input')
+- `missingInformation?: MissingInfoField[]` - Enhanced missing information fields
+- `reasoningContext?: { searchPerformed, searchSummary, searchIterations, finalQuery }` - Search context
+
+#### 6.6.3 UI Components
+
+**ReasoningBadge Component (`src/common/ReasoningBadge.tsx`):**
+- Displays reasoning source with icon (MEMORY=purple, PAGE=blue, WEB_SEARCH=orange, ASK_USER=yellow)
+- Shows confidence percentage with color coding:
+  - Green (≥90%): High confidence
+  - Yellow (≥70%): Medium confidence
+  - Red (<70%): Low confidence
+- Displays search iteration progress (e.g., "Attempt 2/3")
+- Enhanced tooltip shows:
+  - Reasoning explanation
+  - Evidence quality indicator
+  - Search evaluation results (if available)
+  - Refined query information
+
+**EvidenceIndicator Component (`src/common/EvidenceIndicator.tsx`):**
+- Displays evidence sources, quality, and gaps
+- Compact and full display modes
+- Color-coded quality indicators:
+  - High = Green
+  - Medium = Yellow
+  - Low = Red
+- Shows evidence sources as badges
+- Lists gaps/uncertainties
+
+**UserInputPrompt Component (`src/common/UserInputPrompt.tsx`):**
+- Enhanced to handle `MissingInfoField[]` structure
+- Shows type classification badges:
+  - "Can Search" for EXTERNAL_KNOWLEDGE
+  - "Need Your Input" for PRIVATE_DATA
+- Displays field descriptions
+- Backward compatible with old string[] format
+
+**ChatTurn Component Integration:**
+- Displays `ReasoningBadge` when reasoning data exists
+- Shows `EvidenceIndicator` when evidence is available
+- Displays `UserInputPrompt` for ASK_USER messages
+- Passes enhanced reasoning data to child components
+
+**TaskHistoryUser Component Integration:**
+- Enhanced technical details to show:
+  - Evidence quality and sources
+  - Evidence gaps
+  - Search iteration information
+  - Refined queries
+  - Evaluation results
+  - Enhanced missing info with type classification
+
+#### 6.6.4 State Management
+
+**Reasoning Data Storage (`src/state/currentTask.ts`):**
+
+When a `NextActionResponse` with reasoning data is received:
+1. **Reasoning Metadata Storage:**
+   - Validates and stores `evidence` object
+   - Handles `MissingInfoField[]` structure (backward compatible with string[])
+   - Stores `searchIteration` data
+   - Clamps confidence scores to 0-1 range
+   - Stores in `message.meta.reasoning`
+
+2. **Missing Information Handling:**
+   - Converts old string[] format to new `MissingInfoField[]` structure
+   - Defaults to `PRIVATE_DATA` type for backward compatibility
+   - Stores in `message.missingInformation`
+
+3. **Reasoning Context Storage:**
+   - Stores `searchIterations` count
+   - Stores `finalQuery` information
+   - Stores in `message.meta.reasoningContext`
+
+4. **User Input State:**
+   - When `status === 'needs_user_input'`:
+     - Sets message status to 'pending'
+     - Stores `userQuestion` in message
+     - Stores `missingInformation` array
+     - Sets task status to 'idle' (pauses execution)
+
+**Resume Logic:**
+- Detects when waiting for user input (`status === 'idle'` and last message has `userQuestion`)
+- Allows resuming from 'idle' state when user provides input
+- Preserves message history when resuming
+- Adds user's response as a new message
+- Continues task execution with new context
+
+#### 6.6.5 Integration with Backend API
+
+**Response Handling:**
+1. Backend returns `NextActionResponse` with enhanced reasoning data
+2. Client validates and stores reasoning metadata
+3. Client displays reasoning information in UI components
+4. If `status === 'needs_user_input'`:
+   - Task pauses (status: 'idle')
+   - User input prompt displayed
+   - Input field remains enabled with updated placeholder
+   - User can provide additional information
+5. When user responds:
+   - Task resumes (status: 'running')
+   - New user message added
+   - Backend receives additional context
+   - Task continues with new information
+
+**Backward Compatibility:**
+- Handles old string[] format for `missingInfo`
+- Gracefully degrades when new fields are missing
+- Type-safe conversions throughout
+- Works with existing backend responses
+
+#### 6.6.6 User Experience Flow
+
+**Normal Flow:**
+1. User submits task
+2. Backend performs reasoning analysis
+3. Client receives response with reasoning data
+4. Reasoning badge displayed with source and confidence
+5. Evidence indicator shown (if available)
+6. Task continues based on reasoning source
+
+**ASK_USER Flow:**
+1. Backend determines user input needed
+2. Client receives `NEEDS_USER_INPUT` response
+3. Task pauses (status: 'idle')
+4. User input prompt displayed with:
+   - Question from backend
+   - Missing information fields with type classification
+   - Reasoning explanation
+5. User provides input
+6. User clicks Send
+7. Task resumes with new context
+8. Backend continues with additional information
+
+**Iterative Search Flow:**
+1. Backend performs search (WEB_SEARCH source)
+2. Client receives reasoning data with `searchIteration` info
+3. Reasoning badge shows search attempt (e.g., "Attempt 2/3")
+4. Tooltip shows refined query and evaluation results
+5. Technical details show search iteration progress
+6. User can see search refinement process
+
+#### 6.6.7 Key Files
+
+**Type Definitions:**
+- `src/api/client.ts` - `ReasoningData`, `MissingInfoField`, `ReasoningEvidence` interfaces
+- `src/types/chatMessage.ts` - Enhanced `ChatMessage` type with reasoning metadata
+
+**Components:**
+- `src/common/ReasoningBadge.tsx` - Reasoning source and confidence display
+- `src/common/EvidenceIndicator.tsx` - Evidence quality and sources display
+- `src/common/UserInputPrompt.tsx` - User input request display
+- `src/common/ChatTurn.tsx` - Integration of reasoning components
+- `src/common/TaskHistoryUser.tsx` - Technical details with reasoning information
+
+**State Management:**
+- `src/state/currentTask.ts` - Reasoning data storage and user input handling
+
 #### Settings Slice Changes
 
 **Removed:**
@@ -1415,6 +1636,226 @@ Audit Service → Compliance logging, audit trails
 
 ---
 
+## 9. Reasoning Layer Architecture
+
+### 9.1 Overview
+
+The Reasoning Layer is a client-side visualization and handling system for the backend's enhanced reasoning pipeline. The backend performs a 4-step reasoning process (Context & Gap Analysis, Execution, Evaluation & Iteration, Final Verification) that determines the best source for information (MEMORY, PAGE, WEB_SEARCH, or ASK_USER) with confidence scoring and evidence tracking.
+
+**Reference:** See `REASONING_LAYER_IMPROVEMENTS.md` for complete backend specification.
+
+**Key Features:**
+- **Confidence Scoring:** All reasoning outputs include confidence scores (0.0 - 1.0) based on evidence quality
+- **Evidence Tracking:** Evidence sources, quality (high/medium/low), and gaps are tracked and displayed
+- **Iterative Search Visualization:** Search attempts, refined queries, and evaluation results are shown
+- **Enhanced Missing Information:** Missing fields classified as EXTERNAL_KNOWLEDGE (searchable) vs PRIVATE_DATA (user input required)
+- **User Input Handling:** Seamless pause/resume when agent needs user information
+
+### 9.2 Enhanced Data Structures
+
+**ReasoningData Interface:**
+```typescript
+interface ReasoningData {
+  source: 'MEMORY' | 'PAGE' | 'WEB_SEARCH' | 'ASK_USER';
+  confidence: number; // 0.0 to 1.0 (REQUIRED) - Model's certainty based on evidence
+  reasoning: string; // User-friendly explanation
+  missingInfo?: MissingInfoField[]; // Enhanced structure with type classification
+  evidence?: ReasoningEvidence; // Evidence supporting the decision
+  searchIteration?: {
+    attempt: number; // Current search attempt (1-indexed)
+    maxAttempts: number; // Maximum attempts allowed
+    refinedQuery?: string; // Refined query for this iteration
+    evaluationResult?: {
+      solved: boolean; // Whether results solved the problem
+      shouldRetry: boolean; // Whether to retry with refined query
+      shouldAskUser: boolean; // Whether to ask user instead
+      confidence: number; // Confidence in evaluation
+    };
+  };
+}
+```
+
+**MissingInfoField Interface:**
+```typescript
+interface MissingInfoField {
+  field: string; // e.g., "patient_dob"
+  type: 'EXTERNAL_KNOWLEDGE' | 'PRIVATE_DATA'; // Can be found via search vs must ask user
+  description: string; // Human-readable description
+}
+```
+
+**ReasoningEvidence Interface:**
+```typescript
+interface ReasoningEvidence {
+  sources: string[]; // e.g., ["chat_history", "page_dom", "rag_knowledge"]
+  quality: 'high' | 'medium' | 'low'; // Quality of evidence
+  gaps: string[]; // Missing information or uncertainties
+}
+```
+
+**NextActionResponse Enhancement:**
+The `NextActionResponse` interface includes:
+- `reasoning?: ReasoningData` - Enhanced reasoning metadata
+- `userQuestion?: string` - Question to ask user (when status is 'needs_user_input')
+- `missingInformation?: MissingInfoField[]` - Enhanced missing information fields
+- `reasoningContext?: { searchPerformed, searchSummary, searchIterations, finalQuery }` - Search context
+
+### 9.3 UI Components
+
+**ReasoningBadge Component (`src/common/ReasoningBadge.tsx`):**
+- Displays reasoning source with icon (MEMORY=purple, PAGE=blue, WEB_SEARCH=orange, ASK_USER=yellow)
+- Shows confidence percentage with color coding:
+  - Green (≥90%): High confidence
+  - Yellow (≥70%): Medium confidence
+  - Red (<70%): Low confidence
+- Displays search iteration progress (e.g., "Attempt 2/3")
+- Enhanced tooltip shows:
+  - Reasoning explanation
+  - Evidence quality indicator
+  - Search evaluation results (if available)
+  - Refined query information
+
+**EvidenceIndicator Component (`src/common/EvidenceIndicator.tsx`):**
+- Displays evidence sources, quality, and gaps
+- Compact and full display modes
+- Color-coded quality indicators:
+  - High = Green
+  - Medium = Yellow
+  - Low = Red
+- Shows evidence sources as badges
+- Lists gaps/uncertainties
+
+**UserInputPrompt Component (`src/common/UserInputPrompt.tsx`):**
+- Enhanced to handle `MissingInfoField[]` structure
+- Shows type classification badges:
+  - "Can Search" for EXTERNAL_KNOWLEDGE
+  - "Need Your Input" for PRIVATE_DATA
+- Displays field descriptions
+- Backward compatible with old string[] format
+
+**ChatTurn Component Integration:**
+- Displays `ReasoningBadge` when reasoning data exists
+- Shows `EvidenceIndicator` when evidence is available
+- Displays `UserInputPrompt` for ASK_USER messages
+- Passes enhanced reasoning data to child components
+
+**TaskHistoryUser Component Integration:**
+- Enhanced technical details to show:
+  - Evidence quality and sources
+  - Evidence gaps
+  - Search iteration information
+  - Refined queries
+  - Evaluation results
+  - Enhanced missing info with type classification
+
+### 9.4 State Management
+
+**Reasoning Data Storage (`src/state/currentTask.ts`):**
+
+When a `NextActionResponse` with reasoning data is received:
+1. **Reasoning Metadata Storage:**
+   - Validates and stores `evidence` object
+   - Handles `MissingInfoField[]` structure (backward compatible with string[])
+   - Stores `searchIteration` data
+   - Clamps confidence scores to 0-1 range
+   - Stores in `message.meta.reasoning`
+
+2. **Missing Information Handling:**
+   - Converts old string[] format to new `MissingInfoField[]` structure
+   - Defaults to `PRIVATE_DATA` type for backward compatibility
+   - Stores in `message.missingInformation`
+
+3. **Reasoning Context Storage:**
+   - Stores `searchIterations` count
+   - Stores `finalQuery` information
+   - Stores in `message.meta.reasoningContext`
+
+4. **User Input State:**
+   - When `status === 'needs_user_input'`:
+     - Sets message status to 'pending'
+     - Stores `userQuestion` in message
+     - Stores `missingInformation` array
+     - Sets task status to 'idle' (pauses execution)
+
+**Resume Logic:**
+- Detects when waiting for user input (`status === 'idle'` and last message has `userQuestion`)
+- Allows resuming from 'idle' state when user provides input
+- Preserves message history when resuming
+- Adds user's response as a new message
+- Continues task execution with new context
+
+### 9.5 Integration with Backend API
+
+**Response Handling:**
+1. Backend returns `NextActionResponse` with enhanced reasoning data
+2. Client validates and stores reasoning metadata
+3. Client displays reasoning information in UI components
+4. If `status === 'needs_user_input'`:
+   - Task pauses (status: 'idle')
+   - User input prompt displayed
+   - Input field remains enabled with updated placeholder
+   - User can provide additional information
+5. When user responds:
+   - Task resumes (status: 'running')
+   - New user message added
+   - Backend receives additional context
+   - Task continues with new information
+
+**Backward Compatibility:**
+- Handles old string[] format for `missingInfo`
+- Gracefully degrades when new fields are missing
+- Type-safe conversions throughout
+- Works with existing backend responses
+
+### 9.6 User Experience Flow
+
+**Normal Flow:**
+1. User submits task
+2. Backend performs reasoning analysis
+3. Client receives response with reasoning data
+4. Reasoning badge displayed with source and confidence
+5. Evidence indicator shown (if available)
+6. Task continues based on reasoning source
+
+**ASK_USER Flow:**
+1. Backend determines user input needed
+2. Client receives `NEEDS_USER_INPUT` response
+3. Task pauses (status: 'idle')
+4. User input prompt displayed with:
+   - Question from backend
+   - Missing information fields with type classification
+   - Reasoning explanation
+5. User provides input
+6. User clicks Send
+7. Task resumes with new context
+8. Backend continues with additional information
+
+**Iterative Search Flow:**
+1. Backend performs search (WEB_SEARCH source)
+2. Client receives reasoning data with `searchIteration` info
+3. Reasoning badge shows search attempt (e.g., "Attempt 2/3")
+4. Tooltip shows refined query and evaluation results
+5. Technical details show search iteration progress
+6. User can see search refinement process
+
+### 9.7 Key Files
+
+**Type Definitions:**
+- `src/api/client.ts` - `ReasoningData`, `MissingInfoField`, `ReasoningEvidence` interfaces
+- `src/types/chatMessage.ts` - Enhanced `ChatMessage` type with reasoning metadata
+
+**Components:**
+- `src/common/ReasoningBadge.tsx` - Reasoning source and confidence display
+- `src/common/EvidenceIndicator.tsx` - Evidence quality and sources display
+- `src/common/UserInputPrompt.tsx` - User input request display
+- `src/common/ChatTurn.tsx` - Integration of reasoning components
+- `src/common/TaskHistoryUser.tsx` - Technical details with reasoning information
+
+**State Management:**
+- `src/state/currentTask.ts` - Reasoning data storage and user input handling
+
+---
+
 ## 8. DOM Processing Pipeline
 
 ### 8.1 Overview
@@ -1517,7 +1958,7 @@ The DOM processing pipeline transforms complex web page DOM structures into toke
 
 ---
 
-## 9. Quick Reference
+## 10. Quick Reference
 
 ### 9.1 Important Files
 
@@ -1528,7 +1969,7 @@ The DOM processing pipeline transforms complex web page DOM structures into toke
 - `src/state/ui.ts` - UI state
 
 #### Core Logic
-- `src/api/client.ts` - API client (auth, agentInteract with error reporting, knowledgeResolve, getSessionMessages, getLatestSession) **[Thin Client]**
+- `src/api/client.ts` - API client (auth, agentInteract with error reporting, knowledgeResolve, getSessionMessages, getLatestSession) **[Thin Client]** - Includes ReasoningData, MissingInfoField, ReasoningEvidence type definitions (Reasoning Layer v2.0)
 - `src/helpers/simplifyDom.ts` - DOM simplification with accessibility integration (Tasks 4-8)
 - `src/helpers/parseAction.ts` - Action string parser **[Thin Client]**
 - `src/helpers/domActions.ts` - Action execution with error tracking (returns ActionExecutionResult) and accessibility mapping (Task 6)
@@ -1542,6 +1983,9 @@ The DOM processing pipeline transforms complex web page DOM structures into toke
 - `src/common/ExecutionDetails.tsx` - Collapsible technical execution logs (nested in assistant messages)
 - `src/common/TaskHistoryUser.tsx` - Task history with chat persistence support (uses ChatStream when messages available)
 - `src/types/chatMessage.ts` - ChatMessage and ActionStep type definitions for persistent conversation threads
+- `src/common/ReasoningBadge.tsx` - Reasoning source and confidence display (Reasoning Layer v2.0)
+- `src/common/EvidenceIndicator.tsx` - Evidence quality and sources display (Reasoning Layer v2.0)
+- `src/common/UserInputPrompt.tsx` - User input request display with enhanced missing info classification (Reasoning Layer v2.0)
 - `src/helpers/accessibilityFilter.ts` - Accessibility node filtering (Task 5)
 - `src/helpers/accessibilityMapping.ts` - Accessibility-DOM mapping (Task 6)
 - `src/helpers/hybridElement.ts` - Hybrid element creation (Task 7)
@@ -1618,7 +2062,7 @@ Every design decision considers token usage and API cost optimization
 
 ---
 
-## 10. Implementation Status
+## 11. Implementation Status
 
 ### 10.1 Thin Client Migration Status
 

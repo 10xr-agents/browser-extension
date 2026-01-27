@@ -1,16 +1,16 @@
 # Server-Side Agent Architecture
 
-**Document Version:** 1.8  
+**Document Version:** 2.0  
 **Date:** January 27, 2026  
 **Status:** Technical Specification  
-**Changelog (1.8):** Error handling, chat persistence, and user-friendly messages added. `POST /api/agent/interact` updated to accept error reporting (`lastActionStatus`, `lastActionError`, `lastActionResult`), perform web search for new tasks, use Session/Message schemas for chat persistence, and generate user-friendly messages. New endpoints: `GET /api/session/:sessionId/messages` and `GET /api/session/latest`. See `BACKEND_WEB_SEARCH_CHANGES.md` for implementation details.  
-**Changelog (1.7):** User Preferences API added to Summary (§9): `GET/POST /api/v1/user/preferences` for extension settings. See `THIN_CLIENT_ROADMAP_SERVER.md` §5 for implementation details.  
+**Changelog (2.0):** Major update: Added web search functionality (§4.8), chat persistence & session management (§4.9), debug endpoints (§10), Manus-style orchestrator features (§11-15: planning, verification, self-correction, outcome prediction, step refinement), enhanced error handling (§4.10). All features implemented and documented. See `THIN_SERVER_ROADMAP.md` for complete implementation details.  
+**Changelog (1.7):** User Preferences API added to Summary (§9): `GET/POST /api/v1/user/preferences` for extension settings. See `THIN_SERVER_ROADMAP.md` §5 for implementation details.  
 **Changelog (1.6):** Task 3 complete: `POST /api/agent/interact` implemented (`app/api/agent/interact/route.ts`); `tasks` and `task_actions` Mongoose models; shared RAG helper (`getRAGChunks()`); LLM integration (prompt builder, client, parser); §4.3 updated with implementation details; §8 Implementation Checklist interact items marked complete.  
 **Changelog (1.5):** Task 2 complete: `GET /api/knowledge/resolve` implemented (`app/api/knowledge/resolve/route.ts`); §5.3 updated with implementation details; §8 Implementation Checklist resolve items marked complete.  
 **Changelog (1.4):** §1.4 Knowledge types & `allowed_domains` as filter (not assert); `hasOrgKnowledge` on interact/resolve; no 403 `DOMAIN_NOT_ALLOWED`; public-only RAG path; extension “no knowledge for this website” dialog.  
 **Target:** Next.js Intelligence Layer (Thin Client backend)
 
-**Sync:** This document is the **specification**. Implementation details (MongoDB, Mongoose, Better Auth, Next.js) are in `THIN_CLIENT_ROADMAP_SERVER.md`. Keep both in sync; on conflict, prefer ROADMAP + enriched thread (auth adapters, DB stack, resolve = internal/debugging).
+**Sync:** This document is the **specification**. Implementation details (MongoDB, Mongoose, Better Auth, Next.js) are in `THIN_SERVER_ROADMAP.md`. Keep both in sync; on conflict, prefer ROADMAP + enriched thread (auth adapters, DB stack, resolve = internal/debugging).
 
 ---
 
@@ -19,10 +19,12 @@
 This document defines the **centralized Intelligence Layer** and **Member-facing API** for the Thin Client architecture. It is the single source of truth for:
 
 - **Auth API** — Login (invite-based), session check, logout. Token issuance for the extension.
-- **`POST /api/agent/interact`** — Action Loop: receives `url`, `query`, `dom`, and optional `taskId`; uses RAG (scoped by **Tenant ID** and **Active Domain**) and server-held **action history**; calls the LLM; returns **`NextActionResponse`**. Knowledge is injected **only into the LLM prompt**; the extension **never** receives raw chunks or citations — only `thought` and `action`.
+- **`POST /api/agent/interact`** — Action Loop: receives `url`, `query`, `dom`, and optional `taskId`/`sessionId`; uses RAG (scoped by **Tenant ID** and **Active Domain**), web search, server-held **action history**, and Manus-style orchestrator (planning, verification, self-correction); calls the LLM; returns **`NextActionResponse`**. Knowledge is injected **only into the LLM prompt**; the extension **never** receives raw chunks or citations — only `thought` and `action`.
 - **`GET /api/knowledge/resolve`** — Knowledge Resolution: receives `url` and optional `query`; validates tenant; uses **`allowed_domains` as filter** (§1.4) to decide org-specific vs public-only RAG; returns **`ResolveKnowledgeResponse`** (`hasOrgKnowledge`, chunks, citations). **Internal use and debugging only** — not for extension overlay or end-user display.
+- **Debug Endpoints** — Debug logging, session export, metrics collection for debug UI.
+- **Session Management** — Persistent conversation threads with Session and Message schemas.
 
-All inference, RAG retrieval, and action-history context live on the server. The extension acts as an **Action Runner** only. See §5.6 for the **interact vs resolve** distinction.
+All inference, RAG retrieval, web search, action-history context, and orchestrator state live on the server. The extension acts as an **Action Runner** only. See §5.6 for the **interact vs resolve** distinction.
 
 **Scope:** Member-facing only. Tenant onboarding, user provisioning, artifact ingestion, knowledge indexing, and domain **filter** (`allowed_domains`) management remain out of scope (Admin Terminal).
 
@@ -157,13 +159,10 @@ Signup is **invite-based** and handled outside the extension. The extension only
 ### 4.1 Purpose
 
 - Receives current **DOM**, **user instructions** (`query`), and **active tab URL** from the extension.
-- Optionally receives **`taskId`** (legacy) or **`sessionId`** (new): if present, associates the request with an existing task/session and uses **server-stored conversation history** for context continuity.
-- **Web search** (Task 1): Performs web search for new tasks to understand how to complete them.
-- **Error detection** (Task 4): Receives **`lastActionStatus`**, **`lastActionError`**, and **`lastActionResult`** to detect client-reported action failures and inject into LLM context.
-- Validates **tenant** and **domain**; runs **RAG** (tenant + domain scoped); builds **prompt** (system + RAG + dom + conversation history + web search results + error context); calls **LLM** with **user-friendly message generation** (Task 2); parses response into `thought` + `action`.
-- **Session management** (Task 3): Creates or loads session, saves messages to `Message` collection before responding.
-- **Finish() validation** (Task 4): Validates `finish()` actions to prevent premature completion after errors.
-- Returns **`NextActionResponse`** (`thought` - user-friendly, `action`, optional `usage`, optional `taskId`, optional `sessionId`).
+- Optionally receives **`taskId`**: if present, associates the request with an existing task and uses **server-stored action history** for context continuity.
+- Validates **tenant** and **domain**; runs **RAG** (tenant + domain scoped); builds **prompt** (system + RAG + dom + action history); calls **LLM**; parses response into `thought` + `action`.
+- Appends the new action to **action history** (create task and history on first request if no `taskId`).
+- Returns **`NextActionResponse`** (`thought`, `action`, optional `usage`, optional `taskId`).
 
 ### 4.2 Contract
 
@@ -184,11 +183,7 @@ Signup is **invite-based** and handled outside the extension. The extension only
 | `url` | string | Yes | Active tab URL (absolute). Used for domain derivation and **filter** (§1.4). |
 | `query` | string | Yes | User task instructions. |
 | `dom` | string | Yes | Simplified, templatized DOM string (from extension pipeline). |
-| `taskId` | string | No | UUID of existing task (legacy). If omitted, server creates a new task. |
-| `sessionId` | string | No | UUID of existing session (new structure). If omitted, server creates a new session. |
-| `lastActionStatus` | string | No | Status of previous action: 'success' | 'failure' | 'pending'. Used for error detection (Task 4). |
-| `lastActionError` | object | No | Error details if previous action failed: `{ message, code, action, elementId? }`. Used for error propagation (Task 4). |
-| `lastActionResult` | object | No | Execution result: `{ success: boolean, actualState?: string }`. Used for verification (Task 4). |
+| `taskId` | string | No | UUID of existing task. If omitted, server creates a new task. |
 
 **Response — 200 OK**
 
@@ -210,23 +205,11 @@ export const interactRequestBodySchema = z.object({
   url: z.string().url(),
   query: z.string().min(1).max(10000),
   dom: z.string().min(1).max(500000),
-  taskId: z.string().uuid().optional(), // Legacy support
-  sessionId: z.string().uuid().optional(), // New structure (Task 3)
-  lastActionStatus: z.enum(['success', 'failure', 'pending']).optional(), // Error reporting (Task 4)
-  lastActionError: z.object({
-    message: z.string(),
-    code: z.string(),
-    action: z.string(),
-    elementId: z.number().optional(),
-  }).optional(), // Error details (Task 4)
-  lastActionResult: z.object({
-    success: z.boolean(),
-    actualState: z.string().optional(),
-  }).optional(), // Execution result (Task 4)
+  taskId: z.string().uuid().optional(),
 });
 
 export const nextActionResponseSchema = z.object({
-  thought: z.string(), // User-friendly message (Task 2)
+  thought: z.string(),
   action: z.string(),
   usage: z
     .object({
@@ -234,11 +217,8 @@ export const nextActionResponseSchema = z.object({
       completionTokens: z.number().int().nonnegative(),
     })
     .optional(),
-  taskId: z.string().uuid().optional(), // Legacy support
-  sessionId: z.string().uuid().optional(), // New structure (Task 3)
+  taskId: z.string().uuid().optional(),
   hasOrgKnowledge: z.boolean().optional(),
-  webSearchPerformed: z.boolean().optional(), // Task 1
-  webSearchSummary: z.string().optional(), // Task 1
 });
 
 export type InteractRequestBody = z.infer<typeof interactRequestBodySchema>;
@@ -254,34 +234,15 @@ export type NextActionResponse = z.infer<typeof nextActionResponseSchema>;
 2. **POST:**
    - Validate Bearer token via `getSessionFromRequest(req.headers)` → `{ userId, tenantId }`; return **401** if missing/invalid.
    - Parse and validate body with `interactRequestBodySchema` (Zod) from `lib/agent/schemas.ts`; return **400** if invalid.
-   - **Session resolution (Task 3):**
-     - If `sessionId` provided: Load session via `Session.findOne({ sessionId, tenantId })`. If not found → **404**. Security check: ensure user owns session → **403** if not.
-     - If no `sessionId`: Create new session with UUID `sessionId`, status `active`.
-     - Load conversation history from `Message` collection (not client-provided history).
-   - **Web search (Task 1):**
-     - If new task (no `sessionId`): Perform web search to understand how to complete task.
-     - Store search results in session context.
-     - Skip search for existing sessions.
-   - **Error detection (Task 4):**
-     - Check `lastActionStatus` and `lastActionError` in request body.
-     - If previous action failed: Update last message status to 'failure', inject error context into LLM prompt as system message.
-     - Force LLM to acknowledge failure and propose alternative strategy.
-   - **Task resolution (legacy support):**
-     - If `taskId` provided (legacy): Load task via `(Task as any).findOne({ taskId, tenantId })`. If not found → **404**. If `status` is `completed` or `failed` → **409`. Load action history via `(TaskAction as any).find({ tenantId, taskId }).sort({ stepIndex: 1 })`.
+   - **Task resolution:**
+     - If `taskId` provided: Load task via `(Task as any).findOne({ taskId, tenantId })`. If not found → **404**. If `status` is `completed` or `failed` → **409**. Load action history via `(TaskAction as any).find({ tenantId, taskId }).sort({ stepIndex: 1 })`.
      - If no `taskId`: Create new task with UUID `taskId` (via `crypto.randomUUID()`), status `active`.
    - **RAG:** Call `getRAGChunks(url, query, tenantId)` from `lib/knowledge-extraction/rag-helper.ts` (shared with Task 2). Returns `{ chunks, hasOrgKnowledge }`. Inject chunks into prompt; extension never receives them.
-   - **Prompt:** Build via `buildActionPrompt()` (`lib/agent/prompt-builder.ts`). System: role, actions, format, **user-friendly language guidelines (Task 2)**, **failure handling rules (Task 4)**. User: query, current time, previous actions (from `Message` collection), **web search results (Task 1)**, RAG context, DOM, **system error messages (if previous action failed)**.
+   - **Prompt:** Build via `buildActionPrompt()` (`lib/agent/prompt-builder.ts`). System: role, actions, format. User: query, current time, previous actions (from `task_actions`), RAG context, DOM.
    - **LLM:** Call OpenAI via `callActionLLM()` (`lib/agent/llm-client.ts`). Reuses `OPENAI_API_KEY` from `.env.local`. Parse `<Thought>` and `<Action>` via `parseActionResponse()`. Validate action format via `validateActionFormat()`.
-   - **Finish() validation (Task 4):**
-     - If LLM returns `finish()`: Check for recent failures, verify task completion.
-     - If recent failures exist: Override with verification prompt, prevent premature completion.
-   - **Message persistence (Task 3):**
-     - Save assistant message to `Message` collection before responding.
-     - Save user message if this is a new turn.
-     - Include action payload, status, metadata.
-   - **History:** Append `{ thought, action, stepIndex }` to `task_actions` (legacy). If action is `finish()` or `fail()`, update `tasks.status` to `completed` or `failed`.
+   - **History:** Append `{ thought, action, stepIndex }` to `task_actions`. If action is `finish()` or `fail()`, update `tasks.status` to `completed` or `failed`.
    - **Max steps:** Enforce limit (50); return **400** if exceeded.
-   - Return `NextActionResponse` with CORS headers, including `sessionId`.
+   - Return `NextActionResponse` with CORS headers.
 
 **See:** `THIN_CLIENT_ROADMAP_SERVER.md` §4.2 for detailed contract; `lib/agent/` for prompt builder, LLM client, schemas.
 
@@ -306,11 +267,48 @@ export type NextActionResponse = z.infer<typeof nextActionResponseSchema>;
 ### 4.6 LLM Integration
 
 - **Provider:** OpenAI (or configured alternative). Model selection per tenant or global config.
-- **Prompt:** System message (role, actions, format) + user message (query, time, **server-held action history**, **RAG context**, current `dom`).
-- **Parsing:** Extract `<Thought>...</Thought>` and `<Action>...</Action>`. Validate action format (e.g. `click(n)`, `setValue(n, "s")`, `finish()`, `fail()`). On parse failure, retry or return `fail()`.
+- **Prompt:** System message (role, actions, format) + user message (query, time, **server-held action history**, **RAG context**, **web search results** (if applicable), current `dom`).
+- **Parsing:** Extract `<Thought>...</Thought>` and `<Action>...</Action>`. Validate action format (e.g. `click(n)`, `setValue(n, "s")`, `finish()`, `fail()`, `googleSearch("query")`, `verifySuccess("description")`). On parse failure, retry or return `fail()`.
 - **Output:** `thought` string, `action` string. Optionally include `usage` from LLM API in `NextActionResponse`.
+- **User-Friendly Language:** All LLM engines produce user-friendly, non-technical messages directly in `<Thought>` responses (no frontend transformation needed).
 
-### 4.7 Error Responses
+### 4.7 Web Search Integration
+
+- **Pre-Search:** For new tasks (cold starts), perform web search before task planning to understand how to complete tasks. RAG-first approach: only search if knowledge insufficient.
+- **Dynamic Search:** LLM can call `googleSearch(query)` action at any step during task execution. Search results are injected into LLM thought for next action.
+- **Implementation:** `lib/agent/web-search.ts` provides `performWebSearch()` function using Tavily API (AI-native, domain-restricted). Search results are automatically filtered to only include URLs from the domain in the API call URL. Results are summarized by LLM for efficient context injection.
+- **Action:** `googleSearch("query")` — Available as SERVER tool that LLM can call dynamically.
+- **Domain Restriction:** Search results are restricted to the domain from the `url` parameter in the API call, ensuring only relevant results from the website the user is working on.
+
+### 4.8 Chat Persistence & Session Management
+
+- **Session Model:** `sessions` collection stores conversation threads with `sessionId`, `userId`, `tenantId`, `url`, `status`, `metadata`.
+- **Message Model:** `messages` collection stores individual messages with `messageId`, `sessionId`, `role`, `content`, `actionString`, `status`, `error`, `sequenceNumber`, `timestamp`.
+- **DOM Bloat Management:** DOM snapshots stored separately in `snapshots` collection. Messages use `snapshotId` reference and `domSummary` (max 200 chars) for context without bloat. Only create snapshots for DOMs > 1000 chars.
+- **History Loading:** Message history excludes full DOMs (uses `.select()` to exclude snapshotId). Prompt builder uses `domSummary` for past actions, full DOM only for current state.
+- **Session Endpoints:** `GET /api/session/[sessionId]/messages` — Retrieve message history; `GET /api/session/latest` — Get latest session for current user.
+
+### 4.9 Manus-Style Orchestrator
+
+The agent uses a proactive "Reason-Act-Verify" orchestrator pattern:
+
+- **Planning Engine (§11):** Generates high-level action plans before execution. Plans stored in `tasks.plan` field with steps, currentStepIndex, and status tracking.
+- **Verification Engine (§12):** Compares expected vs actual state after each action. Uses DOM-based checks and semantic verification (LLM-based). Stores verification results in `verification_records`.
+- **Self-Correction Engine (§13):** Analyzes verification failures and generates alternative approaches. Supports multiple correction strategies (ALTERNATIVE_SELECTOR, ALTERNATIVE_TOOL, GATHER_INFORMATION, UPDATE_PLAN, RETRY_WITH_DELAY). Stores correction records in `correction_records`.
+- **Outcome Prediction (§14):** Predicts what should happen after each action. Generates expected outcomes with natural language description and DOM-based expectations. Stored in `task_actions.expectedOutcome`.
+- **Step Refinement (§15):** Converts high-level plan steps into specific tool actions. Determines tool type (DOM vs SERVER) and routes execution accordingly.
+
+**Orchestrator Status:** Task status enum extended: `'planning'`, `'executing'`, `'verifying'`, `'correcting'`, `'completed'`, `'failed'`, `'interrupted'`.
+
+### 4.10 Enhanced Error Handling
+
+- **Error Detection:** Errors from client execution reports are detected and injected into LLM context.
+- **System Messages:** Failures trigger system messages that inform the LLM about what went wrong.
+- **Explicit Verification:** `verifySuccess(description)` action allows LLM to explicitly verify task completion before calling `finish()`. Prevents deadlock scenarios where agent fixes issue but can't finish.
+- **Finish() Validation:** System intercepts `finish()` after recent failures and forces `verifySuccess()` first. After verification, `finish()` is allowed.
+- **Error Debug Info:** Error responses include `debugInfo` field (when debug mode enabled) with error type, message, context, stack traces (debug only), and recovery suggestions.
+
+### 4.11 Error Responses
 
 | Status | Code | Condition |
 |--------|------|-----------|
@@ -322,6 +320,27 @@ export type NextActionResponse = z.infer<typeof nextActionResponseSchema>;
 | 500 | `INTERNAL_ERROR` | Server or LLM error. |
 
 **Note:** No **403 `DOMAIN_NOT_ALLOWED`**. `allowed_domains` is a **filter** (§1.4); we always return 200 when authenticated, using org-specific or public-only knowledge.
+
+### 4.12 Response Enhancements
+
+**Enhanced `NextActionResponse` includes:**
+- `thought` (string) — LLM reasoning (user-friendly language)
+- `action` (string) — Action string
+- `usage` (object, optional) — Token usage
+- `taskId` (string, optional) — Task UUID
+- `sessionId` (string, optional) — Session UUID (for chat persistence)
+- `hasOrgKnowledge` (boolean, optional) — Whether org-specific RAG was used
+- `ragDebug` (object, optional) — RAG debug metadata (domain matching, chunk count, etc.)
+- `metrics` (object, optional) — Execution metrics (timing, token usage, step counts)
+- `verification` (object, optional) — Verification result (if verification occurred)
+- `correction` (object, optional) — Correction result (if self-correction occurred)
+- `plan` (object, optional) — Action plan structure (if planning enabled)
+- `currentStep` (number, optional) — Current step index in plan
+- `totalSteps` (number, optional) — Total number of steps in plan
+- `status` (string, optional) — Task status (includes orchestrator statuses)
+- `expectedOutcome` (object, optional) — Expected outcome for this action
+- `toolAction` (object, optional) — Tool action structure (if step refinement occurred)
+- `debugInfo` (object, optional) — Error debug information (when debug mode enabled)
 
 ---
 
@@ -472,17 +491,17 @@ RAG and action history MUST use **Tenant ID** and **Active Domain** as above to 
 
 ## 8. Implementation Checklist
 
-- [ ] **Auth:** Better Auth (Bearer plugin, `trustedOrigins`) + **`/api/v1/auth/*` adapters** (login, session, logout). Implement **`getSessionFromToken`** via `auth.api.getSession({ headers })`; use in all protected routes. See `THIN_CLIENT_ROADMAP_SERVER.md` §2.4.
-- [ ] **Web Search (Task 1):** Implement web search function, integrate into orchestrator flow, update task schema, add to planning prompts. See `BACKEND_WEB_SEARCH_CHANGES.md` §Task 1.
-- [ ] **User-Friendly Messages (Task 2):** Update system prompts and prompt builders to generate user-friendly messages. See `BACKEND_WEB_SEARCH_CHANGES.md` §Task 2.
-- [ ] **Chat Persistence (Task 3):** Implement Session and Message Mongoose schemas, update `POST /api/agent/interact` to use sessions, add `GET /api/session/:sessionId/messages` and `GET /api/session/latest` endpoints. See `BACKEND_WEB_SEARCH_CHANGES.md` §Task 3.
-- [ ] **Error Handling (Task 4):** Update request schema to accept error reporting, detect client failures, inject into LLM prompts, validate `finish()` actions. See `BACKEND_WEB_SEARCH_CHANGES.md` §Task 4.
-- [ ] **Persistence:** **Mongoose** models `allowed_domains`, `tasks`, `task_actions`. No new auth schemas; reuse Better Auth. No SQL migrations. See ROADMAP §2.1, §4.1.
-- [x] Implement `POST /api/agent/interact`: validate body; **`allowed_domains` as filter** (§1.4); task create/load; RAG (org or public); prompt build; LLM call; history append; return `NextActionResponse` with `hasOrgKnowledge`. Knowledge injected **into LLM prompt only**; extension never receives chunks/citations. **Implementation:** `app/api/agent/interact/route.ts` (Task 3 complete). Uses shared `getRAGChunks()` helper, `buildActionPrompt()`, `callActionLLM()`, `parseActionResponse()`, `validateActionFormat()`.
-- [x] Implement `GET /api/knowledge/resolve`: validate query params; **`allowed_domains` as filter** (§1.4); **proxy** to extraction service (org) or public-only (no call); return `ResolveKnowledgeResponse` with `hasOrgKnowledge`. **Internal use and debugging only** — not for extension overlay. Extraction service schema → **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`**; proxy details → `THIN_CLIENT_ROADMAP_SERVER.md` §3.1, §3.2. **Implementation:** `app/api/knowledge/resolve/route.ts` (Task 2 complete).
+- [x] **Auth:** Better Auth (Bearer plugin, `trustedOrigins`) + **`/api/v1/auth/*` adapters** (login, session, logout). Implement **`getSessionFromToken`** via `auth.api.getSession({ headers })`; use in all protected routes. See `THIN_SERVER_ROADMAP.md` §2.4.
+- [x] **Persistence:** **Mongoose** models `allowed_domains`, `tasks`, `task_actions`, `sessions`, `messages`, `snapshots`, `debug_logs`, `verification_records`, `correction_records`, `user_preferences`. No new auth schemas; reuse Better Auth. No SQL migrations. See `THIN_SERVER_ROADMAP.md`.
+- [x] Implement `POST /api/agent/interact`: validate body; **`allowed_domains` as filter** (§1.4); task create/load; RAG (org or public); web search; prompt build; LLM call; history append; orchestrator features (planning, verification, self-correction); return `NextActionResponse` with `hasOrgKnowledge`. Knowledge injected **into LLM prompt only**; extension never receives chunks/citations. **Implementation:** `app/api/agent/interact/route.ts` (complete). Uses shared `getRAGChunks()` helper, `buildActionPrompt()`, `callActionLLM()`, `parseActionResponse()`, `validateActionFormat()`, planning engine, verification engine, self-correction engine, outcome prediction engine, step refinement engine.
+- [x] Implement `GET /api/knowledge/resolve`: validate query params; **`allowed_domains` as filter** (§1.4); **proxy** to extraction service (org) or public-only (no call); return `ResolveKnowledgeResponse` with `hasOrgKnowledge`. **Internal use and debugging only** — not for extension overlay. Extraction service schema → **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`**; proxy details → `THIN_SERVER_ROADMAP.md` §3.1, §3.2. **Implementation:** `app/api/knowledge/resolve/route.ts` (complete).
 - [x] Resolve **proxies** to extraction service; no duplicate RAG/storage in Next.js. Org-specific calls use **Tenant ID** and **Active Domain**; no cross-tenant or cross-domain leakage.
-- [ ] Add rate limiting, logging, and error handling for all endpoints.
-- [ ] **CORS:** Allow extension origin (`chrome-extension://<id>`) for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, `/api/knowledge/*` (including preflight `OPTIONS`).
+- [x] Web search: Pre-search for new tasks; dynamic `googleSearch()` tool for mid-task searches. **Implementation:** `lib/agent/web-search.ts` (complete).
+- [x] Chat persistence: Session and Message models; DOM bloat management with Snapshot model. **Implementation:** `lib/models/session.ts`, `lib/models/message.ts`, `lib/models/snapshot.ts` (complete).
+- [x] Debug endpoints: Debug logging, session export, metrics collection. **Implementation:** `GET /api/debug/logs`, `GET /api/debug/session/[taskId]/export` (complete).
+- [x] Manus orchestrator: Planning, verification, self-correction, outcome prediction, step refinement. **Implementation:** `lib/agent/planning-engine.ts`, `lib/agent/verification-engine.ts`, `lib/agent/self-correction-engine.ts`, `lib/agent/outcome-prediction-engine.ts`, `lib/agent/step-refinement-engine.ts` (complete).
+- [x] Enhanced error handling: Error detection, system messages, explicit verification, finish() validation. **Implementation:** `lib/utils/error-debug.ts`, error handling in `app/api/agent/interact/route.ts` (complete).
+- [x] **CORS:** Allow extension origin (`chrome-extension://<id>`) for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, `/api/knowledge/*`, `/api/debug/*`, `/api/session/*` (including preflight `OPTIONS`).
 
 ---
 
@@ -494,33 +513,39 @@ RAG and action history MUST use **Tenant ID** and **Active Domain** as above to 
 | `/api/v1/auth/logout` | POST | Bearer | Invalidate token. |
 | `/api/v1/auth/session` | GET | Bearer | Check session; return user/tenant. |
 | `/api/v1/user/preferences` | GET/POST | Bearer | User preferences API: fetch/save preferences (theme, etc.) per tenant. For extension settings page. |
-| `/api/agent/interact` | POST | Bearer | Action loop: receive dom/query/url/taskId/sessionId; **web search** (new tasks); **session resolution**; **error detection**; RAG + LLM; server-held history; return `NextActionResponse` with **user-friendly messages**. Extension gets **only** thought/action — not chunks/citations. |
+| `/api/agent/interact` | POST | Bearer | Action loop: receive dom/query/url/taskId/sessionId; RAG + web search + LLM; server-held history; Manus orchestrator (planning, verification, self-correction); return `NextActionResponse`. Extension gets **only** thought/action — not chunks/citations. |
 | `/api/knowledge/resolve` | GET | Bearer | **Proxy** to extraction service (org) or public-only; return `ResolveKnowledgeResponse`. **Internal use and debugging only** — not for extension overlay. |
-| `/api/session/:sessionId/messages` | GET | Bearer | Get conversation history for a session. Used by client to hydrate chat view on reload. |
-| `/api/session/latest` | GET | Bearer | Get the most recent active session for the user. Used by client to resume conversation. |
+| `/api/session/[sessionId]/messages` | GET | Bearer | Retrieve message history for a session. |
+| `/api/session/latest` | GET | Bearer | Get latest session for current user. |
+| `/api/debug/logs` | GET | Bearer | Retrieve debug logs for debug UI (query params: taskId, logType, limit, since). |
+| `/api/debug/session/[taskId]/export` | GET | Bearer | Export complete debug session data for a specific task. |
 
-**Tenant ID** (from session; user or organization per §1.3) and **Active Domain** (from URL) drive **strict data isolation** for RAG and action history. **Action history** is migrated to the server and keyed by **taskId** (legacy) or **sessionId** (new structure) to preserve **context continuity** across the multi-step workflow. **Chat persistence** enables long-term memory via Session and Message schemas, allowing conversation history restoration across client reloads.
+**Tenant ID** (from session; user or organization per §1.3) and **Active Domain** (from URL) drive **strict data isolation** for RAG, action history, sessions, and messages. **Action history** is migrated to the server and keyed by **taskId** to preserve **context continuity** across the multi-step workflow. **Chat persistence** uses **sessionId** to maintain conversation threads across requests.
 
 ---
 
-## 10. Extension (Client) Implementation Notes
+## 12. Extension (Client) Implementation Notes
 
 - **Storage:** Persist `accessToken` and `expiresAt` in `chrome.storage.local`. Clear on logout.
 - **Requests:** Use `fetch` with `Content-Type: application/json`, `Authorization: Bearer <accessToken>`, and `credentials: "omit"`. Handle 401 (clear token, show login). **No** 403 from domain; use `hasOrgKnowledge` from interact/resolve to show “no knowledge for this website” dialog when applicable (§1.4).
 - **Startup:** Call `GET /api/v1/auth/session`; if 401, show login UI and block task run.
-- **Agent interact:** Call `POST /api/agent/interact` with `{ url, query, dom, taskId? }`; execute returned `NextActionResponse` (click/setValue) or handle finish/fail. Send `taskId` on subsequent requests. During task execution, the extension **never** receives raw knowledge (chunks/citations) — only `thought` and `action`.
+- **Agent interact:** Call `POST /api/agent/interact` with `{ url, query, dom, taskId?, sessionId? }`; execute returned `NextActionResponse` (click/setValue) or handle finish/fail. Send `taskId` and `sessionId` on subsequent requests. During task execution, the extension **never** receives raw knowledge (chunks/citations) — only `thought` and `action`.
 - **Knowledge resolve:** `GET /api/knowledge/resolve` is for **internal use and debugging only**. The extension does **not** use it for overlay, tooltips, or end-user display. Use resolve only in tooling, dashboards, or debugging flows (e.g. “what RAG returns for this URL”).
-- **User preferences:** Call `GET /api/v1/user/preferences` to fetch preferences; call `POST /api/v1/user/preferences` to save preferences (theme, etc.). Preferences are scoped per tenant. See `THIN_CLIENT_ROADMAP_SERVER.md` §5 for implementation details.
-- **CORS:** Backend must allow `chrome-extension://<extension-id>` for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, and `/api/knowledge/*`. See `THIN_CLIENT_ROADMAP_SERVER.md` §1.3, §2.4.
+- **User preferences:** Call `GET /api/v1/user/preferences` to fetch preferences; call `POST /api/v1/user/preferences` to save preferences (theme, etc.). Preferences are scoped per tenant. See `THIN_SERVER_ROADMAP.md` §5 for implementation details.
+- **Session management:** Use `sessionId` from interact response to maintain conversation threads. Call `GET /api/session/[sessionId]/messages` to retrieve message history if needed.
+- **Debug endpoints:** Use `GET /api/debug/logs` and `GET /api/debug/session/[taskId]/export` for debug UI. Debug endpoints are for development and troubleshooting only.
+- **CORS:** Backend must allow `chrome-extension://<extension-id>` for **`/api/auth/*`**, `/api/v1/*`, `/api/agent/*`, `/api/knowledge/*`, `/api/debug/*`, `/api/session/*`. See `THIN_SERVER_ROADMAP.md` §1.3, §2.4.
 
 ---
 
-## 11. References
+## 13. References
 
 | Document | Purpose |
 |----------|---------|
-| **`THIN_CLIENT_ROADMAP_SERVER.md`** | Implementation roadmap: MongoDB, Mongoose, Better Auth, Next.js, Tasks 1–4 (auth, resolve, interact, preferences), auth adapters (§2.4), DB stack (§1.4), interact vs resolve (§1.5), user preferences API (§5). **Keep in sync with this spec.** |
+| **`THIN_SERVER_ROADMAP.md`** | Complete implementation roadmap: MongoDB, Mongoose, Better Auth, Next.js, all tasks (auth, resolve, interact, preferences, web search, chat persistence, debug, orchestrator). **Keep in sync with this spec.** |
 | **`ARCHITECTURE.md`** | Hybrid DB (Prisma + Mongoose), tenant model (user / organization), multi-tenancy. |
-| **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`** | **Browser automation / extraction service** `GET /api/knowledge/resolve` request & response schema. Used when Next.js proxies resolve (§5); referenced by Task 2 (§3.1, §3.2) and `lib/knowledge-extraction/resolve-client.ts`. |
+| **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`** | **Browser automation / extraction service** `GET /api/knowledge/resolve` request & response schema. Used when Next.js proxies resolve (§5); referenced by Task 2 and `lib/knowledge-extraction/resolve-client.ts`. |
+| **`DEBUG_VIEW_IMPROVEMENTS.md`** | Debug View requirements (client-focused, but server provides debug data). |
+| **`MANUS_ORCHESTRATOR_ARCHITECTURE.md`** | Manus orchestrator architecture specification. |
 | **Better Auth** | [Browser Extension Guide](https://www.better-auth.com/docs/guides/browser-extension-guide), [Bearer Plugin](https://beta.better-auth.com/docs/plugins/bearer), [trustedOrigins](https://www.better-auth.com/docs/reference/options). |
 | **Next.js** | [Middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware) (CORS), [Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers). |

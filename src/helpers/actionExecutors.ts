@@ -1217,6 +1217,39 @@ export async function executeGetMetrics() {
 }
 
 // ============================================================================
+// DOM WAITING
+// ============================================================================
+
+/**
+ * Wait for an element to appear on the page
+ * Useful after clicking buttons that open dropdowns/menus
+ */
+export async function executeWaitForElement(args: {
+  text?: string;
+  role?: string;
+  timeout?: number;
+}) {
+  const timeout = Math.min(args.timeout || 5000, 30000); // Max 30 seconds
+  
+  // Build selector from args
+  const selector: { text?: string; role?: string } = {};
+  if (args.text) selector.text = args.text;
+  if (args.role) selector.role = args.role;
+  
+  // Use RPC to run in content script context
+  const result = await callRPC('waitForElementAppearance', [selector, timeout]) as {
+    found: boolean;
+    element?: { id?: string; tagName: string; role?: string; name?: string; text?: string };
+  };
+  
+  if (!result.found) {
+    throw new Error(`Element not found within ${timeout}ms. Selector: ${JSON.stringify(selector)}`);
+  }
+  
+  return result.element;
+}
+
+// ============================================================================
 // ACTION EXECUTOR MAP
 // ============================================================================
 
@@ -1226,6 +1259,7 @@ export const actionExecutors: Record<string, (args: any) => Promise<any>> = {
   goBack: executeGoBack,
   goForward: executeGoForward,
   wait: executeWait,
+  waitForElement: executeWaitForElement,
   search: executeSearch,
   
   // Page Interaction

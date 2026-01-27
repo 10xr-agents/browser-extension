@@ -18,14 +18,22 @@ import {
   Badge,
   Button,
   HStack,
+  IconButton,
+  Icon,
+  Tooltip,
 } from '@chakra-ui/react';
-import { DownloadIcon } from '@chakra-ui/icons';
+import { DownloadIcon, ArrowLeftIcon } from '@chakra-ui/icons';
+import { FiArrowLeft } from 'react-icons/fi';
 import { useAppState } from '../state/store';
 import DebugPanel from './DebugPanel';
 import { exportDebugSession } from '../helpers/exportDebugSession';
 import ErrorBoundary from './ErrorBoundary';
 
-const SystemView: React.FC = () => {
+interface SystemViewProps {
+  onBackToChat?: () => void;
+}
+
+const SystemView: React.FC<SystemViewProps> = ({ onBackToChat }) => {
   const developerMode = useAppState((state) => state.settings.developerMode);
   const taskStatus = useAppState((state) => state.currentTask.status);
   const coverageMetrics = useAppState((state) => state.currentTask.coverageMetrics);
@@ -33,13 +41,15 @@ const SystemView: React.FC = () => {
   const hasOrgKnowledge = useAppState((state) => state.currentTask.hasOrgKnowledge);
   const networkLogs = useAppState((state) => state.debug.networkLogs);
 
-  // Dark mode colors
+  // Dark mode colors - ALL at component top level
   const bgColor = useColorModeValue('white', 'gray.900');
   const cardBg = useColorModeValue('gray.50', 'gray.800');
   const borderColor = useColorModeValue('gray.200', 'gray.700');
   const textColor = useColorModeValue('gray.900', 'gray.100');
   const descColor = useColorModeValue('gray.600', 'gray.400');
   const headingColor = useColorModeValue('gray.900', 'gray.100');
+  const backButtonColor = useColorModeValue('gray.700', 'gray.300');
+  const backButtonHoverBg = useColorModeValue('gray.100', 'gray.700');
 
   // Calculate health signals
   const apiStatus = networkLogs.length > 0 
@@ -97,9 +107,27 @@ const SystemView: React.FC = () => {
         py={3}
       >
         <HStack justify="space-between" align="center" mb={3}>
-          <Heading size="sm" color={headingColor}>
-            System Health
-          </Heading>
+          <HStack spacing={2} align="center">
+            {/* Back to Chat Button */}
+            {onBackToChat && (
+              <Tooltip label="Back to Chat" placement="bottom" openDelay={500}>
+                <IconButton
+                  aria-label="Back to Chat"
+                  icon={<Icon as={FiArrowLeft} />}
+                  size="sm"
+                  variant="ghost"
+                  onClick={onBackToChat}
+                  color={backButtonColor}
+                  _hover={{
+                    bg: backButtonHoverBg,
+                  }}
+                />
+              </Tooltip>
+            )}
+            <Heading size="sm" color={headingColor}>
+              Debug Panel
+            </Heading>
+          </HStack>
           <Button
             size="sm"
             leftIcon={<DownloadIcon />}
@@ -175,11 +203,11 @@ const SystemView: React.FC = () => {
         </SimpleGrid>
       </Box>
 
-      {/* Debug Panel Content - Scrollable */}
-      <Box flex="1" overflowY="auto" overflowX="hidden" minW="0" bg={bgColor}>
+      {/* Debug Panel Content - Full height for tabs */}
+      <Box flex="1" overflow="hidden" minW="0" bg={bgColor} display="flex" flexDirection="column">
         <ErrorBoundary>
-          <Box px={4} py={4}>
-            <DebugPanel hideHeader={true} />
+          <Box px={4} py={4} h="100%" display="flex" flexDirection="column" overflow="hidden">
+            <DebugPanel />
           </Box>
         </ErrorBoundary>
       </Box>

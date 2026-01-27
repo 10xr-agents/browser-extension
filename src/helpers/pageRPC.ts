@@ -1,5 +1,7 @@
 import getAnnotatedDOM, {
   getUniqueElementSelectorId,
+  getInteractiveElementSnapshot,
+  waitForElementAppearance,
 } from '../pages/Content/getAnnotatedDOM';
 import { copyToClipboard } from '../pages/Content/copyToClipboard';
 
@@ -36,6 +38,8 @@ async function ensureContentScriptInjected(tabId: number): Promise<boolean> {
 export const rpcMethods = {
   getAnnotatedDOM,
   getUniqueElementSelectorId,
+  getInteractiveElementSnapshot,
+  waitForElementAppearance,
   ripple,
   copyToClipboard,
 } as const;

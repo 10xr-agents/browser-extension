@@ -1,0 +1,202 @@
+/**
+ * ChatHistoryDrawer Component
+ * 
+ * Drawer/overlay that displays past chat sessions in a scrollable list.
+ * Enables Cursor-style multi-chat functionality.
+ * 
+ * Reference: UI Overhaul - Multi-Chat Feature
+ */
+
+import React, { useEffect } from 'react';
+import {
+  Drawer,
+  DrawerBody,
+  DrawerHeader,
+  DrawerOverlay,
+  DrawerContent,
+  DrawerCloseButton,
+  VStack,
+  Box,
+  Text,
+  HStack,
+  useColorModeValue,
+  Tooltip,
+} from '@chakra-ui/react';
+import { useAppState } from '../state/store';
+import type { ChatSession } from '../state/sessions';
+import { fromTimestamp } from '../services/sessionService';
+
+interface ChatHistoryDrawerProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+const ChatHistoryDrawer: React.FC<ChatHistoryDrawerProps> = ({ isOpen, onClose }) => {
+  const sessions = useAppState((state) => state.sessions.sessions);
+  const currentSessionId = useAppState((state) => state.sessions.currentSessionId);
+  const loadSessions = useAppState((state) => state.sessions.actions.loadSessions);
+  const switchSession = useAppState((state) => state.sessions.actions.switchSession);
+  const setInstructions = useAppState((state) => state.ui.actions.setInstructions);
+  const interruptTask = useAppState((state) => state.currentTask.actions.interrupt);
+  const taskStatus = useAppState((state) => state.currentTask.status);
+
+  // Load sessions when drawer opens
+  useEffect(() => {
+    if (isOpen && sessions.length === 0) {
+      loadSessions();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, sessions.length]); // loadSessions is stable from Zustand, no need in deps
+
+  // Color definitions - ALL at component top level
+  const bgColor = useColorModeValue('white', 'gray.900');
+  const headerBg = useColorModeValue('gray.50', 'gray.800');
+  const headerText = useColorModeValue('gray.900', 'gray.100');
+  const itemBg = useColorModeValue('white', 'gray.800');
+  const itemHoverBg = useColorModeValue('gray.50', 'gray.700');
+  const itemActiveBg = useColorModeValue('blue.50', 'blue.900/20');
+  const itemActiveBorder = useColorModeValue('blue.500', 'blue.400');
+  const textColor = useColorModeValue('gray.900', 'gray.100');
+  const descColor = useColorModeValue('gray.600', 'gray.400');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+
+  // Format relative time from timestamp
+  const formatRelativeTime = (timestamp: number): string => {
+    const now = Date.now();
+    const diffMs = now - timestamp;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return fromTimestamp(timestamp).toLocaleDateString();
+  };
+
+  const handleSessionClick = async (session: ChatSession) => {
+    // Stop current task if running
+    if (taskStatus === 'running') {
+      interruptTask();
+      // Wait a bit for task to stop
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    // Switch to this session (loads messages and updates state)
+    await switchSession(session.sessionId);
+    
+    // Extract title from first user message if available
+    // Use getState() safely (it's not a hook, it's a Zustand store method)
+    const state = useAppState.getState();
+    const messages = state.currentTask.messages;
+    
+    // SAFETY CHECK: Ensure messages is an array before calling .find()
+    // This prevents crashes during race conditions when switching sessions
+    if (!Array.isArray(messages)) {
+      console.warn('ChatHistoryDrawer: messages is not an array after switchSession');
+      onClose();
+      return;
+    }
+    
+    const firstUserMessage = messages.find(m => m && m.role === 'user');
+    if (firstUserMessage) {
+      // Ensure content is a string before using it
+      const contentStr = typeof firstUserMessage.content === 'string' 
+        ? firstUserMessage.content 
+        : String(firstUserMessage.content || '');
+      
+      if (contentStr !== session.title) {
+        // Update session title if it differs
+        const newTitle = contentStr.length > 50 
+          ? contentStr.substring(0, 50) + '...' 
+          : contentStr;
+        await state.sessions.actions.updateSession(session.sessionId, {
+          title: newTitle,
+        });
+      }
+    }
+
+    // Clear instructions
+    setInstructions('');
+
+    // Close drawer
+    onClose();
+  };
+
+  return (
+    <Drawer isOpen={isOpen} placement="left" onClose={onClose} size="sm">
+      <DrawerOverlay />
+      <DrawerContent bg={bgColor}>
+        <DrawerCloseButton />
+        <DrawerHeader bg={headerBg} borderBottomWidth="1px" borderColor={borderColor}>
+          <Text fontSize="md" fontWeight="semibold" color={headerText}>
+            Chat History
+          </Text>
+        </DrawerHeader>
+        <DrawerBody p={0}>
+          {sessions.length === 0 ? (
+            <Box p={4} textAlign="center">
+              <Text fontSize="sm" color={descColor}>
+                No chat history yet. Start a conversation to see it here.
+              </Text>
+            </Box>
+          ) : (
+            <VStack align="stretch" spacing={0}>
+              {sessions.map((session) => {
+                const isActive = session.sessionId === currentSessionId;
+                return (
+                  <Tooltip
+                    key={session.sessionId}
+                    label={typeof session.title === 'string' ? session.title : String(session.title || 'Untitled Chat')}
+                    placement="right"
+                    openDelay={500}
+                  >
+                    <Box
+                      px={4}
+                      py={3}
+                      bg={isActive ? itemActiveBg : itemBg}
+                      borderLeftWidth={isActive ? '3px' : '0'}
+                      borderLeftColor={isActive ? itemActiveBorder : 'transparent'}
+                      borderBottomWidth="1px"
+                      borderBottomColor={borderColor}
+                      cursor="pointer"
+                      _hover={{ bg: itemHoverBg }}
+                      onClick={() => handleSessionClick(session)}
+                    >
+                      <VStack align="stretch" spacing={1}>
+                        <Text
+                          fontSize="sm"
+                          fontWeight={isActive ? 'semibold' : 'medium'}
+                          color={textColor}
+                          noOfLines={2}
+                        >
+                          {/* SAFETY: Ensure title is always a string to prevent React error #130 */}
+                          {typeof session.title === 'string' 
+                            ? session.title 
+                            : String(session.title || 'Untitled Chat')}
+                        </Text>
+                        <HStack spacing={2} justify="space-between">
+                          <Text fontSize="xs" color={descColor}>
+                            {formatRelativeTime(session.updatedAt || session.createdAt)}
+                          </Text>
+                          {(session.messageCount || 0) > 0 && (
+                            <Text fontSize="xs" color={descColor}>
+                              {session.messageCount} messages
+                            </Text>
+                          )}
+                        </HStack>
+                      </VStack>
+                    </Box>
+                  </Tooltip>
+                );
+              })}
+            </VStack>
+          )}
+        </DrawerBody>
+      </DrawerContent>
+    </Drawer>
+  );
+};
+
+export default ChatHistoryDrawer;

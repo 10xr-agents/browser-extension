@@ -1,50 +1,66 @@
 /**
- * ActionCard Component
+ * ActionCard Component (Cursor/Manus Style)
  * 
- * Displays browser actions (click, setValue, etc.) as user-friendly cards
- * instead of raw code strings.
+ * Minimal inline action display - no cards, no shadows, no borders.
+ * Uses HStack layout: Icon | Action Description | Spacer | Status Icon
  * 
- * Reference: UX Refactor - User-Centric Chat Design
+ * Reference: Cursor/Manus minimalist design aesthetic
  */
 
 import React from 'react';
 import {
-  Box,
   HStack,
   Text,
   Icon,
+  Spacer,
   useColorModeValue,
 } from '@chakra-ui/react';
-import { FaMousePointer, FaKeyboard } from 'react-icons/fa';
+import { FiMousePointer, FiType, FiCheck, FiX, FiChevronRight } from 'react-icons/fi';
 import { DisplayHistoryEntry } from '../state/currentTask';
 
 interface ActionCardProps {
   entry: DisplayHistoryEntry;
+  compact?: boolean; // For timeline view (even more minimal)
 }
 
-const ActionCard: React.FC<ActionCardProps> = ({ entry }) => {
-  const bgColor = useColorModeValue('white', 'gray.800');
-  const borderColor = useColorModeValue('gray.200', 'gray.700');
-  const textColor = useColorModeValue('gray.700', 'gray.300');
-  const iconColor = useColorModeValue('blue.500', 'blue.400');
-  const descriptionColor = useColorModeValue('gray.600', 'gray.400');
+const ActionCard: React.FC<ActionCardProps> = ({ entry, compact = false }) => {
+  // Color definitions - ALL at component top level
+  const textColor = useColorModeValue('gray.600', 'gray.400');
+  const iconColor = useColorModeValue('gray.400', 'gray.500');
+  const successColor = useColorModeValue('green.500', 'green.400');
+  const errorColor = useColorModeValue('red.500', 'red.400');
+  const hoverBg = useColorModeValue('gray.50', 'gray.800');
+  const descriptionColor = useColorModeValue('gray.500', 'gray.500');
 
-  if (!entry.parsedAction || !('parsedAction' in entry.parsedAction)) {
+  // CRITICAL SAFETY CHECKS
+  if (!entry) {
+    return null;
+  }
+  
+  if (!entry.parsedAction) {
+    return null;
+  }
+  
+  if (!('parsedAction' in entry.parsedAction)) {
     return null;
   }
 
   const action = entry.parsedAction.parsedAction;
+  
+  if (!action || typeof action !== 'object') {
+    return null;
+  }
+  
+  if (!('name' in action) || typeof action.name !== 'string') {
+    return null;
+  }
 
   /**
    * Extract semantic element name from thought string
-   * Looks for patterns like "click the 'Save' button" or "clicking 'Patient'"
-   * Returns the quoted string if found, otherwise null
    */
   const extractElementNameFromThought = (thought: string | undefined): string | null => {
     if (!thought) return null;
     
-    // Try to find quoted strings after action verbs
-    // Patterns: "click the 'Button'", "clicking 'Button'", "click on 'Button'", etc.
     const patterns = [
       /(?:click|clicking|select|selecting|press|pressing)\s+(?:the|on|on the)?\s*['"`]([^'"`]+)['"`]/i,
       /['"`]([^'"`]+)['"`]\s+(?:button|link|element|field|input|tab|menu)/i,
@@ -65,108 +81,109 @@ const ActionCard: React.FC<ActionCardProps> = ({ entry }) => {
     switch (action.name) {
       case 'click': {
         const elementId = action.args && 'elementId' in action.args ? action.args.elementId : null;
-        // Try to extract semantic name from thought
         const semanticName = extractElementNameFromThought(entry.thought);
         
         let description: string;
         if (semanticName) {
-          // Use semantic name if found
-          description = `'${semanticName}'`;
+          description = `Clicked '${semanticName}'`;
         } else if (elementId !== null && elementId !== undefined) {
-          // Fall back to element ID
-          description = `element #${elementId}`;
+          description = `Clicked element #${elementId}`;
         } else {
-          description = 'element';
+          description = 'Clicked element';
         }
         
-        return {
-          icon: FaMousePointer,
-          label: 'Clicking',
-          description,
-        };
+        return { icon: FiMousePointer, description };
       }
       case 'setValue': {
         const value = action.args && 'value' in action.args ? action.args.value : null;
         const elementId = action.args && 'elementId' in action.args ? action.args.elementId : null;
         
-        // Try to extract field name from thought (e.g., "entering 'Jaswanth' in the 'Name' field")
         const fieldNamePattern = /(?:in|into|on|for)\s+(?:the\s+)?['"`]([^'"`]+)['"`]\s+(?:field|input|box)/i;
         const fieldMatch = entry.thought?.match(fieldNamePattern);
         const fieldName = fieldMatch && fieldMatch[1] ? fieldMatch[1].trim() : null;
         
         const valueStr = typeof value === 'string' 
-          ? (value.length > 30 ? `${value.substring(0, 30)}...` : value)
+          ? (value.length > 20 ? `${value.substring(0, 20)}...` : value)
           : value !== null && value !== undefined 
             ? String(value)
             : null;
         
         let description: string;
         if (fieldName && valueStr) {
-          description = `"${valueStr}" in '${fieldName}'`;
-        } else if (fieldName) {
-          description = `in '${fieldName}'`;
+          description = `Typed "${valueStr}" in '${fieldName}'`;
         } else if (valueStr) {
-          description = `"${valueStr}"`;
+          description = `Typed "${valueStr}"`;
+        } else if (fieldName) {
+          description = `Typed in '${fieldName}'`;
         } else if (elementId !== null && elementId !== undefined) {
-          description = `in element #${elementId}`;
+          description = `Typed in element #${elementId}`;
         } else {
-          description = 'text';
+          description = 'Typed text';
         }
         
-        return {
-          icon: FaKeyboard,
-          label: 'Typing',
-          description,
-        };
+        return { icon: FiType, description };
       }
       case 'finish':
-        return {
-          icon: null,
-          label: 'Task completed',
-          description: '',
-        };
+        return { icon: FiCheck, description: 'Task completed' };
       case 'fail':
-        return {
-          icon: null,
-          label: 'Task failed',
-          description: '',
-        };
+        return { icon: FiX, description: 'Task failed' };
       default:
-        return {
-          icon: null,
-          label: action.name,
-          description: action.args ? JSON.stringify(action.args) : '',
+        return { 
+          icon: FiChevronRight, 
+          description: action.args 
+            ? `${action.name}(${JSON.stringify(action.args).slice(0, 30)}...)` 
+            : action.name 
         };
     }
   };
 
-  const { icon: ActionIcon, label, description } = getActionInfo();
+  const { icon: ActionIcon, description } = getActionInfo();
+  const isSuccess = action.name === 'finish';
+  const isError = action.name === 'fail';
+
+  const safeDescription = typeof description === 'string' ? description : String(description || '');
 
   return (
-    <Box
-      borderWidth="1px"
-      borderColor={borderColor}
-      borderRadius="md"
-      bg={bgColor}
-      p={2}
-      shadow="sm"
-      w="fit-content"
-      maxW="100%"
+    <HStack
+      spacing={2}
+      py={compact ? 0.5 : 1}
+      px={compact ? 0 : 1}
+      borderRadius="sm"
+      transition="background 0.15s ease"
+      _hover={{ bg: compact ? 'transparent' : hoverBg }}
+      cursor="default"
+      w="100%"
     >
-      <HStack spacing={2} align="center">
-        {ActionIcon && (
-          <Icon as={ActionIcon} color={iconColor} boxSize={3.5} />
-        )}
-        <Text fontSize="xs" color={textColor} fontWeight="medium">
-          {label}
-        </Text>
-        {description && (
-          <Text fontSize="xs" color={descriptionColor}>
-            {description}
-          </Text>
-        )}
-      </HStack>
-    </Box>
+      {/* Action Icon */}
+      <Icon 
+        as={ActionIcon} 
+        boxSize={compact ? 3 : 3.5} 
+        color={isSuccess ? successColor : isError ? errorColor : iconColor}
+        flexShrink={0}
+      />
+      
+      {/* Action Description */}
+      <Text 
+        fontSize={compact ? 'xs' : 'sm'} 
+        color={isSuccess ? successColor : isError ? errorColor : textColor}
+        noOfLines={1}
+        flex="1"
+      >
+        {safeDescription}
+      </Text>
+      
+      <Spacer />
+      
+      {/* Status Icon */}
+      {!isError && !isSuccess && (
+        <Icon 
+          as={FiCheck} 
+          boxSize={compact ? 3 : 3.5} 
+          color={successColor}
+          flexShrink={0}
+        />
+      )}
+    </HStack>
   );
 };
 

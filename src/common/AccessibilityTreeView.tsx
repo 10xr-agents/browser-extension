@@ -76,7 +76,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, level }) => {
                   fontSize="xs"
                   fontWeight="bold"
                 >
-                  {role}
+                  {typeof role === 'string' ? role : String(role || 'unknown')}
                 </Badge>
                 {isIgnored && (
                   <Badge colorScheme="gray" fontSize="xs">
@@ -86,17 +86,17 @@ const TreeNode: React.FC<TreeNodeProps> = ({ node, allNodes, level }) => {
               </HStack>
               {name && (
                 <Text fontSize="sm" fontWeight="medium" mt={1} color={textColor}>
-                  {name}
+                  {typeof name === 'string' ? name : String(name || '')}
                 </Text>
               )}
               {description && (
                 <Text fontSize="xs" color={descColor} mt={0.5}>
-                  {description}
+                  {typeof description === 'string' ? description : String(description || '')}
                 </Text>
               )}
               {value && (
                 <Text fontSize="xs" color={valueColor} fontStyle="italic" mt={0.5}>
-                  Value: {value}
+                  Value: {typeof value === 'string' ? value : String(value || '')}
                 </Text>
               )}
             </Box>

@@ -8,37 +8,45 @@
  */
 
 import {
-  HStack,
   VStack,
   Box,
   Text,
-  Button,
   Flex,
-  Icon,
   useColorModeValue,
-  IconButton,
 } from '@chakra-ui/react';
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { BsStopFill } from 'react-icons/bs';
 import { FiSend } from 'react-icons/fi';
+import { Icon, IconButton } from '@chakra-ui/react';
 import { useAppState } from '../state/store';
 import TaskHistory from './TaskHistory';
 import KnowledgeOverlay from './KnowledgeOverlay';
 import AutosizeTextarea from './AutosizeTextarea';
 import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
 import ErrorBoundary from './ErrorBoundary';
+import ChatHistoryDrawer from './ChatHistoryDrawer';
+import DomainStatus from './components/DomainStatus';
 
 interface TaskUIProps {
   hasOrgKnowledge?: boolean | null;
+  isDebugViewOpen?: boolean;
+  setIsDebugViewOpen?: (open: boolean) => void;
+  onNavigate?: (route: '/' | '/settings') => void;
 }
 
-const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
+const TaskUI: React.FC<TaskUIProps> = ({ 
+  hasOrgKnowledge,
+  isDebugViewOpen = false,
+  setIsDebugViewOpen,
+  onNavigate,
+}) => {
   // Split selectors to avoid creating new objects on every render (prevents infinite loops)
   const taskHistory = useAppState((state) => state.currentTask.displayHistory);
   const taskStatus = useAppState((state) => state.currentTask.status);
   const runTask = useAppState((state) => state.currentTask.actions.runTask);
   const instructions = useAppState((state) => state.ui.instructions);
   const setInstructions = useAppState((state) => state.ui.actions.setInstructions);
+  const interruptTask = useAppState((state) => state.currentTask.actions.interrupt);
   const accessibilityElements = useAppState((state) => state.currentTask.accessibilityElements);
 
   // Memoize only state values (not action functions) to prevent re-renders
@@ -60,18 +68,32 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
 
   const [activeUrl, setActiveUrl] = useState<string>('');
   const [showKnowledge, setShowKnowledge] = useState(false);
+  
+  // Session management
+  const isHistoryOpen = useAppState((state) => state.sessions.isHistoryOpen);
+  const setHistoryOpen = useAppState((state) => state.sessions.actions.setHistoryOpen);
+  const createNewChat = useAppState((state) => state.sessions.actions.createNewChat);
+  const startNewChat = useAppState((state) => state.currentTask.actions.startNewChat);
 
   const taskInProgress = state.taskStatus === 'running';
   const sessionId = useAppState((state) => state.currentTask.sessionId);
   const loadMessages = useAppState((state) => state.currentTask.actions.loadMessages);
   const messages = useAppState((state) => state.currentTask.messages);
+  
+  // Check if we're waiting for user input (ASK_USER state)
+  const waitingForUserInput = useAppState((state) => {
+    const lastMessage = state.currentTask.messages[state.currentTask.messages.length - 1];
+    return lastMessage?.userQuestion && 
+           (lastMessage.status === 'pending' || lastMessage.meta?.reasoning?.source === 'ASK_USER');
+  });
 
   // Load messages on mount if sessionId exists
   useEffect(() => {
     if (sessionId && messages.length === 0) {
       loadMessages(sessionId);
     }
-  }, [sessionId, messages.length, loadMessages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, messages.length]); // loadMessages is stable from Zustand, no need in deps
 
   // Get active tab URL on mount and when tab changes
   useEffect(() => {
@@ -112,13 +134,23 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
   }, []);
 
   const handleRunTask = useCallback(() => {
-    if (instructions) {
+    // Type guard: Ensure instructions is a string
+    const safeInstructions = typeof instructions === 'string' ? instructions : String(instructions || '').trim();
+    
+    if (safeInstructions) {
+      // If we're waiting for user input, this is a response to the question
+      // Resume the task with the user's response
+      if (waitingForUserInput) {
+        // The task will continue with the new instructions
+        // The backend will treat this as additional context
+      }
+      
       // Silently handle errors - they will be shown in the UI via error state
       runTask((message: string) => {
         console.error('Task error:', message);
       });
     }
-  }, [instructions, runTask]);
+  }, [instructions, runTask, waitingForUserInput]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -127,9 +159,7 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
     }
   };
 
-  const taskState = useAppState((state) => state.currentTask.status);
-  const interruptTask = useAppState((state) => state.currentTask.actions.interrupt);
-  const isRunning = taskState === 'running';
+  const isRunning = taskStatus === 'running';
 
   const borderColor = useColorModeValue('gray.200', 'gray.700');
   const inputBg = useColorModeValue('white', 'gray.900');
@@ -139,10 +169,6 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
   const bannerTextColor = useColorModeValue('blue.800', 'blue.200');
   
   // Command Center design colors
-  const headerBg = useColorModeValue('white', 'gray.900');
-  const headerBorder = useColorModeValue('gray.200', 'gray.700');
-  const contextPillBg = useColorModeValue('gray.100', 'gray.800');
-  const contextPillText = useColorModeValue('gray.700', 'gray.300');
   const floatingInputBg = useColorModeValue('white', 'gray.800');
   const floatingInputBorder = useColorModeValue('gray.300', 'gray.600');
   
@@ -151,49 +177,41 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
   const systemNoticeBorderColor = useColorModeValue('orange.400', 'orange.500');
   const systemNoticeTextColor = useColorModeValue('orange.800', 'orange.300');
 
-  // Get current context (active URL domain or task name)
-  const getCurrentContext = () => {
-    if (activeUrl) {
-      try {
-        const url = new URL(activeUrl);
-        return url.hostname;
-      } catch {
-        return 'Current page';
-      }
+  // Handlers for DomainStatus actions
+  const handleNewChat = useCallback(async () => {
+    // Stop any running task first
+    if (isRunning) {
+      interruptTask();
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
-    return 'Ready to start';
-  };
+    
+    // Clear current task state (clears messages, displayHistory, instructions)
+    startNewChat();
+    
+    // Create new session
+    await createNewChat(activeUrl);
+    
+    // Clear instructions explicitly (startNewChat should do this, but ensure it)
+    setInstructions('');
+  }, [activeUrl, createNewChat, startNewChat, isRunning, interruptTask, setInstructions, taskStatus]);
 
   return (
     <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg} position="relative">
-      {/* Zone A: Sticky Context Header */}
-      <Box
-        flex="none"
-        position="sticky"
-        top={0}
-        zIndex={10}
-        bg={headerBg}
-        borderBottomWidth="1px"
-        borderColor={headerBorder}
-        px={4}
-        py={2}
-        shadow="sm"
-      >
-        <HStack spacing={3} justify="flex-start" align="center">
-          {/* Current Context Pill */}
-          <Box
-            px={3}
-            py={1}
-            borderRadius="full"
-            bg={contextPillBg}
-            _dark={{ bg: 'gray.800' }}
-          >
-            <Text fontSize="xs" fontWeight="medium" color={contextPillText} _dark={{ color: 'gray.300' }}>
-              {getCurrentContext()}
-            </Text>
-          </Box>
-        </HStack>
-      </Box>
+      {/* Zone A: Unified Command Bar (Domain Status + Actions) */}
+      <DomainStatus
+        currentUrl={activeUrl}
+        onHistoryClick={() => setHistoryOpen(true)}
+        onNewChatClick={handleNewChat}
+        onDebugClick={setIsDebugViewOpen ? () => setIsDebugViewOpen(!isDebugViewOpen) : undefined}
+        onSettingsClick={onNavigate ? () => onNavigate('/settings') : undefined}
+        isDebugViewOpen={isDebugViewOpen}
+      />
+      
+      {/* Chat History Drawer */}
+      <ChatHistoryDrawer
+        isOpen={isHistoryOpen}
+        onClose={() => setHistoryOpen(false)}
+      />
 
       {/* Zone B: Scrollable Document Stream */}
       <Box 
@@ -282,9 +300,13 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
             <Box flex="1" minW="0">
               <AutosizeTextarea
                 autoFocus
-                placeholder="What would you like me to do on this page? (e.g., fill out the form, click the button, search for products)"
+                placeholder={
+                  waitingForUserInput
+                    ? "Please provide the requested information..."
+                    : "What would you like me to do on this page? (e.g., fill out the form, click the button, search for products)"
+                }
                 value={instructions || ''}
-                isDisabled={isRunning}
+                isDisabled={isRunning && !waitingForUserInput}
                 onChange={(e) => setInstructions(e.target.value)}
                 onKeyDown={onKeyDown}
                 bg="transparent"
@@ -330,9 +352,9 @@ const TaskUI: React.FC<TaskUIProps> = ({ hasOrgKnowledge }) => {
                   aria-label="Send task"
                   icon={<Icon as={FiSend} />}
                   onClick={handleRunTask}
-                  colorScheme="blue"
+                  colorScheme={waitingForUserInput ? 'yellow' : 'blue'}
                   size="sm"
-                  isDisabled={!instructions}
+                  isDisabled={!instructions || (isRunning && !waitingForUserInput)}
                   _disabled={{
                     opacity: 0.5,
                     cursor: 'not-allowed',

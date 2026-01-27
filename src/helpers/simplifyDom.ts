@@ -104,7 +104,8 @@ export async function getSimplifiedDom(tabId?: number): Promise<SimplifiedDomRes
   // Use more retries for DOM extraction as content script may need time to load
   let fullDom: string | null = null;
   try {
-    fullDom = await callRPC('getAnnotatedDOM', [], 5); // Increased retries for initial DOM load
+    // Type assertion needed because callRPC can return multiple types depending on method
+    fullDom = await callRPC('getAnnotatedDOM', [], 5) as string; // Increased retries for initial DOM load
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('Failed to get annotated DOM:', errorMessage);
@@ -363,6 +364,11 @@ function generateSimplifiedDom(
     'data-ax-id', // Primary accessibility identifier (Task 6)
     'data-ax-source', // Mark accessibility-derived elements (Task 5)
     'data-ax-index', // Accessibility element index (Task 5)
+    // Critical for expected outcome generation: popup/dropdown indicators
+    // When hasPopup is set, clicking opens a popup instead of navigating (no URL change)
+    'aria-haspopup', // Values: 'menu', 'listbox', 'tree', 'grid', 'dialog', 'true'
+    'aria-expanded', // Values: 'true', 'false' - current expanded state
+    'data-has-popup', // Alternative/supplemental popup indicator
   ];
 
   for (const attr of allowedAttributes) {

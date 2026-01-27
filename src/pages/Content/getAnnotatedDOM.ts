@@ -83,3 +83,123 @@ export function getUniqueElementSelectorId(id: number): string {
   element.setAttribute(SPADEWORKS_ELEMENT_SELECTOR, uniqueId);
   return uniqueId;
 }
+
+/**
+ * Element snapshot info for DOM change tracking
+ */
+export interface ElementSnapshotInfo {
+  id?: string;
+  tagName: string;
+  role?: string;
+  name?: string;
+  text?: string;
+  interactive: boolean;
+}
+
+/**
+ * Get a snapshot of all interactive elements on the page
+ * Used for tracking what changed after an action (e.g., dropdown appearing)
+ */
+export function getInteractiveElementSnapshot(): ElementSnapshotInfo[] {
+  const elements: ElementSnapshotInfo[] = [];
+  
+  // Query all interactive elements (including those that may have just appeared)
+  const selectors = [
+    'a',
+    'button',
+    'input',
+    'select',
+    'textarea',
+    '[role="button"]',
+    '[role="link"]',
+    '[role="menuitem"]',
+    '[role="option"]',
+    '[role="menuitemcheckbox"]',
+    '[role="menuitemradio"]',
+    '[role="tab"]',
+    '[role="treeitem"]',
+    '[role="listitem"]',
+    '[onclick]',
+    '[data-interactive="true"]',
+    '[style*="cursor: pointer"]',
+  ].join(', ');
+  
+  const interactiveElements = document.querySelectorAll(selectors);
+  
+  interactiveElements.forEach((el) => {
+    if (!(el instanceof HTMLElement)) return;
+    
+    const style = window.getComputedStyle(el);
+    
+    // Skip hidden elements
+    if (style.display === 'none' || 
+        style.visibility === 'hidden' || 
+        style.opacity === '0' ||
+        el.getAttribute('aria-hidden') === 'true') {
+      return;
+    }
+    
+    const id = el.getAttribute('data-id') || el.getAttribute('id') || undefined;
+    const role = el.getAttribute('role') || undefined;
+    const name = el.getAttribute('aria-label') || 
+                 el.getAttribute('name') || 
+                 el.getAttribute('placeholder') || 
+                 undefined;
+    const text = el.textContent?.trim().substring(0, 100) || undefined;
+    
+    elements.push({
+      id,
+      tagName: el.tagName,
+      role,
+      name,
+      text,
+      interactive: isInteractive(el, style) || el.hasAttribute('role'),
+    });
+  });
+  
+  return elements;
+}
+
+/**
+ * Wait for a specific element to appear on the page
+ * Used by the waitForElement action
+ */
+export function waitForElementAppearance(
+  selector: { role?: string; text?: string; id?: string },
+  timeout: number = 5000
+): Promise<{ found: boolean; element?: ElementSnapshotInfo }> {
+  return new Promise((resolve) => {
+    const startTime = Date.now();
+    
+    function check() {
+      const snapshot = getInteractiveElementSnapshot();
+      
+      for (const element of snapshot) {
+        let matches = true;
+        
+        if (selector.role && element.role !== selector.role) {
+          matches = false;
+        }
+        if (selector.text && !element.text?.toLowerCase().includes(selector.text.toLowerCase())) {
+          matches = false;
+        }
+        if (selector.id && element.id !== selector.id) {
+          matches = false;
+        }
+        
+        if (matches) {
+          resolve({ found: true, element });
+          return;
+        }
+      }
+      
+      if (Date.now() - startTime < timeout) {
+        setTimeout(check, 100);
+      } else {
+        resolve({ found: false });
+      }
+    }
+    
+    check();
+  });
+}

@@ -8,32 +8,28 @@
  * Reference: UX Refactor - User-Centric Chat Design
  */
 
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useEffect } from 'react';
 import {
   VStack,
   HStack,
   Box,
   Text,
   useColorModeValue,
-  Badge,
-  Accordion,
-  AccordionItem,
-  AccordionButton,
-  AccordionPanel,
-  AccordionIcon,
-  Divider,
 } from '@chakra-ui/react';
 import { useAppState } from '../state/store';
 import { DisplayHistoryEntry } from '../state/currentTask';
 import ActionCard from './ActionCard';
 import ThoughtChain from './ThoughtChain';
-import type { Conversation } from '../state/conversationHistory';
 import { transformThought } from '../helpers/userFriendlyMessages';
-import ChatStream from './ChatStream';
+import ChatTurn from './ChatTurn';
+import { groupHistoryIntoTurns } from '../helpers/groupHistoryIntoTurns';
 
 const TaskHistoryUser: React.FC = () => {
   const taskHistory = useAppState((state) => state.currentTask.displayHistory);
-  const messages = useAppState((state) => state.currentTask.messages);
+  // Safety check: Ensure messages is always an array (never undefined)
+  const messagesRaw = useAppState((state) => state.currentTask.messages);
+  const messages = Array.isArray(messagesRaw) ? messagesRaw : [];
+  
   const taskStatus = useAppState((state) => state.currentTask.status);
   const instructions = useAppState((state) => state.currentTask.instructions);
   const sessionId = useAppState((state) => state.currentTask.sessionId);
@@ -41,31 +37,26 @@ const TaskHistoryUser: React.FC = () => {
   const accessibilityElements = useAppState((state) => state.currentTask.accessibilityElements);
   const correctionHistory = useAppState((state) => state.currentTask.correctionHistory);
   const verificationHistory = useAppState((state) => state.currentTask.verificationHistory);
-  const previousConversations = useAppState((state) => state.conversationHistory.conversations);
+  // NOTE: previousConversations removed - now handled by ChatHistoryDrawer
   
   // Load messages on mount if sessionId exists
   useEffect(() => {
     if (sessionId && messages.length === 0) {
       loadMessages(sessionId);
     }
-  }, [sessionId, messages.length, loadMessages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, messages.length]); // loadMessages is stable from Zustand, no need in deps
 
   // Color definitions - ALL at component top level
   const userMessageBg = useColorModeValue('blue.50', 'blue.900/20');
   const assistantMessageBg = useColorModeValue('transparent', 'transparent');
   const textColor = useColorModeValue('gray.900', 'gray.100');
-  const errorBg = useColorModeValue('red.50', 'red.900/20');
   const errorText = useColorModeValue('red.800', 'red.300');
   const warningBg = useColorModeValue('orange.50', 'orange.900/20');
   const warningText = useColorModeValue('orange.800', 'orange.300');
   const successColor = useColorModeValue('green.600', 'green.400');
   const technicalDetailColor = useColorModeValue('gray.600', 'gray.400');
   const warningBorderColor = useColorModeValue('orange.400', 'orange.500');
-  const conversationHeaderBg = useColorModeValue('gray.50', 'gray.800');
-  const conversationHeaderText = useColorModeValue('gray.700', 'gray.300');
-  const conversationBorder = useColorModeValue('gray.200', 'gray.700');
-  const dateTextColor = useColorModeValue('gray.500', 'gray.400');
-  const conversationHoverBg = useColorModeValue('gray.100', 'gray.700');
 
   // Group technical details for ThoughtChain
   // NOTE: This hook MUST be called before any early returns to comply with Rules of Hooks
@@ -75,6 +66,87 @@ const TaskHistoryUser: React.FC = () => {
     // Accessibility elements count
     if (accessibilityElements && accessibilityElements.length > 0) {
       details.push(`Using ${accessibilityElements.length} accessibility-derived interactive elements`);
+    }
+    
+    // Reasoning layer information (from latest message) - Enhanced v2.0
+    if (messages.length > 0) {
+      const latestMessage = messages[messages.length - 1];
+      if (latestMessage.meta?.reasoning) {
+        const reasoning = latestMessage.meta.reasoning;
+        const sourceLabel = reasoning.source === 'MEMORY' ? 'memory' 
+          : reasoning.source === 'PAGE' ? 'page analysis'
+          : reasoning.source === 'WEB_SEARCH' ? 'web search'
+          : 'user input needed';
+        const confidencePercent = typeof reasoning.confidence === 'number' && !isNaN(reasoning.confidence)
+          ? Math.round(reasoning.confidence * 100)
+          : null;
+        
+        details.push(`Reasoning: ${sourceLabel}${confidencePercent !== null ? ` (${confidencePercent}% confidence)` : ''}`);
+        
+        // Evidence information
+        if (reasoning.evidence) {
+          const qualityLabel = reasoning.evidence.quality === 'high' ? 'High' 
+            : reasoning.evidence.quality === 'medium' ? 'Medium' 
+            : 'Low';
+          details.push(`Evidence Quality: ${qualityLabel}`);
+          
+          if (Array.isArray(reasoning.evidence.sources) && reasoning.evidence.sources.length > 0) {
+            details.push(`Evidence Sources: ${reasoning.evidence.sources.join(', ')}`);
+          }
+          
+          if (Array.isArray(reasoning.evidence.gaps) && reasoning.evidence.gaps.length > 0) {
+            details.push(`Gaps: ${reasoning.evidence.gaps.join(', ')}`);
+          }
+        }
+        
+        if (reasoning.reasoning && typeof reasoning.reasoning === 'string' && reasoning.reasoning.trim().length > 0) {
+          details.push(reasoning.reasoning);
+        }
+        
+        // Enhanced missingInfo structure
+        if (reasoning.missingInfo && Array.isArray(reasoning.missingInfo) && reasoning.missingInfo.length > 0) {
+          const missingFields = reasoning.missingInfo
+            .map((item) => {
+              if (typeof item === 'string') {
+                return item;
+              }
+              return `${item.field} (${item.type === 'EXTERNAL_KNOWLEDGE' ? 'can search' : 'need input'})`;
+            })
+            .join(', ');
+          details.push(`Missing: ${missingFields}`);
+        }
+        
+        // Search iteration information
+        if (reasoning.searchIteration) {
+          const iter = reasoning.searchIteration;
+          details.push(`Search Iteration: ${iter.attempt}/${iter.maxAttempts}`);
+          if (iter.refinedQuery) {
+            details.push(`Refined Query: ${iter.refinedQuery}`);
+          }
+          if (iter.evaluationResult) {
+            const evalResult = iter.evaluationResult;
+            details.push(`Evaluation: Solved=${evalResult.solved}, Confidence=${Math.round(evalResult.confidence * 100)}%`);
+          }
+        }
+      }
+      
+      // Reasoning context (search summary) - Enhanced v2.0
+      if (latestMessage.meta?.reasoningContext?.searchPerformed) {
+        if (latestMessage.meta.reasoningContext.searchSummary) {
+          const summary = typeof latestMessage.meta.reasoningContext.searchSummary === 'string'
+            ? latestMessage.meta.reasoningContext.searchSummary
+            : String(latestMessage.meta.reasoningContext.searchSummary || '');
+          if (summary.trim().length > 0) {
+            details.push(`Search results: ${summary}`);
+          }
+        }
+        if (typeof latestMessage.meta.reasoningContext.searchIterations === 'number') {
+          details.push(`Search iterations: ${latestMessage.meta.reasoningContext.searchIterations}`);
+        }
+        if (latestMessage.meta.reasoningContext.finalQuery) {
+          details.push(`Final query: ${latestMessage.meta.reasoningContext.finalQuery}`);
+        }
+      }
     }
     
     // Correction details
@@ -102,33 +174,97 @@ const TaskHistoryUser: React.FC = () => {
     }
     
     return details;
-  }, [accessibilityElements, correctionHistory, verificationHistory]);
+  }, [accessibilityElements, correctionHistory, verificationHistory, messages]);
+
+  // Group messages into turns for turn-based layout
+  // NOTE: This hook MUST be called before any early returns to comply with Rules of Hooks
+  // CRITICAL: This handles race conditions during Multi-Chat operations
+  const turns = useMemo(() => {
+    // Safety check: Ensure messages is a valid array
+    if (!Array.isArray(messages)) {
+      console.warn('TaskHistoryUser: messages is not an array:', typeof messages);
+      return [];
+    }
+    
+    if (messages.length === 0) {
+      return [];
+    }
+    
+    // Filter out any undefined/null/invalid messages before grouping
+    // This prevents crashes when messages array contains partial data during state updates
+    const validMessages = messages.filter((msg): msg is NonNullable<typeof msg> => {
+      if (msg === null || msg === undefined) return false;
+      if (typeof msg !== 'object') return false;
+      if (!('id' in msg) || typeof msg.id !== 'string' || !msg.id) return false;
+      if (!('role' in msg) || typeof msg.role !== 'string') return false;
+      return true;
+    });
+    
+    if (validMessages.length === 0) {
+      return [];
+    }
+    
+    try {
+      const groupedTurns = groupHistoryIntoTurns(validMessages);
+      
+      // Double-check: Filter out any invalid turns after grouping
+      // This is a safety net for race conditions
+      const safeTurns = groupedTurns.filter((turn): turn is NonNullable<typeof turn> => {
+        if (!turn) return false;
+        if (!turn.userMessage) return false;
+        if (typeof turn.userMessage.id !== 'string' || !turn.userMessage.id) return false;
+        // Ensure aiMessages is always an array
+        if (!Array.isArray(turn.aiMessages)) {
+          turn.aiMessages = [];
+        }
+        return true;
+      });
+      
+      return safeTurns;
+    } catch (error) {
+      console.error('TaskHistoryUser: Error grouping messages into turns:', error);
+      return [];
+    }
+  }, [messages]);
+  
+  // Debug logging: Log turns before rendering
+  useEffect(() => {
+    if (turns.length > 0) {
+      console.log('TaskHistoryUser: Rendering turns:', turns.length, turns);
+    }
+  }, [turns]);
 
   // Show component if there's messages, history, a running task, or instructions (user has started a task)
   const hasContent = messages.length > 0 || taskHistory.length > 0 || taskStatus === 'running' || (instructions && instructions.trim());
   
+  // Prefer messages over displayHistory (new structure)
+  const useNewStructure = messages.length > 0;
+  
   if (!hasContent) {
     return null;
   }
-  
-  // Prefer messages over displayHistory (new structure)
-  const useNewStructure = messages.length > 0;
 
   // Extract user-friendly message from entry
   const getMessage = (entry: DisplayHistoryEntry): string | null => {
     // Use thought as primary message, transformed to user-friendly
-    if (entry.thought && entry.thought.trim()) {
-      return transformThought(entry.thought);
+    // Ensure thought is a string before processing
+    const thoughtStr = typeof entry.thought === 'string' ? entry.thought : String(entry.thought || '');
+    if (thoughtStr && thoughtStr.trim()) {
+      const transformed = transformThought(thoughtStr);
+      // Ensure transformThought returns a string
+      return typeof transformed === 'string' ? transformed : String(transformed || '');
     }
     
     // For finish/fail actions, return a simple message
     if (entry.parsedAction && 'parsedAction' in entry.parsedAction) {
       const action = entry.parsedAction.parsedAction;
-      if (action.name === 'finish') {
-        return 'Task completed successfully!';
-      }
-      if (action.name === 'fail') {
-        return 'Task failed.';
+      if (action && typeof action === 'object' && 'name' in action) {
+        if (action.name === 'finish') {
+          return 'Task completed successfully!';
+        }
+        if (action.name === 'fail') {
+          return 'Task failed.';
+        }
       }
     }
     
@@ -156,7 +292,11 @@ const TaskHistoryUser: React.FC = () => {
   };
 
   // Format date for display
-  const formatDate = (date: Date): string => {
+  const formatDate = (date: Date | undefined | null): string => {
+    if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
+      return 'Unknown date';
+    }
+    
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
@@ -167,7 +307,9 @@ const TaskHistoryUser: React.FC = () => {
     if (diffMins < 60) return `${diffMins}m ago`;
     if (diffHours < 24) return `${diffHours}h ago`;
     if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString();
+    
+    const dateStr = date.toLocaleDateString();
+    return typeof dateStr === 'string' ? dateStr : String(dateStr || 'Unknown date');
   };
 
   // Render a conversation entry (reusable for both previous and current)
@@ -257,95 +399,48 @@ const TaskHistoryUser: React.FC = () => {
 
   return (
     <VStack align="stretch" spacing={3} w="100%">
-      {/* Previous Conversations */}
-      {previousConversations.length > 0 && (
-        <Box w="100%">
-          <Accordion allowMultiple defaultIndex={[]} w="100%">
-            {previousConversations.map((conversation: Conversation) => {
-              const statusColor = conversation.status === 'success' 
-                ? successColor 
-                : conversation.status === 'error' 
-                ? errorText 
-                : warningText;
-              
-              return (
-                <AccordionItem
-                  key={conversation.id}
-                  borderWidth="1px"
-                  borderColor={conversationBorder}
-                  borderRadius="md"
-                  mb={2}
-                  bg={conversationHeaderBg}
-                >
-                  <AccordionButton
-                    px={3}
-                    py={2}
-                    _hover={{ bg: conversationHoverBg }}
-                  >
-                    <Box flex="1" textAlign="left">
-                      <HStack spacing={2}>
-                        <Text fontSize="sm" fontWeight="medium" color={conversationHeaderText} noOfLines={1}>
-                          {conversation.instructions}
-                        </Text>
-                        <Badge
-                          fontSize="xs"
-                          colorScheme={conversation.status === 'success' ? 'green' : conversation.status === 'error' ? 'red' : 'orange'}
-                        >
-                          {conversation.status}
-                        </Badge>
-                      </HStack>
-                      <Text fontSize="xs" color={dateTextColor} mt={1}>
-                        {formatDate(conversation.completedAt)}
-                        {conversation.url && ` • ${new URL(conversation.url).hostname}`}
-                      </Text>
-                    </Box>
-                    <AccordionIcon />
-                  </AccordionButton>
-                  <AccordionPanel pb={4} px={3}>
-                    <VStack align="stretch" spacing={2}>
-                      {/* User's instruction */}
-                      <Box
-                        display="flex"
-                        justifyContent="flex-end"
-                        mb={2}
-                      >
-                        <Box
-                          bg={userMessageBg}
-                          borderRadius="lg"
-                          px={4}
-                          py={2}
-                          maxW="80%"
-                        >
-                          <Text fontSize="sm" color={textColor}>
-                            {conversation.instructions}
-                          </Text>
-                        </Box>
-                      </Box>
-                      
-                      {/* Conversation history entries */}
-                      {conversation.displayHistory.map((entry, index) =>
-                        renderConversationEntry(entry, index, true)
-                      )}
-                    </VStack>
-                  </AccordionPanel>
-                </AccordionItem>
-              );
-            })}
-          </Accordion>
-        </Box>
-      )}
+      {/* NOTE: Previous Conversations section removed - now handled by ChatHistoryDrawer */}
+      {/* Users can access chat history via the history drawer in the header */}
 
-      {/* Divider between previous and current conversation */}
-      {previousConversations.length > 0 && hasContent && (
-        <Divider borderColor={conversationBorder} />
-      )}
-
-      {/* Current Task - Use new ChatStream if messages available, otherwise fallback to old structure */}
+      {/* Current Task - Use new Turn-Based layout if messages available, otherwise fallback to old structure */}
       {useNewStructure ? (
-        <ChatStream
-          messages={messages}
-          isProcessing={taskStatus === 'running'}
-        />
+        <Box w="100%">
+          <VStack align="stretch" spacing={0}>
+            {/* CRITICAL: Safe rendering with explicit null checks to prevent React error #130 */}
+            {Array.isArray(turns) && turns.length > 0 ? (
+              turns.map((turn, index) => {
+                // SAFETY CHECK: Ensure turn and turn.userMessage exist and have valid id
+                // This is the last line of defense against race condition crashes
+                if (!turn) {
+                  console.warn(`TaskHistoryUser: turn at index ${index} is null/undefined`);
+                  return null;
+                }
+                
+                if (!turn.userMessage) {
+                  console.warn(`TaskHistoryUser: turn.userMessage at index ${index} is null/undefined:`, turn);
+                  return null;
+                }
+                
+                if (!turn.userMessage.id || typeof turn.userMessage.id !== 'string') {
+                  console.warn(`TaskHistoryUser: turn.userMessage.id at index ${index} is invalid:`, turn.userMessage);
+                  return null;
+                }
+                
+                // Generate a stable key
+                const turnKey = turn.userMessage.id;
+                
+                return (
+                  <ChatTurn
+                    key={turnKey}
+                    turn={turn}
+                    isActive={index === turns.length - 1}
+                    isProcessing={taskStatus === 'running' && index === turns.length - 1}
+                  />
+                );
+              })
+            ) : null}
+          </VStack>
+        </Box>
       ) : (
         <>
           {/* Legacy displayHistory structure (backward compatibility) */}
@@ -365,7 +460,9 @@ const TaskHistoryUser: React.FC = () => {
             maxW="80%"
           >
             <Text fontSize="sm" color={textColor}>
-              {instructions}
+              {typeof instructions === 'string' 
+                ? instructions 
+                : String(instructions || '')}
             </Text>
           </Box>
         </Box>

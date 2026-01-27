@@ -7,6 +7,7 @@ import { createUiSlice, UiSlice } from './ui';
 import { createSettingsSlice, SettingsSlice } from './settings';
 import { createDebugSlice, DebugSlice } from './debug';
 import { createConversationHistorySlice, ConversationHistorySlice } from './conversationHistory';
+import { createSessionsSlice, SessionsSlice } from './sessions';
 
 export type StoreType = {
   currentTask: CurrentTaskSlice;
@@ -14,6 +15,7 @@ export type StoreType = {
   settings: SettingsSlice;
   debug: DebugSlice;
   conversationHistory: ConversationHistorySlice;
+  sessions: SessionsSlice;
 };
 
 export type MyStateCreator<T> = StateCreator<
@@ -32,6 +34,7 @@ export const useAppState = create<StoreType>()(
         settings: createSettingsSlice(...a),
         debug: createDebugSlice(...a),
         conversationHistory: createConversationHistorySlice(...a),
+        sessions: createSessionsSlice(...a),
       }))
     ),
     {
@@ -60,6 +63,11 @@ export const useAppState = create<StoreType>()(
             completedAt: conv.completedAt.toISOString(),
           })),
         },
+        sessions: {
+          sessions: state.sessions.sessions, // Sessions use timestamps (numbers), no conversion needed
+          currentSessionId: state.sessions.currentSessionId,
+          isHistoryOpen: state.sessions.isHistoryOpen,
+        },
       }),
       merge: (persistedState, currentState) => {
         const merged = merge(currentState, persistedState);
@@ -82,6 +90,11 @@ export const useAppState = create<StoreType>()(
               completedAt,
             };
           });
+        }
+        // Sessions use timestamps (numbers), no conversion needed
+        // But ensure isHistoryOpen is boolean
+        if (merged.sessions) {
+          merged.sessions.isHistoryOpen = Boolean(merged.sessions.isHistoryOpen);
         }
         return merged;
       },

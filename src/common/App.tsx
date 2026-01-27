@@ -16,25 +16,16 @@ import {
   Spinner,
   Flex,
   useColorModeValue,
-  Alert,
-  AlertIcon,
-  IconButton,
-  Icon,
 } from '@chakra-ui/react';
-import { InfoIcon } from '@chakra-ui/icons';
 import React, { useEffect, useState } from 'react';
-import { FaBug } from 'react-icons/fa';
 import { apiClient } from '../api/client';
 import { useAppState } from '../state/store';
 import Login from './Login';
 import TaskUI from './TaskUI';
 import SystemView from './SystemView';
-import OptionsDropdown from './OptionsDropdown';
 import SettingsView from './SettingsView';
 import { ThemeProvider } from './ThemeProvider';
-import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
 import ErrorBoundary from './ErrorBoundary';
-import logo from '../assets/img/icon-128.png';
 
 type Route = '/' | '/settings';
 
@@ -160,22 +151,6 @@ const App = () => {
 
   // Dark mode color values - defined at component top level
   const bgColor = useColorModeValue('white', 'gray.900');
-  const borderColor = useColorModeValue('gray.200', 'gray.700');
-  const headerBg = useColorModeValue('white', 'gray.900');
-  const headerBorder = useColorModeValue('gray.200', 'gray.700');
-  
-  // Get developer mode state
-  const developerMode = useAppState((state) => state.settings.developerMode);
-  
-  // Debug toggle button colors - matching Settings button exactly when inactive
-  const debugButtonBorderColor = useColorModeValue('gray.300', 'gray.600');
-  const debugButtonBg = useColorModeValue('white', 'gray.800');
-  const debugButtonHoverBg = useColorModeValue('gray.100', 'gray.700');
-  const debugButtonIconColor = useColorModeValue('gray.700', 'gray.300');
-  // Active state (when debug view is open)
-  const debugButtonActiveBg = useColorModeValue('red.100', 'red.900/30');
-  const debugButtonActiveColor = useColorModeValue('red.600', 'red.400');
-  const debugButtonActiveBorderColor = useColorModeValue('red.300', 'red.600');
 
   if (checkingSession) {
     return (
@@ -211,58 +186,7 @@ const App = () => {
           overflow="hidden"
           bg={bgColor}
         >
-          {/* Fixed Header - Never Shrinks */}
-          {user && (
-            <ErrorBoundary>
-              <Box
-                as="header"
-                flex="none"
-                zIndex={10}
-                bg={headerBg}
-                borderBottomWidth="1px"
-                borderColor={headerBorder}
-                px={4}
-                py={3}
-                shadow="sm"
-              >
-                <HStack spacing={3} alignItems="center" justifyContent="space-between" minW="0">
-                  <HStack spacing={3} alignItems="center" minW="0" flex={1}>
-                    <img
-                      src={logo}
-                      width={28}
-                      height={28}
-                      className="App-logo"
-                      alt="logo"
-                      style={{ borderRadius: '6px', flexShrink: 0 }}
-                    />
-                  </HStack>
-                  <HStack spacing={2} flexShrink={0}>
-                    {/* Debug Toggle Button - Only visible when developer mode is enabled */}
-                    {developerMode && (
-                      <IconButton
-                        aria-label={isDebugViewOpen ? 'Switch to Chat view' : 'Switch to Debug view'}
-                        icon={<Icon as={FaBug} />}
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setIsDebugViewOpen(!isDebugViewOpen)}
-                        bg={isDebugViewOpen ? debugButtonActiveBg : debugButtonBg}
-                        borderColor={isDebugViewOpen ? debugButtonActiveBorderColor : debugButtonBorderColor}
-                        color={isDebugViewOpen ? debugButtonActiveColor : debugButtonIconColor}
-                        _hover={{
-                          bg: isDebugViewOpen ? debugButtonActiveBg : debugButtonHoverBg,
-                          borderColor: isDebugViewOpen ? debugButtonActiveBorderColor : useColorModeValue('gray.400', 'gray.500'),
-                        }}
-                        _focusVisible={{
-                          boxShadow: 'outline',
-                        }}
-                      />
-                    )}
-                    <OptionsDropdown onNavigate={setCurrentRoute} />
-                  </HStack>
-                </HStack>
-              </Box>
-            </ErrorBoundary>
-          )}
+          {/* Header removed - functionality moved to DomainStatus bar in TaskUI */}
 
           {/* Content Area - Let child components handle their own scrolling */}
           <Box
@@ -280,9 +204,14 @@ const App = () => {
                 ) : (
                   // Conditional rendering based on debug toggle
                   isDebugViewOpen ? (
-                    <SystemView />
+                    <SystemView onBackToChat={() => setIsDebugViewOpen(false)} />
                   ) : (
-                    <TaskUI hasOrgKnowledge={hasOrgKnowledge} />
+                    <TaskUI 
+                      hasOrgKnowledge={hasOrgKnowledge}
+                      isDebugViewOpen={isDebugViewOpen}
+                      setIsDebugViewOpen={setIsDebugViewOpen}
+                      onNavigate={setCurrentRoute}
+                    />
                   )
                 )
               ) : (

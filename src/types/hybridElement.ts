@@ -29,6 +29,10 @@ export interface HybridElement {
   attributes: Record<string, string>; // Combined attributes from both sources
   source: 'accessibility' | 'dom' | 'hybrid'; // Primary data source
   backendDOMNodeId?: number; // Backend DOM node ID for mapping (if available)
+  // Popup/dropdown indicators (critical for expected outcome generation)
+  // When hasPopup is set, clicking this element opens a popup instead of navigating
+  hasPopup?: string; // 'menu', 'listbox', 'tree', 'grid', 'dialog', 'true', or undefined
+  expanded?: boolean; // Current expanded state (for dropdowns)
 }
 
 /**

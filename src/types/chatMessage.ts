@@ -65,6 +65,39 @@ export type ChatMessage = {
       completionTokens: number;
     };
     expectedOutcome?: string;
+    // Reasoning layer metadata (optional, Enhanced v2.0)
+    reasoning?: {
+      source: 'MEMORY' | 'PAGE' | 'WEB_SEARCH' | 'ASK_USER';
+      confidence: number; // 0.0 to 1.0 (REQUIRED)
+      reasoning: string; // User-friendly explanation
+      missingInfo?: Array<{
+        field: string;
+        type: 'EXTERNAL_KNOWLEDGE' | 'PRIVATE_DATA';
+        description: string;
+      }>; // Enhanced structure with type classification
+      evidence?: {
+        sources: string[];
+        quality: 'high' | 'medium' | 'low';
+        gaps: string[];
+      }; // Evidence supporting the decision
+      searchIteration?: {
+        attempt: number;
+        maxAttempts: number;
+        refinedQuery?: string;
+        evaluationResult?: {
+          solved: boolean;
+          shouldRetry: boolean;
+          shouldAskUser: boolean;
+          confidence: number;
+        };
+      }; // Iterative search information
+    };
+    reasoningContext?: {
+      searchPerformed?: boolean;
+      searchSummary?: string;
+      searchIterations?: number; // Number of search iterations
+      finalQuery?: string; // Final refined query
+    };
   };
   
   // Error information (if message represents a failure)
@@ -72,4 +105,12 @@ export type ChatMessage = {
     message: string;
     code: string;
   };
+  
+  // User input request (when status is 'needs_user_input')
+  userQuestion?: string; // Question to ask user
+  missingInformation?: Array<{
+    field: string;
+    type: 'EXTERNAL_KNOWLEDGE' | 'PRIVATE_DATA';
+    description: string;
+  }>; // Enhanced structure with type classification
 };

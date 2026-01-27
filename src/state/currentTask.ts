@@ -14,7 +14,7 @@ import {
 } from '../helpers/disableExtensions';
 import { callDOMAction } from '../helpers/domActions';
 import { parseAction, ParsedAction } from '../helpers/parseAction';
-import { apiClient } from '../api/client';
+import { apiClient, type DOMChangeInfo } from '../api/client';
 import templatize from '../helpers/shrinkHTML/templatize';
 import { getSimplifiedDom } from '../helpers/simplifyDom';
 import { sleep } from '../helpers/utils';
@@ -27,6 +27,32 @@ import type { CoverageMetrics } from '../helpers/accessibilityFirst';
 import { createAccessibilityMapping } from '../helpers/accessibilityMapping';
 import type { ChatMessage, ActionStep } from '../types/chatMessage';
 import type { ActionExecutionResult } from '../helpers/domActions';
+import {
+  getInteractiveElementSnapshot,
+  waitForDOMChangesAfterAction,
+  formatDOMChangeReport,
+  type DOMChangeReport,
+  type ElementInfo,
+} from '../helpers/domWaiting';
+
+/**
+ * Generate a UUID v4
+ * Uses crypto.randomUUID() if available (Chrome 92+), otherwise falls back to manual generation
+ */
+function generateUUID(): string {
+  // Use Web Crypto API if available (Chrome extensions support this)
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  
+  // Fallback: Generate UUID v4 manually
+  // Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 /**
  * Plan step structure from Manus orchestrator
@@ -91,6 +117,7 @@ export type DisplayHistoryEntry = {
   };
   parsedAction: ParsedAction;
   expectedOutcome?: string; // Expected outcome for verification (Task 9)
+  domChanges?: DOMChangeReport; // DOM changes after action execution
 };
 
 export type CurrentTaskSlice = {
@@ -103,6 +130,7 @@ export type CurrentTaskSlice = {
   createdAt: Date | null; // When the current task started
   url: string | null; // URL where the task is being performed
   lastActionResult: ActionExecutionResult | null; // Last action execution result (for error reporting)
+  lastDOMChanges: DOMChangeInfo | null; // DOM changes after last action (for server context)
   accessibilityTree: AccessibilityTree | null; // Accessibility tree for UI display (Task 4)
   accessibilityElements: SimplifiedAXElement[] | null; // Filtered accessibility elements (Task 5)
   accessibilityMapping: AccessibilityMapping | null; // Bidirectional mapping for action targeting (Task 6)
@@ -130,6 +158,7 @@ export type CurrentTaskSlice = {
   actions: {
     runTask: (onError: (error: string) => void) => Promise<void>;
     interrupt: () => void;
+    startNewChat: () => void; // Reset state for new chat
     saveMessages: () => Promise<void>; // Save messages to chrome.storage
     loadMessages: (sessionId: string) => Promise<void>; // Load messages from chrome.storage or API
     addUserMessage: (content: string) => void; // Add user message to chat
@@ -151,6 +180,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
   createdAt: null,
   url: null,
   lastActionResult: null,
+  lastDOMChanges: null,
   accessibilityTree: null,
   accessibilityElements: null,
   accessibilityMapping: null,
@@ -185,22 +215,69 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
 
       const instructions = get().ui.instructions;
 
-      if (!instructions || get().currentTask.status === 'running') return;
-
-      set((state) => {
-        state.currentTask.instructions = instructions;
-        state.currentTask.displayHistory = [];
-        state.currentTask.messages = [];
-        state.currentTask.taskId = null; // Reset taskId for new task
-        state.currentTask.sessionId = null; // Reset sessionId for new task
-        state.currentTask.status = 'running';
-        state.currentTask.actionStatus = 'attaching-debugger';
-        state.currentTask.createdAt = new Date();
-        state.currentTask.lastActionResult = null;
-      });
+      // Type guard: Ensure instructions is a string and not empty
+      const safeInstructions = typeof instructions === 'string' ? instructions : String(instructions || '').trim();
       
-      // Add user message to chat
-      get().currentTask.actions.addUserMessage(instructions);
+      // Check if we're waiting for user input (status is 'idle' but we have a pending user question)
+      const isWaitingForInput = get().currentTask.status === 'idle' && 
+                                get().currentTask.messages.length > 0 &&
+                                get().currentTask.messages[get().currentTask.messages.length - 1]?.userQuestion;
+      
+      // Don't start if already running (unless we're resuming from user input)
+      if (get().currentTask.status === 'running' && !isWaitingForInput) return;
+      
+      // Don't start if no instructions (unless we're resuming from user input with new instructions)
+      if (!safeInstructions && !isWaitingForInput) return;
+
+      // If resuming from user input, don't clear messages/history
+      // Just update instructions and continue
+      if (isWaitingForInput) {
+        set((state) => {
+          state.currentTask.instructions = safeInstructions;
+          state.currentTask.status = 'running';
+          state.currentTask.actionStatus = 'attaching-debugger';
+          // Update the last message status to indicate we're continuing
+          const lastMessage = state.currentTask.messages[state.currentTask.messages.length - 1];
+          if (lastMessage && lastMessage.userQuestion) {
+            lastMessage.status = 'sent'; // Mark the question as sent, we're now continuing
+          }
+        });
+        
+        // Add user's response as a new user message
+        get().currentTask.actions.addUserMessage(safeInstructions);
+      } else {
+        // New task - clear everything
+        set((state) => {
+          state.currentTask.instructions = safeInstructions;
+          state.currentTask.displayHistory = [];
+          // CRITICAL: Always initialize messages as empty array, NEVER undefined
+          state.currentTask.messages = [];
+          state.currentTask.taskId = null; // Reset taskId for new task
+          state.currentTask.sessionId = null; // Reset sessionId for new task
+          state.currentTask.status = 'running';
+          state.currentTask.actionStatus = 'attaching-debugger';
+          state.currentTask.createdAt = new Date();
+          state.currentTask.lastActionResult = null;
+          state.currentTask.lastDOMChanges = null;
+        });
+        
+        // Safety: Ensure messages array exists before adding user message
+        // This prevents race condition where addUserMessage runs before state update completes
+        const currentMessages = get().currentTask.messages;
+        if (!Array.isArray(currentMessages)) {
+          set((state) => {
+            state.currentTask.messages = [];
+          });
+        }
+        
+        // Add user message to chat
+        get().currentTask.actions.addUserMessage(safeInstructions);
+      }
+      
+      // Generate session title from first few words of instructions
+      const sessionTitle = safeInstructions.length > 50 
+        ? safeInstructions.substring(0, 50) + '...' 
+        : safeInstructions;
 
       try {
         const activeTab = (
@@ -344,6 +421,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             const currentTaskId = get().currentTask.taskId;
             const currentSessionId = get().currentTask.sessionId;
             const lastActionResult = get().currentTask.lastActionResult;
+            const lastDOMChanges = get().currentTask.lastDOMChanges;
 
             // Get debug actions for logging
             const addNetworkLog = get().debug?.actions.addNetworkLog;
@@ -362,10 +440,10 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 }
               : undefined;
 
-            // Call agentInteract API with logging and error information
+            // Call agentInteract API with logging, error, and DOM change information
             const response = await apiClient.agentInteract(
               url,
-              instructions,
+              safeInstructions,
               currentDom,
               currentTaskId,
               currentSessionId,
@@ -381,7 +459,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   duration: log.duration,
                   error: log.error,
                 });
-              } : undefined
+              } : undefined,
+              lastDOMChanges || undefined // Pass DOM changes if available
             );
 
             // Store taskId and sessionId if returned (first request or server-assigned)
@@ -397,6 +476,39 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             if (response.sessionId) {
               set((state) => {
                 state.currentTask.sessionId = response.sessionId!;
+              });
+              
+              // Create or update session summary using sessionService
+              const sessionTitle = safeInstructions.length > 50 
+                ? safeInstructions.substring(0, 50) + '...' 
+                : safeInstructions;
+              
+              // Update or create session entry (updateSession will create if it doesn't exist)
+              await get().sessions.actions.updateSession(response.sessionId, {
+                title: sessionTitle,
+                url: url,
+                createdAt: get().currentTask.createdAt?.getTime() || Date.now(),
+                updatedAt: Date.now(),
+                messageCount: get().currentTask.messages.length,
+                status: 'active',
+              });
+              
+              // Reload sessions to ensure state is in sync
+              await get().sessions.actions.loadSessions();
+              
+              // Set as current session
+              get().sessions.actions.setCurrentSession(response.sessionId);
+            } else if (get().currentTask.sessionId) {
+              // If we already have a sessionId but server didn't return one, update the session
+              const sessionTitle = safeInstructions.length > 50 
+                ? safeInstructions.substring(0, 50) + '...' 
+                : safeInstructions;
+              
+              await get().sessions.actions.updateSession(get().currentTask.sessionId, {
+                title: sessionTitle,
+                url: url,
+                updatedAt: Date.now(),
+                messageCount: get().currentTask.messages.length,
               });
             }
 
@@ -502,8 +614,12 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
 
             setActionStatus('performing-action');
             
+            // Type guard: Ensure response.thought and response.action are strings to prevent React error #130
+            const safeThought = typeof response.thought === 'string' ? response.thought : String(response.thought || '');
+            const safeAction = typeof response.action === 'string' ? response.action : String(response.action || '');
+            
             // Parse action string
-            const parsed = parseAction(response.action);
+            const parsed = parseAction(safeAction);
             
             // Add thought from response
             // Type guard: check if parsed has error property
@@ -511,40 +627,162 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               ? parsed
               : {
                   ...parsed,
-                  thought: response.thought,
+                  thought: safeThought,
                 };
 
             // Add to display-only history (backward compatibility)
             set((state) => {
               state.currentTask.displayHistory.push({
-                thought: response.thought,
-                action: response.action,
+                thought: safeThought,
+                action: safeAction,
                 usage: response.usage,
                 parsedAction: parsedWithThought,
                 expectedOutcome: response.expectedOutcome, // Task 9: Store expected outcome for verification context
               });
             });
             
+            // Check if this is a NEEDS_USER_INPUT response
+            const isNeedsUserInput = response.status === 'needs_user_input' || 
+                                     safeAction.toLowerCase() === 'ask_user()' ||
+                                     (response.userQuestion && response.userQuestion.trim().length > 0);
+            
             // Add assistant message to chat
             const assistantMessageId = get().currentTask.actions.addAssistantMessage(
-              response.thought,
-              response.action,
+              safeThought,
+              safeAction,
               parsedWithThought.parsedAction
             );
             
-            // Update message with usage and expected outcome
-            if (response.usage || response.expectedOutcome) {
+            // Update message with usage, expected outcome, and reasoning data
+            if (response.usage || response.expectedOutcome || response.reasoning || isNeedsUserInput) {
               set((state) => {
                 const message = state.currentTask.messages.find(m => m.id === assistantMessageId);
-                if (message && message.meta) {
+                if (message) {
+                  if (!message.meta) {
+                    message.meta = {};
+                  }
                   if (response.usage) {
                     message.meta.usage = response.usage;
                   }
                   if (response.expectedOutcome) {
                     message.meta.expectedOutcome = response.expectedOutcome;
                   }
+                  // Add reasoning metadata (Enhanced v2.0)
+                  if (response.reasoning) {
+                    message.meta.reasoning = {
+                      source: response.reasoning.source,
+                      confidence: typeof response.reasoning.confidence === 'number' 
+                        ? Math.max(0, Math.min(1, response.reasoning.confidence)) // Clamp to 0-1
+                        : 0.5,
+                      reasoning: typeof response.reasoning.reasoning === 'string'
+                        ? response.reasoning.reasoning
+                        : String(response.reasoning.reasoning || ''),
+                      missingInfo: Array.isArray(response.reasoning.missingInfo)
+                        ? response.reasoning.missingInfo.map((item) => {
+                            // Handle both old format (string) and new format (object)
+                            if (typeof item === 'string') {
+                              return {
+                                field: item,
+                                type: 'PRIVATE_DATA' as const,
+                                description: item,
+                              };
+                            }
+                            return {
+                              field: typeof item.field === 'string' ? item.field : String(item.field || ''),
+                              type: (item.type === 'EXTERNAL_KNOWLEDGE' || item.type === 'PRIVATE_DATA')
+                                ? item.type
+                                : 'PRIVATE_DATA' as const,
+                              description: typeof item.description === 'string' 
+                                ? item.description 
+                                : String(item.description || item.field || ''),
+                            };
+                          })
+                        : undefined,
+                      evidence: response.reasoning.evidence ? {
+                        sources: Array.isArray(response.reasoning.evidence.sources)
+                          ? response.reasoning.evidence.sources.map(s => typeof s === 'string' ? s : String(s || ''))
+                          : [],
+                        quality: (response.reasoning.evidence.quality === 'high' || 
+                                 response.reasoning.evidence.quality === 'medium' || 
+                                 response.reasoning.evidence.quality === 'low')
+                          ? response.reasoning.evidence.quality
+                          : 'medium' as const,
+                        gaps: Array.isArray(response.reasoning.evidence.gaps)
+                          ? response.reasoning.evidence.gaps.map(g => typeof g === 'string' ? g : String(g || ''))
+                          : [],
+                      } : undefined,
+                      searchIteration: response.reasoning.searchIteration ? {
+                        attempt: typeof response.reasoning.searchIteration.attempt === 'number'
+                          ? response.reasoning.searchIteration.attempt
+                          : 1,
+                        maxAttempts: typeof response.reasoning.searchIteration.maxAttempts === 'number'
+                          ? response.reasoning.searchIteration.maxAttempts
+                          : 3,
+                        refinedQuery: typeof response.reasoning.searchIteration.refinedQuery === 'string'
+                          ? response.reasoning.searchIteration.refinedQuery
+                          : undefined,
+                        evaluationResult: response.reasoning.searchIteration.evaluationResult ? {
+                          solved: Boolean(response.reasoning.searchIteration.evaluationResult.solved),
+                          shouldRetry: Boolean(response.reasoning.searchIteration.evaluationResult.shouldRetry),
+                          shouldAskUser: Boolean(response.reasoning.searchIteration.evaluationResult.shouldAskUser),
+                          confidence: typeof response.reasoning.searchIteration.evaluationResult.confidence === 'number'
+                            ? Math.max(0, Math.min(1, response.reasoning.searchIteration.evaluationResult.confidence))
+                            : 0.5,
+                        } : undefined,
+                      } : undefined,
+                    };
+                  }
+                  // Add reasoning context
+                  if (response.reasoningContext) {
+                    message.meta.reasoningContext = {
+                      searchPerformed: response.reasoningContext.searchPerformed || false,
+                      searchSummary: typeof response.reasoningContext.searchSummary === 'string'
+                        ? response.reasoningContext.searchSummary
+                        : undefined,
+                    };
+                  }
+                  // Handle NEEDS_USER_INPUT status (Enhanced v2.0)
+                  if (isNeedsUserInput) {
+                    message.status = 'pending'; // Keep as pending until user responds
+                    message.userQuestion = typeof response.userQuestion === 'string'
+                      ? response.userQuestion
+                      : safeThought; // Fallback to thought if no specific question
+                    // Handle both old format (string[]) and new format (MissingInfoField[])
+                    message.missingInformation = Array.isArray(response.missingInformation)
+                      ? response.missingInformation.map((item) => {
+                          if (typeof item === 'string') {
+                            return {
+                              field: item,
+                              type: 'PRIVATE_DATA' as const,
+                              description: item,
+                            };
+                          }
+                          return {
+                            field: typeof item.field === 'string' ? item.field : String(item.field || ''),
+                            type: (item.type === 'EXTERNAL_KNOWLEDGE' || item.type === 'PRIVATE_DATA')
+                              ? item.type
+                              : 'PRIVATE_DATA' as const,
+                            description: typeof item.description === 'string' 
+                              ? item.description 
+                              : String(item.description || item.field || ''),
+                          };
+                        })
+                      : [];
+                  }
                 }
               });
+            }
+
+            // Handle NEEDS_USER_INPUT - stop execution and wait for user response
+            if (isNeedsUserInput) {
+              set((state) => {
+                state.currentTask.status = 'idle'; // Pause execution (not 'running')
+                state.currentTask.actionStatus = 'idle';
+              });
+              // Break the loop - wait for user to provide input
+              // When user submits new instructions, runTask will be called again
+              // and the loop will continue with the new context
+              break;
             }
 
             // Handle errors
@@ -564,13 +802,22 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             // Execute action and track result
             const actionName = parsedWithThought.parsedAction.name;
             const actionArgs = parsedWithThought.parsedAction.args;
-            const actionString = response.action;
+            const actionString = safeAction; // Use validated safeAction instead of response.action
             
             // Create action step
-            const stepId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            const stepId = generateUUID();
             const stepStartTime = Date.now();
             
             let executionResult: ActionExecutionResult | null = null;
+            let domChangeReport: DOMChangeReport | null = null;
+            
+            // Capture DOM snapshot BEFORE executing action (for change tracking)
+            let beforeSnapshot: Map<string, ElementInfo> = new Map();
+            try {
+              beforeSnapshot = await getInteractiveElementSnapshot();
+            } catch (snapshotError: unknown) {
+              console.warn('Failed to capture DOM snapshot before action:', snapshotError);
+            }
             
             try {
               // Handle legacy actions (click, setValue) via domActions for backward compatibility
@@ -594,6 +841,52 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     actualState: errorMessage,
                   };
                 }
+              }
+              
+              // Wait for DOM changes and track what appeared/disappeared
+              try {
+                domChangeReport = await waitForDOMChangesAfterAction(beforeSnapshot, {
+                  minWait: 500,
+                  maxWait: 5000, // Max 5 seconds for dropdown/menu detection
+                  stabilityThreshold: 300, // DOM stable for 300ms
+                });
+                
+                // Log DOM changes for debugging
+                if (domChangeReport.mutationCount > 0) {
+                  console.log(formatDOMChangeReport(domChangeReport));
+                }
+                
+                // If dropdown detected, add context to execution result
+                if (domChangeReport.dropdownDetected && domChangeReport.dropdownItems) {
+                  const dropdownContext = `Dropdown menu appeared with ${domChangeReport.dropdownItems.length} options: ${
+                    domChangeReport.dropdownItems.slice(0, 5).map(i => i.text).filter(Boolean).join(', ')
+                  }${domChangeReport.dropdownItems.length > 5 ? '...' : ''}`;
+                  
+                  // Enhance execution result with dropdown context
+                  if (executionResult) {
+                    executionResult.actualState = executionResult.actualState 
+                      ? `${executionResult.actualState}. ${dropdownContext}`
+                      : dropdownContext;
+                  }
+                }
+                
+                // Store DOM changes in state for next API call
+                set((state) => {
+                  state.currentTask.lastDOMChanges = {
+                    addedCount: domChangeReport!.addedElements.length,
+                    removedCount: domChangeReport!.removedElements.length,
+                    dropdownDetected: domChangeReport!.dropdownDetected,
+                    dropdownOptions: domChangeReport!.dropdownItems?.map(i => i.text).filter(Boolean) as string[] | undefined,
+                    stabilizationTime: domChangeReport!.stabilizationTime,
+                  };
+                });
+              } catch (domWaitError: unknown) {
+                console.warn('DOM change tracking failed, falling back to fixed wait:', domWaitError);
+                await sleep(2000); // Fallback to fixed wait
+                // Clear DOM changes on failure
+                set((state) => {
+                  state.currentTask.lastDOMChanges = null;
+                });
               }
               
               // Store execution result for next API call
@@ -678,8 +971,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             // Save messages periodically
             await get().currentTask.actions.saveMessages();
             
-            // Sleep 2 seconds to allow page to settle after action
-            await sleep(2000);
+            // Note: DOM waiting is now handled adaptively after action execution
+            // using waitForDOMChangesAfterAction() instead of fixed sleep
           } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             
@@ -710,6 +1003,77 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               });
               break;
             }
+            
+            // Handle MAX_RETRIES_EXCEEDED - task failed after multiple correction attempts
+            if (errorMessage.includes('MAX_RETRIES_EXCEEDED')) {
+              const userMessage = errorMessage.split(': ').slice(1).join(': ') || 
+                'The task could not be completed after multiple attempts. The page may have changed or the action could not be verified. Please try again or simplify your request.';
+              onError(userMessage);
+              
+              // Add a final message to the chat showing the failure
+              set((state) => {
+                const failureMessage = {
+                  id: generateUUID(),
+                  role: 'assistant' as const,
+                  content: `I was unable to complete this task after several attempts. ${userMessage}`,
+                  status: 'failure' as const,
+                  timestamp: new Date(),
+                  error: {
+                    message: userMessage,
+                    code: 'MAX_RETRIES_EXCEEDED',
+                  },
+                };
+                if (Array.isArray(state.currentTask.messages)) {
+                  state.currentTask.messages.push(failureMessage);
+                }
+                state.currentTask.status = 'error';
+              });
+              break;
+            }
+            
+            // Handle VERIFICATION_FAILED - action couldn't be verified
+            if (errorMessage.includes('VERIFICATION_FAILED')) {
+              const userMessage = errorMessage.split(': ').slice(1).join(': ') || 
+                'The action was attempted but could not be verified. The page may not have responded as expected.';
+              onError(userMessage);
+              set((state) => {
+                state.currentTask.status = 'error';
+              });
+              break;
+            }
+            
+            // Handle ELEMENT_NOT_FOUND - couldn't find the target element
+            if (errorMessage.includes('ELEMENT_NOT_FOUND')) {
+              const userMessage = errorMessage.split(': ').slice(1).join(': ') || 
+                'Could not find the element to interact with. The page may have changed.';
+              onError(userMessage);
+              set((state) => {
+                state.currentTask.status = 'error';
+              });
+              break;
+            }
+            
+            // Handle INVALID_ACTION - action not valid
+            if (errorMessage.includes('INVALID_ACTION')) {
+              const userMessage = errorMessage.split(': ').slice(1).join(': ') || 
+                'The requested action is not valid for this page.';
+              onError(userMessage);
+              set((state) => {
+                state.currentTask.status = 'error';
+              });
+              break;
+            }
+            
+            // Handle BAD_REQUEST - generic 400 errors
+            if (errorMessage.includes('BAD_REQUEST')) {
+              const userMessage = errorMessage.split(': ').slice(1).join(': ') || 
+                'The request could not be processed. Please try again.';
+              onError(userMessage);
+              set((state) => {
+                state.currentTask.status = 'error';
+              });
+              break;
+            }
 
             // Handle 5xx and network errors
             onError(`Error: ${errorMessage}`);
@@ -735,16 +1099,31 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         // Save messages one final time
         await get().currentTask.actions.saveMessages();
         
-        // Save conversation to history
+        // Update session summary on completion
         const taskState = get().currentTask;
+        if (taskState.sessionId) {
+          const finalStatus = taskState.status === 'success' 
+            ? 'completed' 
+            : taskState.status === 'error' 
+            ? 'failed' 
+            : 'active';
+          
+          await get().sessions.actions.updateSession(taskState.sessionId, {
+            updatedAt: Date.now(),
+            messageCount: taskState.messages.length,
+            status: finalStatus,
+          });
+        }
+        
+        // Save conversation to history
         if (taskState.instructions && taskState.displayHistory.length > 0 && taskState.createdAt) {
           const finalStatus = taskState.status === 'success' || taskState.status === 'error' || taskState.status === 'interrupted'
             ? taskState.status
             : 'error';
           
           get().conversationHistory.actions.addConversation({
-            id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            instructions: taskState.instructions,
+        id: generateUUID(),
+          instructions: taskState.instructions,
             displayHistory: [...taskState.displayHistory],
             status: finalStatus,
             createdAt: taskState.createdAt,
@@ -763,7 +1142,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
       const taskState = get().currentTask;
       if (taskState.instructions && taskState.displayHistory.length > 0 && taskState.createdAt) {
         get().conversationHistory.actions.addConversation({
-          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          id: generateUUID(),
           instructions: taskState.instructions,
           displayHistory: [...taskState.displayHistory],
           status: 'interrupted',
@@ -772,6 +1151,42 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           url: taskState.url || undefined,
         });
       }
+    },
+    startNewChat: () => {
+      set((state) => {
+        // Stop any running task
+        if (state.currentTask.status === 'running') {
+          state.currentTask.status = 'interrupted';
+        }
+        
+        // Clear all task state
+        // CRITICAL: Always set messages to empty array, NEVER undefined
+        state.currentTask.instructions = null;
+        state.currentTask.displayHistory = [];
+        state.currentTask.messages = []; // MUST be empty array, not undefined
+        state.currentTask.taskId = null;
+        state.currentTask.sessionId = null;
+        state.currentTask.status = 'idle';
+        state.currentTask.actionStatus = 'idle';
+        state.currentTask.createdAt = null;
+        state.currentTask.url = null;
+        state.currentTask.lastActionResult = null;
+        state.currentTask.lastDOMChanges = null;
+        
+        // Clear orchestrator state
+        state.currentTask.plan = null;
+        state.currentTask.currentStep = null;
+        state.currentTask.totalSteps = null;
+        state.currentTask.orchestratorStatus = null;
+        state.currentTask.verificationHistory = [];
+        state.currentTask.correctionHistory = [];
+        
+        // Clear UI instructions
+        state.ui.instructions = '';
+      });
+      
+      // Clear current session
+      get().sessions.actions.setCurrentSession(null);
     },
     saveMessages: async () => {
       const taskState = get().currentTask;
@@ -797,94 +1212,179 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
       }
     },
     loadMessages: async (sessionId: string) => {
+      // Safety: Always initialize messages as empty array first to prevent undefined
+      set((state) => {
+        state.currentTask.sessionId = sessionId;
+        state.currentTask.messages = []; // Initialize as empty array to prevent undefined
+      });
+      
       try {
-        // Try to load from chrome.storage.local first
+        // Try to load from chrome.storage.local first (for offline support)
         const result = await chrome.storage.local.get(`session_messages_${sessionId}`);
         const storedMessages = result[`session_messages_${sessionId}`];
         
-        if (storedMessages && Array.isArray(storedMessages)) {
-          set((state) => {
-            state.currentTask.messages = storedMessages.map((msg: any) => ({
-              ...msg,
-              timestamp: new Date(msg.timestamp),
+        if (storedMessages && Array.isArray(storedMessages) && storedMessages.length > 0) {
+          // Filter out any invalid messages and ensure all required fields exist
+          const validMessages = storedMessages
+            .filter((msg: any) => msg && typeof msg === 'object' && msg.id && msg.role)
+            .map((msg: any) => ({
+              id: typeof msg.id === 'string' ? msg.id : String(msg.id || generateUUID()),
+              role: typeof msg.role === 'string' ? msg.role : 'assistant',
+              content: typeof msg.content === 'string' ? msg.content : String(msg.content || ''),
+              status: msg.status || 'sent',
+              timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+              actionPayload: msg.actionPayload,
               meta: msg.meta ? {
                 ...msg.meta,
-                steps: msg.meta.steps?.map((step: any) => ({
+                steps: Array.isArray(msg.meta.steps) ? msg.meta.steps.map((step: any) => ({
                   ...step,
-                  timestamp: new Date(step.timestamp),
-                })),
+                  timestamp: step.timestamp ? new Date(step.timestamp) : new Date(),
+                })) : [],
               } : undefined,
+              error: msg.error,
             }));
+          
+          set((state) => {
+            state.currentTask.messages = validMessages;
           });
-          return;
         }
         
-        // If not in storage, try to fetch from API
+        // Always try to fetch from API to get latest messages (with fallback handled)
+        // Uses GET /api/session/[sessionId]/messages with default limit=50
         try {
-          const { messages: apiMessages } = await apiClient.getSessionMessages(sessionId);
+          const { messages: apiMessages } = await apiClient.getSessionMessages(sessionId, 50);
           
-          if (apiMessages && Array.isArray(apiMessages)) {
-            set((state) => {
-              state.currentTask.messages = apiMessages.map((msg: any) => ({
-                id: msg.messageId,
-                role: msg.role,
-                content: msg.content,
+          if (apiMessages && Array.isArray(apiMessages) && apiMessages.length > 0) {
+            // Filter out invalid messages and convert API response format to ChatMessage format
+            const validMessages = apiMessages
+              .filter((msg: any) => msg && typeof msg === 'object' && (msg.messageId || msg.role))
+              .map((msg: any) => ({
+                id: typeof msg.messageId === 'string' 
+                  ? msg.messageId 
+                  : generateUUID(),
+                role: typeof msg.role === 'string' ? msg.role : 'assistant',
+                content: typeof msg.content === 'string' ? msg.content : String(msg.content || ''),
                 status: msg.status || 'sent',
-                timestamp: new Date(msg.timestamp),
+                timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(), // API returns ISO 8601 string
                 actionPayload: msg.actionPayload,
                 meta: {
                   steps: [], // API doesn't return steps, they're client-side only
                 },
                 error: msg.error,
               }));
+            
+            set((state) => {
+              state.currentTask.messages = validMessages;
             });
-            return;
+            
+            // Save to local storage for offline support
+            await get().currentTask.actions.saveMessages();
+          } else {
+            // If API returned empty array or invalid response, ensure messages is still an array
+            set((state) => {
+              state.currentTask.messages = [];
+            });
           }
         } catch (apiError: unknown) {
-          // API call failed, continue with empty messages
-          console.debug('Failed to load messages from API:', apiError);
+          // API call failed - if we have local messages, keep them; otherwise clear
+          if (!storedMessages || !Array.isArray(storedMessages) || storedMessages.length === 0) {
+            console.debug('Failed to load messages from API and no local cache:', apiError);
+            set((state) => {
+              state.currentTask.messages = [];
+            });
+          } else {
+            console.debug('API unavailable, using cached messages:', apiError);
+          }
         }
-        
-        // If API also fails, clear messages
-        set((state) => {
-          state.currentTask.messages = [];
-        });
       } catch (error: unknown) {
         console.error('Failed to load messages:', error);
+        // Safety: Always ensure messages is an array, never undefined
         set((state) => {
           state.currentTask.messages = [];
         });
       }
+      
+      // Set as current session after loading (or attempting to load)
+      get().sessions.actions.setCurrentSession(sessionId);
     },
     addUserMessage: (content: string) => {
-      const messageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      // Type guard: Ensure content is always a string to prevent React error #130
+      const safeContent = typeof content === 'string' ? content : String(content || '');
+      
+      // Don't add empty messages
+      if (!safeContent.trim()) {
+        return;
+      }
+      
+      const messageId = generateUUID();
       set((state) => {
-        state.currentTask.messages.push({
+        // CRITICAL SAFETY: Ensure messages array exists before pushing
+        // This prevents "Cannot read property 'push' of undefined" errors
+        if (!Array.isArray(state.currentTask.messages)) {
+          console.warn('addUserMessage: messages was not an array, reinitializing');
+          state.currentTask.messages = [];
+        }
+        
+        // Create the message with all required properties explicitly set
+        const newMessage: ChatMessage = {
           id: messageId,
           role: 'user',
-          content,
+          content: safeContent,
           status: 'sent',
           timestamp: new Date(),
-        });
+        };
+        
+        state.currentTask.messages.push(newMessage);
+        
+        // If this is the first user message and we have a sessionId, update session title
+        const userMessages = state.currentTask.messages.filter(m => m && m.role === 'user');
+        if (userMessages.length === 1 && state.currentTask.sessionId) {
+          // Type guard: Ensure content is a string before using .length
+          const safeContentForTitle = typeof content === 'string' ? content : String(content || '');
+          const sessionTitle = safeContentForTitle.length > 50 
+            ? safeContentForTitle.substring(0, 50) + '...' 
+            : safeContentForTitle;
+          
+          // Update session title via sessionService
+          get().sessions.actions.updateSession(state.currentTask.sessionId, {
+            title: sessionTitle,
+            updatedAt: Date.now(),
+          }).catch(err => console.error('Failed to update session title:', err));
+        }
       });
     },
     addAssistantMessage: (content: string, action: string, parsedAction: ParsedAction): string => {
-      const messageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      // Type guard: Ensure content is always a string to prevent React error #130
+      const safeContent = typeof content === 'string' ? content : String(content || '');
+      // Type guard: Ensure action is always a string
+      const safeAction = typeof action === 'string' ? action : String(action || '');
+      
+      const messageId = generateUUID();
       set((state) => {
-        state.currentTask.messages.push({
+        // CRITICAL SAFETY: Ensure messages array exists before pushing
+        if (!Array.isArray(state.currentTask.messages)) {
+          console.warn('addAssistantMessage: messages was not an array, reinitializing');
+          state.currentTask.messages = [];
+        }
+        
+        // Create the message with all required properties explicitly set
+        const newMessage: ChatMessage = {
           id: messageId,
           role: 'assistant',
-          content,
+          content: safeContent,
           status: 'pending',
           timestamp: new Date(),
           actionPayload: {
-            action,
+            action: safeAction,
             parsedAction,
           },
           meta: {
             steps: [],
+            // Reasoning data will be added via updateMessageStatus or directly in runTask
           },
-        });
+        };
+        
+        state.currentTask.messages.push(newMessage);
       });
       return messageId;
     },
@@ -907,6 +1407,14 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           if (error) {
             message.error = error;
           }
+        }
+        
+        // Update session message count
+        if (state.currentTask.sessionId) {
+          get().sessions.actions.updateSession(state.currentTask.sessionId, {
+            updatedAt: Date.now(),
+            messageCount: state.currentTask.messages.length,
+          });
         }
       });
     },

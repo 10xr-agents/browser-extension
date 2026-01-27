@@ -1,10 +1,10 @@
 /**
  * Debug Panel Component for Thin Client Architecture
  * 
- * Flat dashboard view for system/debug information.
- * No accordions - all sections displayed as cards in a vertical stack.
+ * Tabbed interface for system/debug information to improve navigation and information density.
+ * System Health cards remain fixed at top, debug sections organized in tabs below.
  * 
- * Reference: User request for flat dashboard design
+ * Reference: Debug Panel Refactor - Tabbed Interface
  */
 
 import React from 'react';
@@ -15,6 +15,11 @@ import {
   useColorModeValue,
   Text,
   Code,
+  Tabs,
+  TabList,
+  TabPanels,
+  Tab,
+  TabPanel,
 } from '@chakra-ui/react';
 import { useAppState } from '../state/store';
 import AccessibilityTreeView from './AccessibilityTreeView';
@@ -31,10 +36,10 @@ import CorrectionViewDebug from './CorrectionViewDebug';
 import ErrorBoundary from './ErrorBoundary';
 
 interface DebugPanelProps {
-  hideHeader?: boolean;
+  // Props can be added here in the future if needed
 }
 
-const DebugPanel: React.FC<DebugPanelProps> = ({ hideHeader = false }) => {
+const DebugPanel: React.FC<DebugPanelProps> = () => {
   const developerMode = useAppState((state) => state.settings.developerMode);
   
   // Get debug data from store
@@ -85,99 +90,284 @@ const DebugPanel: React.FC<DebugPanelProps> = ({ hideHeader = false }) => {
     </Text>
   );
 
+  // Tab colors
+  const tabBg = useColorModeValue('white', 'gray.800');
+  const tabSelectedBg = useColorModeValue('blue.50', 'blue.900/20');
+  const tabSelectedColor = useColorModeValue('blue.600', 'blue.400');
+  const tabBorderColor = useColorModeValue('gray.200', 'gray.700');
+  const tabPanelBg = useColorModeValue('white', 'gray.900');
+  const tabHoverBg = useColorModeValue('gray.50', 'gray.700');
+  const scrollbarTrackBg = useColorModeValue('gray.100', 'gray.700');
+  const scrollbarThumbBg = useColorModeValue('gray.400', 'gray.500');
+
   return (
-    <VStack align="stretch" spacing={5} w="100%">
-        {/* Execution Status */}
-        {(taskStatus === 'running' || actionStatus !== 'idle') && (
-          <ErrorBoundary>
-            <DebugCard title="Execution Status">
-              <TaskStatus />
-            </DebugCard>
-          </ErrorBoundary>
-        )}
+    <Box w="100%" h="100%" display="flex" flexDirection="column" overflow="hidden">
+      {/* Tabbed Interface - All content in tabs */}
+      <Tabs variant="enclosed" size="sm" isLazy colorScheme="blue" display="flex" flexDirection="column" h="100%" overflow="hidden">
+        <TabList
+          flex="none"
+          overflowX="auto"
+          overflowY="hidden"
+          borderBottomWidth="1px"
+          borderColor={tabBorderColor}
+          bg={tabBg}
+          sx={{
+            '&::-webkit-scrollbar': {
+              height: '4px',
+            },
+            '&::-webkit-scrollbar-track': {
+              bg: scrollbarTrackBg,
+            },
+            '&::-webkit-scrollbar-thumb': {
+              bg: scrollbarThumbBg,
+              borderRadius: '2px',
+            },
+          }}
+        >
+          <Tab
+            fontSize="xs"
+            fontWeight="medium"
+            px={3}
+            py={2}
+            _selected={{
+              bg: tabSelectedBg,
+              color: tabSelectedColor,
+              borderColor: tabBorderColor,
+              borderBottomColor: 'transparent',
+            }}
+            _hover={{
+              bg: tabHoverBg,
+            }}
+          >
+            Execution
+          </Tab>
+          <Tab
+            fontSize="xs"
+            fontWeight="medium"
+            px={3}
+            py={2}
+            _selected={{
+              bg: tabSelectedBg,
+              color: tabSelectedColor,
+              borderColor: tabBorderColor,
+              borderBottomColor: 'transparent',
+            }}
+            _hover={{
+              bg: tabHoverBg,
+            }}
+          >
+            Network
+          </Tab>
+          <Tab
+            fontSize="xs"
+            fontWeight="medium"
+            px={3}
+            py={2}
+            _selected={{
+              bg: tabSelectedBg,
+              color: tabSelectedColor,
+              borderColor: tabBorderColor,
+              borderBottomColor: 'transparent',
+            }}
+            _hover={{
+              bg: tabHoverBg,
+            }}
+          >
+            State
+          </Tab>
+          <Tab
+            fontSize="xs"
+            fontWeight="medium"
+            px={3}
+            py={2}
+            _selected={{
+              bg: tabSelectedBg,
+              color: tabSelectedColor,
+              borderColor: tabBorderColor,
+              borderBottomColor: 'transparent',
+            }}
+            _hover={{
+              bg: tabHoverBg,
+            }}
+          >
+            Logs
+          </Tab>
+          <Tab
+            fontSize="xs"
+            fontWeight="medium"
+            px={3}
+            py={2}
+            _selected={{
+              bg: tabSelectedBg,
+              color: tabSelectedColor,
+              borderColor: tabBorderColor,
+              borderBottomColor: 'transparent',
+            }}
+            _hover={{
+              bg: tabHoverBg,
+            }}
+          >
+            RAG
+          </Tab>
+        </TabList>
 
-        {/* Action Plan (Manus Orchestrator) */}
-        {(plan || currentStep || totalSteps) && (
-          <ErrorBoundary>
-            <DebugCard title="Action Plan">
-              <PlanViewDebug />
-            </DebugCard>
-          </ErrorBoundary>
-        )}
+        <TabPanels flex="1" overflow="hidden" display="flex" flexDirection="column">
+          {/* Execution Tab - Contains Execution Status, Action Plan, Verification, Correction */}
+          <TabPanel 
+            px={0} 
+            py={4} 
+            bg={tabPanelBg}
+            flex="1"
+            overflowY="auto"
+            overflowX="hidden"
+            minH="0"
+          >
+            <VStack align="stretch" spacing={4}>
+              {/* Execution Status */}
+              {(taskStatus === 'running' || actionStatus !== 'idle') && (
+                <ErrorBoundary>
+                  <DebugCard title="Execution Status">
+                    <TaskStatus />
+                  </DebugCard>
+                </ErrorBoundary>
+              )}
 
-        {/* Verification Results (Manus Orchestrator) */}
-        {verificationHistory && verificationHistory.length > 0 && (
-          <ErrorBoundary>
-            <DebugCard title="Verification Results">
-              <VerificationViewDebug />
-            </DebugCard>
-          </ErrorBoundary>
-        )}
+              {/* Action Plan (Manus Orchestrator) */}
+              {(plan || currentStep || totalSteps) && (
+                <ErrorBoundary>
+                  <DebugCard title="Action Plan">
+                    <PlanViewDebug />
+                  </DebugCard>
+                </ErrorBoundary>
+              )}
 
-        {/* Correction Results (Manus Orchestrator) */}
-        {correctionHistory && correctionHistory.length > 0 && (
-          <ErrorBoundary>
-            <DebugCard title="Correction Results">
-              <CorrectionViewDebug />
-            </DebugCard>
-          </ErrorBoundary>
-        )}
+              {/* Verification Results (Manus Orchestrator) */}
+              {verificationHistory && verificationHistory.length > 0 && (
+                <ErrorBoundary>
+                  <DebugCard title="Verification Results">
+                    <VerificationViewDebug />
+                  </DebugCard>
+                </ErrorBoundary>
+              )}
 
-        {/* Network/API Trace */}
-        <ErrorBoundary>
-          <DebugCard title="Network/API Trace">
-            <NetworkTraceView />
-          </DebugCard>
-        </ErrorBoundary>
+              {/* Correction Results (Manus Orchestrator) */}
+              {correctionHistory && correctionHistory.length > 0 && (
+                <ErrorBoundary>
+                  <DebugCard title="Correction Results">
+                    <CorrectionViewDebug />
+                  </DebugCard>
+                </ErrorBoundary>
+              )}
 
-        {/* Raw Logs */}
-        <ErrorBoundary>
-          <DebugCard title="Raw Logs">
-            <TaskHistoryDebug />
-          </DebugCard>
-        </ErrorBoundary>
+              {/* Empty state if no execution data */}
+              {!(taskStatus === 'running' || actionStatus !== 'idle') && 
+               !(plan || currentStep || totalSteps) && 
+               (!verificationHistory || verificationHistory.length === 0) && 
+               (!correctionHistory || correctionHistory.length === 0) && (
+                <EmptyState message="No execution data available. Start a task to see execution details here." />
+              )}
+            </VStack>
+          </TabPanel>
 
-        {/* RAG Context */}
-        <ErrorBoundary>
-          <DebugCard title="RAG Context">
-            <RAGContextView />
-          </DebugCard>
-        </ErrorBoundary>
+          {/* Network Tab */}
+          <TabPanel 
+            px={0} 
+            py={4} 
+            bg={tabPanelBg}
+            flex="1"
+            overflowY="auto"
+            overflowX="hidden"
+            minH="0"
+          >
+            <ErrorBoundary>
+              <DebugCard title="Network/API Trace">
+                <NetworkTraceView />
+              </DebugCard>
+            </ErrorBoundary>
+          </TabPanel>
 
-        {/* Page Structure (Accessibility Tree) */}
-        {accessibilityTree && (
-          <ErrorBoundary>
-            <DebugCard title="Page Structure">
-              <AccessibilityTreeView tree={accessibilityTree} />
-            </DebugCard>
-          </ErrorBoundary>
-        )}
+          {/* State Tab */}
+          <TabPanel 
+            px={0} 
+            py={4} 
+            bg={tabPanelBg}
+            flex="1"
+            overflowY="auto"
+            overflowX="hidden"
+            minH="0"
+          >
+            <VStack align="stretch" spacing={4}>
+              <ErrorBoundary>
+                <DebugCard title="State Inspector">
+                  <StateInspectorView />
+                </DebugCard>
+              </ErrorBoundary>
+              
+              {/* Page Structure (Accessibility Tree) */}
+              {accessibilityTree && (
+                <ErrorBoundary>
+                  <DebugCard title="Page Structure">
+                    <AccessibilityTreeView tree={accessibilityTree} />
+                  </DebugCard>
+                </ErrorBoundary>
+              )}
 
-        {/* Interaction Coverage (Coverage Metrics) */}
-        {coverageMetrics && (
-          <ErrorBoundary>
-            <DebugCard title="Interaction Coverage">
-              <CoverageMetricsView metrics={coverageMetrics} />
-            </DebugCard>
-          </ErrorBoundary>
-        )}
+              {/* Interaction Coverage (Coverage Metrics) */}
+              {coverageMetrics && (
+                <ErrorBoundary>
+                  <DebugCard title="Interaction Coverage">
+                    <CoverageMetricsView metrics={coverageMetrics} />
+                  </DebugCard>
+                </ErrorBoundary>
+              )}
 
-        {/* Element Sources (Hybrid Elements) */}
-        {hybridElements && hybridElements.length > 0 && (
-          <ErrorBoundary>
-            <DebugCard title="Element Sources">
-              <HybridElementView hybridElements={hybridElements} />
-            </DebugCard>
-          </ErrorBoundary>
-        )}
+              {/* Element Sources (Hybrid Elements) */}
+              {hybridElements && hybridElements.length > 0 && (
+                <ErrorBoundary>
+                  <DebugCard title="Element Sources">
+                    <HybridElementView hybridElements={hybridElements} />
+                  </DebugCard>
+                </ErrorBoundary>
+              )}
+            </VStack>
+          </TabPanel>
 
-        {/* State Inspector */}
-        <ErrorBoundary>
-          <DebugCard title="State Inspector">
-            <StateInspectorView />
-          </DebugCard>
-        </ErrorBoundary>
-      </VStack>
+          {/* Logs Tab */}
+          <TabPanel 
+            px={0} 
+            py={4} 
+            bg={tabPanelBg}
+            flex="1"
+            overflowY="auto"
+            overflowX="hidden"
+            minH="0"
+          >
+            <ErrorBoundary>
+              <DebugCard title="Raw Logs">
+                <TaskHistoryDebug />
+              </DebugCard>
+            </ErrorBoundary>
+          </TabPanel>
+
+          {/* RAG Tab */}
+          <TabPanel 
+            px={0} 
+            py={4} 
+            bg={tabPanelBg}
+            flex="1"
+            overflowY="auto"
+            overflowX="hidden"
+            minH="0"
+          >
+            <ErrorBoundary>
+              <DebugCard title="RAG Context">
+                <RAGContextView />
+              </DebugCard>
+            </ErrorBoundary>
+          </TabPanel>
+        </TabPanels>
+      </Tabs>
+    </Box>
   );
 };
 

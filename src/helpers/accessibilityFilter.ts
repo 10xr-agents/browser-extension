@@ -54,6 +54,9 @@ export interface SimplifiedAXElement {
   interactive: boolean;
   backendDOMNodeId?: number; // For mapping to DOM element
   attributes: Record<string, string>; // Extracted attributes
+  // Popup/dropdown indicators (critical for expected outcome generation)
+  hasPopup?: string; // 'menu', 'listbox', 'tree', 'grid', 'dialog', 'true', or undefined
+  expanded?: boolean; // Current expanded state (for dropdowns)
 }
 
 /**
@@ -114,10 +117,25 @@ export function convertAXNodeToSimplifiedElement(
   // Extract attributes from properties
   const attributes: Record<string, string> = {};
   
+  // Critical popup/dropdown indicators for expected outcome generation
+  let hasPopup: string | undefined;
+  let expanded: boolean | undefined;
+  
   if (node.properties) {
     for (const prop of node.properties) {
       if (prop.value?.value) {
         attributes[prop.name] = prop.value.value;
+        
+        // Extract hasPopup property (critical for dropdown detection)
+        // Values can be: 'menu', 'listbox', 'tree', 'grid', 'dialog', 'true'
+        if (prop.name === 'hasPopup' || prop.name === 'haspopup') {
+          hasPopup = prop.value.value;
+        }
+        
+        // Extract expanded state (for detecting open/closed dropdowns)
+        if (prop.name === 'expanded') {
+          expanded = prop.value.value === 'true';
+        }
       }
     }
   }
@@ -134,6 +152,16 @@ export function convertAXNodeToSimplifiedElement(
   if (description) {
     attributes['title'] = description;
   }
+  
+  // Add hasPopup as attribute if present (important for DOM simplification)
+  if (hasPopup) {
+    attributes['aria-haspopup'] = hasPopup;
+  }
+  
+  // Add expanded as attribute if present
+  if (expanded !== undefined) {
+    attributes['aria-expanded'] = expanded.toString();
+  }
 
   // Determine if interactive based on role
   const isInteractive = INTERACTIVE_ROLES.some(
@@ -149,6 +177,8 @@ export function convertAXNodeToSimplifiedElement(
     interactive: isInteractive,
     backendDOMNodeId: node.backendDOMNodeId,
     attributes,
+    hasPopup,
+    expanded,
   };
 }
 

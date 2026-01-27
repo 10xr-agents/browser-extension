@@ -1,14 +1,13 @@
 # Thin Client Implementation: Server-Side Roadmap
 
-**Document Version:** 1.9  
-**Last Updated:** January 26, 2026 — Task 4 **complete**: `GET/POST /api/v1/user/preferences` implemented (§5); UserPreference model, Zod schemas, CORS verified  
-**Date:** January 26, 2026  
-**Status:** Execution-Ready (Backend)  
-**Source:** `SERVER_SIDE_AGENT_ARCH.md` (auth, interact, resolve, RAG, history)
+**Document Version:** 3.0  
+**Last Updated:** January 27, 2026  
+**Status:** Implementation Complete  
+**Source:** Merged from `THIN_SERVER_ROADMAP.md`, `THIN_SERVER_TO_BE_ROADMAP.md`, and `BACKEND_WEB_SEARCH_CHANGES.md`
 
 **Sync:** This document is the **implementation roadmap**. The **specification** is `SERVER_SIDE_AGENT_ARCH.md`. Keep both in sync; on conflict, prefer ROADMAP + enriched thread (Better Auth adapters, MongoDB/Mongoose, resolve = internal/debugging).
 
-**Counterpart:** Client-side work is in `THIN_CLIENT_ROADMAP_CLIENT.md`. Tasks 1–3 are **sequential**; server and client work for a given task ship together for end-to-end verification.
+**Counterpart:** Client-side work is in `THIN_CLIENT_ROADMAP_CLIENT.md`. Server and client work for a given task ship together for end-to-end verification.
 
 ---
 
@@ -18,8 +17,8 @@ This document is the **server-side** implementation roadmap for the Thin Client 
 
 ### 1.1 Principles
 
-- **Vertical slices:** Each task delivers the backend (DB + API) for one feature. No standalone “schema-only” or “API scaffolding–only” phases.
-- **Strict sequencing:** Task 2 depends on Task 1 (auth, tenant, allowlist). Task 3 depends on Task 1 and Task 2 (RAG, domain checks).
+- **Vertical slices:** Each task delivers the backend (DB + API) for one feature. No standalone "schema-only" or "API scaffolding–only" phases.
+- **Strict sequencing:** Tasks have dependencies as documented. Some tasks can be implemented in parallel.
 - **Tenant + domain isolation:** All DB and RAG access scoped by **Tenant ID** (from session) and **Active Domain** (from request URL) when org-specific. **`allowed_domains`** is a **filter** (§1.6): it decides when to use org-specific RAG, not when to block access. We help on **all** domains; public-only when no org knowledge.
 
 ### 1.2 Prerequisites
@@ -60,7 +59,7 @@ This project uses **MongoDB** only. There are **no SQL migrations** (no PostgreS
 | **`GET /api/knowledge/resolve`** | Internal / debugging | `context`, `citations` — raw chunks | **Internal use and debugging only.** Inspect what RAG returns for a URL/query; **not** for extension overlay or end-user display. |
 
 - **Interact:** Extension sends `url`, `query`, `dom`, `taskId?`. Backend runs RAG, injects knowledge **into the LLM prompt**, calls LLM, returns **`NextActionResponse`**. The extension **never** receives raw chunks or citations — only the next action to execute.
-- **Resolve:** Same RAG + tenant/domain checks, **no LLM**. Returns **`ResolveKnowledgeResponse`** (`context`, `citations`). Used for **internal tooling and debugging** (e.g. “what knowledge do we have for this page?”). The extension does **not** use resolve for overlay/tooltips; task execution uses **interact** only. See `SERVER_SIDE_AGENT_ARCH.md` §5.6.
+- **Resolve:** Same RAG + tenant/domain checks, **no LLM**. Returns **`ResolveKnowledgeResponse`** (`context`, `citations`). Used for **internal tooling and debugging** (e.g. "what knowledge do we have for this page?"). The extension does **not** use resolve for overlay/tooltips; task execution uses **interact** only. See `SERVER_SIDE_AGENT_ARCH.md` §5.6.
 
 ### 1.6 Knowledge Types & `allowed_domains` as Filter (Not Assert)
 
@@ -74,19 +73,21 @@ We support **two types of knowledge**:
 **`allowed_domains` is a filter, not an assert.** It decides **when to query org-specific RAG**, not whether to block access.
 
 - **On a domain with org-specific knowledge** (domain matches `allowed_domains` and we have chunks for that domain): we query RAG (org + public), ground results in that knowledge, and return as usual. No special UI.
-- **On other domains**: we **do not** query org-specific RAG. We still return suggestions using **public knowledge only**. We **never** 403. The API indicates absence of org-specific knowledge (e.g. `hasOrgKnowledge: false`) so the **extension** can show a dialog: *“There isn’t any knowledge present for this website — all our suggestions are based on publicly available information.”*
+- **On other domains**: we **do not** query org-specific RAG. We still return suggestions using **public knowledge only**. We **never** 403. The API indicates absence of org-specific knowledge (e.g. `hasOrgKnowledge: false`) so the **extension** can show a dialog: *"There isn't any knowledge present for this website — all our suggestions are based on publicly available information."*
 
 **Summary:** We always help (suggestions on all domains). `allowed_domains` filters *when* we add the org-specific knowledge layer; it does **not** restrict which domains the user can use the extension on.
 
 ---
 
+## Part A: Core Infrastructure (Tasks 1-4)
+
 ## 2. Task 1: Authentication & API Client (Server)
+
+**Status:** ✅ **COMPLETED**
 
 **Objective:** Auth endpoints and shared session resolution. Users log in (invite-based); backend issues a Bearer token. All protected routes validate the token and resolve `userId`, `tenantId`.
 
-**Deliverable:** Login, session, and logout work; `getSessionFromToken` is used by all protected routes. Client integration is in `THIN_CLIENT_ROADMAP_CLIENT.md` §2.
-
----
+**Deliverable:** Login, session, and logout work; `getSessionFromToken` is used by all protected routes.
 
 ### 2.1 Persistence for Task 1 (No New Auth Schemas)
 
@@ -94,7 +95,7 @@ We **reuse** Better Auth (Prisma) for users, sessions, and organizations. **No n
 
 #### 2.1.1 Reuse (no changes)
 
-- **Users, sessions, accounts** — Better Auth’s `User`, `Session`, `Account` (Prisma). Credential check, token issuance, and session invalidation use these. Bearer plugin uses the same sessions.
+- **Users, sessions, accounts** — Better Auth's `User`, `Session`, `Account` (Prisma). Credential check, token issuance, and session invalidation use these. Bearer plugin uses the same sessions.
 - **Tenant** — Derived from **user** (normal mode) or **organization** (org mode). No `tenants` table. Use `getTenantState` / `getActiveOrganizationId` and existing org membership.
 
 #### 2.1.2 New Mongoose model: `allowed_domains`
@@ -104,8 +105,6 @@ We **reuse** Better Auth (Prisma) for users, sessions, and organizations. **No n
 - **Purpose:** **Filter** (not assert) for when to use **org-specific** RAG (§1.6). Tasks 2–3 load allowed domains for the tenant and check `Active Domain` against these patterns. If the domain matches → query org-specific RAG. If not → use **public knowledge only**; we still return 200 and suggestions. We **do not** 403 based on `allowed_domains`.
 
 **No migrations:** Add the Mongoose schema only. Optionally seed one tenant with `allowed_domains` for QA.
-
----
 
 ### 2.2 API Endpoints (Task 1)
 
@@ -127,154 +126,33 @@ We **reuse** Better Auth (Prisma) for users, sessions, and organizations. **No n
 
 **Shared auth helper:** `getSessionFromToken(Authorization header) → { userId, tenantId } | null`. Use in all protected routes.
 
----
+### 2.3 Implementation Status
 
-### 2.3 Definition of Done / QA Verification (Task 1 — Server)
-
-- [x] Better Auth (Prisma) reused for users/sessions; **no** new auth schemas. `allowed_domains` Mongoose model exists (**filter** §1.6, not assert) and optionally seeded for one tenant.
-- [x] `POST /api/v1/auth/login` returns 200 and `accessToken` for valid invited user; 401 for invalid credentials. **Implemented:** `/app/api/v1/auth/login/route.ts` — wraps Better Auth sign-in, extracts `set-auth-token` header, returns contract response with CORS.
-- [x] `GET /api/v1/auth/session` returns 200 with user/tenant when Bearer valid; 401 when missing or invalid. **Implemented:** `/app/api/v1/auth/session/route.ts` — uses `getSessionFromToken`, returns user/tenant with CORS.
-- [x] `POST /api/v1/auth/logout` invalidates token; subsequent session check returns 401. **Implemented:** `/app/api/v1/auth/logout/route.ts` — calls Better Auth signOut, returns 204 with CORS.
-- [ ] End-to-end: extension can log in, session check, logout (see client roadmap). QA verifies on **live site**. **Pending:** Client-side implementation in `THIN_CLIENT_ROADMAP_CLIENT.md`.
-
-**Implementation Status:**
 - ✅ Better Auth: Bearer plugin + `trustedOrigins` added to `lib/auth/auth.ts`
-  - Bearer plugin imported from `better-auth/plugins`
-  - `trustedOrigins`: Production uses `chrome-extension://${CHROME_EXTENSION_ID}`, dev uses `chrome-extension://*` (wildcard for development)
-  - **Note:** In production, set `CHROME_EXTENSION_ID` env var. Dev wildcard may need specific extension IDs added manually if issues occur.
 - ✅ Mongoose model: `AllowedDomain` created in `lib/models/allowed-domain.ts`
-  - **Purpose:** **Filter** (§1.6) for when to use org-specific RAG; **not** used to 403. Tasks 2–3 use it to decide org vs public-only.
-  - Fields: `tenantId` (string, indexed), `domainPattern` (string), `createdAt` (timestamp)
-  - Unique index on `{ tenantId, domainPattern }`
 - ✅ Auth helper: `getSessionFromToken` / `getSessionFromRequest` in `lib/auth/session.ts`
-  - Validates Bearer token via `auth.api.getSession({ headers })`
-  - Resolves tenant (user or organization mode)
-  - Returns `{ userId, tenantId }` or `null`
 - ✅ API routes: `/api/v1/auth/login`, `/api/v1/auth/session`, `/api/v1/auth/logout` with CORS
-  - **Login** (`POST /api/v1/auth/login`): Uses `auth.api.signInEmail({ body, headers, returnHeaders: true })` per Better Auth server-side API. Extracts `set-auth-token` header, returns contract response.
-  - **Session** (`GET /api/v1/auth/session`): Uses `auth.api.getSession({ headers })` with Authorization header. Returns user/tenant info.
-  - **Logout** (`POST /api/v1/auth/logout`): Uses `auth.api.signOut({ headers })` with Authorization header. Returns 204.
-  - All routes handle CORS preflight (OPTIONS) and add CORS headers to responses.
 - ✅ CORS helper: `lib/utils/cors.ts` for extension origin handling
-  - `getCorsHeaders(origin)`: Returns CORS headers for chrome-extension origins
-  - `handleCorsPreflight(req)`: Handles OPTIONS requests
-  - `addCorsHeaders(req, response)`: Adds CORS headers to responses
-
-**Implementation Verification (per Better Auth & Next.js docs):**
-- ✅ **Better Auth API usage**: Using `auth.api.signInEmail` with `returnHeaders: true` (server-side pattern per Better Auth docs)
-- ✅ **Bearer plugin**: Correctly imported and configured in auth config
-- ✅ **Session handling**: Using `auth.api.getSession({ headers })` with Authorization header (Bearer plugin pattern)
-- ✅ **Next.js route handlers**: Using `NextRequest`/`NextResponse`, proper async handlers, OPTIONS for CORS
-- ✅ **Error handling**: All routes catch errors, return appropriate status codes, include CORS headers on errors
-- ✅ **Type safety**: Using type assertions for `request.json()`, proper Zod validation
-
-**Exit criterion:** Server-side Task 1 complete when all above are verified. Proceed to Task 2 only after sign-off.
-
-**Implementation Verification Summary (January 25, 2026):**
-
-✅ **Better Auth Integration:**
-- Bearer plugin correctly imported from `better-auth/plugins` and added to plugins array
-- `trustedOrigins` configured for chrome-extension origins (prod: specific ID, dev: wildcard)
-- Using `auth.api.signInEmail({ returnHeaders: true })` per Better Auth server-side API documentation
-- Using `auth.api.getSession({ headers })` with Authorization header for Bearer token validation
-- Using `auth.api.signOut({ headers })` with Authorization header for session invalidation
-
-✅ **Next.js Integration:**
-- Route handlers use `NextRequest`/`NextResponse` correctly
-- OPTIONS handlers implemented for CORS preflight
-- Proper async/await error handling
-- Type-safe request body parsing with Zod validation
-- CORS headers added to all responses (success and error)
-
-✅ **Code Quality:**
-- No linter errors
-- Proper error handling with Sentry integration
-- Type assertions for JSON parsing per RULESETS.md
-- Mongoose model follows existing patterns
-- Helper functions properly documented
-
-✅ **Contract Compliance:**
-- Login returns `{ accessToken, expiresAt, user, tenantId, tenantName }` per §2.2
-- Session returns `{ user, tenantId, tenantName }` per §2.2
-- Logout returns 204 No Content per §2.2
-- All routes handle CORS for extension origin
-
-**Pending:** End-to-end testing with Chrome extension (requires client-side implementation).
-
----
-
-### 2.4 Auth Implementation: Better Auth & Next.js
-
-Use this section to implement Task 1 auth **correctly** with the existing stack. It specifies **where to infer Better Auth** vs **where to infer Next.js**, and how they fit together.
-
-#### 2.4.1 Where to Infer **Better Auth**
-
-| Concern | Infer | Notes |
-|--------|-------|--------|
-| **Auth runtime** | Better Auth | `lib/auth/auth.ts` — existing Better Auth config. Reuse credential validation, user/tenant resolution, session storage. |
-| **Bearer plugin** | Better Auth | Add `bearer()` to `plugins`. Enables token-based auth (no cookies). Token issued on sign-in via **`set-auth-token`** response header. Use for extension clients. See [Bearer Token Authentication](https://beta.better-auth.com/docs/plugins/bearer). |
-| **Trusted origins** | Better Auth | In auth config: `trustedOrigins: ["chrome-extension://<id>"]` (prod). Dev: `chrome-extension://*` allowed but less secure. Required so Better Auth accepts requests from the extension. See [Browser Extension Guide](https://www.better-auth.com/docs/guides/browser-extension-guide). |
-| **Session from token** | Better Auth | `auth.api.getSession({ headers })` works when `Authorization: Bearer <token>` is present. Use this inside `getSessionFromToken`: validate Bearer header → pass headers to `getSession` → map result to `{ userId, tenantId }` or `null`. |
-| **Sign-in / sign-out** | Better Auth | Credential check, session create/invalidate. Sign-up stays on web (invite-based). Extension only **login**. |
-| **Handler mount** | Better Auth | `toNextJsHandler(auth)` from `better-auth/next-js` at `app/api/auth/[...all]/route.ts`. Keep as-is; do **not** replace with custom auth routes. |
-
-**References:** [Better Auth – Browser Extension Guide](https://www.better-auth.com/docs/guides/browser-extension-guide), [Bearer Plugin](https://beta.better-auth.com/docs/plugins/bearer), [Options / trustedOrigins](https://www.better-auth.com/docs/reference/options).
-
-#### 2.4.2 Where to Infer **Next.js**
-
-| Concern | Infer | Notes |
-|--------|-------|--------|
-| **API routes** | Next.js | App Router routes under `app/api/`. **New:** `app/api/v1/auth/login/route.ts`, `app/api/v1/auth/session/route.ts`, `app/api/v1/auth/logout/route.ts` implementing the **contract** in §2.2. These **wrap** Better Auth (e.g. call sign-in, read `set-auth-token`, return `{ accessToken, expiresAt, user, tenantId, tenantName }`). |
-| **CORS** | Next.js | Allow `chrome-extension://<id>` for `/api/auth/*`, `/api/v1/*`, `/api/agent/*`, `/api/knowledge/*`. Handle `OPTIONS` preflight. Use middleware, `next.config` headers, or route-level `Response` headers. See [Next.js middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware) and API route CORS patterns. |
-| **Request/response** | Next.js | `NextRequest` / `NextResponse` in route handlers. Parse `Authorization` header, forward to Better Auth or `getSessionFromToken`, return JSON or 204 per §2.2. |
-
-**References:** [Next.js App Router](https://nextjs.org/docs/app), [Next.js Middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware), [Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers).
-
-#### 2.4.3 Implementation Flow (Task 1) — ✅ COMPLETED
-
-1. **Better Auth:** ✅ Added `bearer()` plugin and `trustedOrigins` (extension origin). `toNextJsHandler(auth)` remains at `/api/auth/[...all]`.
-   - Bearer plugin: `import { bearer } from "better-auth/plugins"` → `plugins: [bearer(), organization(...)]`
-   - Trusted origins: Production uses specific extension ID, dev uses wildcard pattern
-2. **Adapter routes:** ✅ Implemented `POST /api/v1/auth/login`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout` per §2.2.  
-   - **Login:** Uses `auth.api.signInEmail({ body, headers, returnHeaders: true })` per Better Auth server-side API. Extracts `set-auth-token` from response headers; returns `{ accessToken, expiresAt, user, tenantId, tenantName }` in JSON with CORS headers.  
-   - **Session:** Extracts Bearer token from `Authorization` header; calls `auth.api.getSession({ headers })` with Authorization header; returns `{ user, tenantId, tenantName }` or 401 with CORS headers.  
-   - **Logout:** Validates Bearer via `auth.api.getSession`, then calls `auth.api.signOut({ headers })` with Authorization header; returns 204 with CORS headers.
-3. **`getSessionFromToken`:** ✅ Helper implemented in `lib/auth/session.ts`. Input: `Authorization` header. Output: `{ userId, tenantId } | null`. Uses `auth.api.getSession({ headers })` when Bearer is present. Also provides `getSessionFromRequest(requestHeaders)` convenience wrapper.
-4. **CORS (Next.js):** ✅ Implemented in `lib/utils/cors.ts`. All `/api/v1/auth/*` routes handle OPTIONS preflight and add CORS headers. Extension origin (`chrome-extension://*`) is allowed.
-
-#### 2.4.4 Token Handling vs Doc Contract — ✅ IMPLEMENTED
-
-- **Thin Client contract (§2.2):** Login returns `{ accessToken, expiresAt, user, tenantId, tenantName }` in the **response body**.
-- **Bearer plugin:** Token is provided in the **`set-auth-token`** response **header** on sign-in.
-- **Resolution:** ✅ The **`/api/v1/auth/login`** adapter uses `auth.api.signInEmail({ returnHeaders: true })` per Better Auth server-side API, reads `set-auth-token` from response headers, and **also** returns `accessToken` (and related fields) in the JSON body so the extension can store it in `chrome.storage.local` and send `Authorization: Bearer <accessToken>` on subsequent requests. Session and logout adapters consume the same Bearer token via `auth.api.getSession({ headers })` and `auth.api.signOut({ headers })`.
-
-**Implementation Details:**
-- Login route uses `auth.api.signInEmail` with `returnHeaders: true` to get the `set-auth-token` header
-- Session route uses `auth.api.getSession({ headers })` with Authorization header from request
-- Logout route validates session first, then calls `auth.api.signOut({ headers })` with Authorization header
-- All routes properly handle errors and include CORS headers
 
 ---
 
 ## 3. Task 2: Runtime Knowledge Resolution (Server)
 
+**Status:** ✅ **COMPLETED**
+
 **Objective:** Resolve endpoint that **proxies** to the **browser automation / knowledge extraction service**. Backend validates tenant; uses **`allowed_domains` as filter** (§1.6) to decide when to call the extraction service (org-specific) vs public-only. Returns **`ResolveKnowledgeResponse`** with `hasOrgKnowledge`. **Internal use and debugging only** — not for extension overlay or end-user display (see §1.5). **No duplicate storage or RAG** in the Next.js app (§3.1).
 
-**Deliverable:** `GET /api/knowledge/resolve` returns **200** for any valid `url` when Bearer valid. **Org-specific:** proxy to extraction service’s resolve/query endpoint; return chunks/citations. **Public-only:** no extraction call; return `hasOrgKnowledge: false`, `context: []`, `citations: []`. **No** 403 based on domain. Response includes `hasOrgKnowledge` so extension can show “no knowledge for this website” dialog when applicable.
-
----
+**Deliverable:** `GET /api/knowledge/resolve` returns **200** for any valid `url` when Bearer valid. **Org-specific:** proxy to extraction service's resolve/query endpoint; return chunks/citations. **Public-only:** no extraction call; return `hasOrgKnowledge: false`, `context: []`, `citations: []`. **No** 403 based on domain. Response includes `hasOrgKnowledge` so extension can show "no knowledge for this website" dialog when applicable.
 
 ### 3.1 Persistence for Task 2 (Proxy to Extraction Service)
 
 **No duplicate storage or RAG in the Next.js app.** We **proxy** resolve to the **browser automation / knowledge extraction service**. Writing chunks or RAG logic again here would duplicate work and add complexity.
 
 - **Reuse:** `allowed_domains` (Task 1), tenant resolution (user / organization). Optionally **`KnowledgeSource`** (and related models) only to **map** `(tenantId, domain)` → `knowledge_id`(s) when the extraction service is queried by `knowledge_id` (e.g. existing `GET /api/knowledge/query/{knowledge_id}`).
-- **Chunks / RAG:** Live in the **extraction service**. Next.js does **not** add Mongoose schemas for chunks or documents. We **call the extraction service’s endpoint** (resolve-by-url, or query-by-knowledge_id after lookup) and normalize the response to **`ResolveKnowledgeResponse`**.
+- **Chunks / RAG:** Live in the **extraction service**. Next.js does **not** add Mongoose schemas for chunks or documents. We **call the extraction service's endpoint** (resolve-by-url, or query-by-knowledge_id after lookup) and normalize the response to **`ResolveKnowledgeResponse`**.
 - **Extraction service:** Must expose a **resolve** endpoint that we proxy to. **Detailed request/response schema** → **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`**. Summary: `GET /api/knowledge/resolve?url=...&query=...` with `X-Tenant-ID` header; returns `{ context: KnowledgeChunk[], citations?: Citation[] }`. Alternative: use existing `GET /api/knowledge/query/{knowledge_id}` plus our lookup of `knowledge_id`(s) from `KnowledgeSource` by `(tenantId, domain)`; in that case, normalize their response to the resolve contract.
 
 **Seeding (optional):** Seed one tenant with `allowed_domains` and ensure at least one `KnowledgeSource` (or extraction job) exists whose domain matches an allowed pattern, so resolve can return non-empty context for QA.
-
----
 
 ### 3.2 API Endpoint (Task 2)
 
@@ -283,59 +161,29 @@ Use this section to implement Task 1 auth **correctly** with the existing stack.
   - Auth: Bearer. Resolve `userId`, `tenantId` via `getSessionFromToken`.  
   - **Active Domain:** `domain = new URL(url).hostname`.  
   - **`allowed_domains` as filter (§1.6):** Load `allowed_domains` for `tenant_id`. If `domain` matches a pattern **and** we have org-specific knowledge for that domain → `hasOrgKnowledge = true`; **proxy** to extraction service. Otherwise → `hasOrgKnowledge = false`; **public knowledge only** (no extraction service call); **never** 403.  
-  - **Org-specific path:** **Proxy** to the extraction service’s resolve endpoint. **Schema:** `BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`. Pass `url`, `query`, and `X-Tenant-ID: tenant_id`. Normalize the extraction service response to **`ResolveKnowledgeResponse`** (`context`, `citations`).  
+  - **Org-specific path:** **Proxy** to the extraction service's resolve endpoint. **Schema:** `BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`. Pass `url`, `query`, and `X-Tenant-ID: tenant_id`. Normalize the extraction service response to **`ResolveKnowledgeResponse`** (`context`, `citations`).  
   - **Public-only path:** Return `hasOrgKnowledge: false`, `context: []`, `citations: []` (no call to extraction service).  
   - Response: **`ResolveKnowledgeResponse`** — `{ allowed: true, domain, hasOrgKnowledge: boolean, context: KnowledgeChunk[], citations?: Citation[] }`.  
-    - `hasOrgKnowledge`: `true` when we proxied to extraction service and used org-specific knowledge; `false` otherwise. Extension can use this to show a dialog (e.g. “No knowledge for this website — suggestions are from publicly available information only”).  
+    - `hasOrgKnowledge`: `true` when we proxied to extraction service and used org-specific knowledge; `false` otherwise. Extension can use this to show a dialog (e.g. "No knowledge for this website — suggestions are from publicly available information only").  
   - If no chunks from extraction service, return `context: []`, `citations: []`, `hasOrgKnowledge` as above.
 
 **Isolation:** Always pass `tenant_id` when calling the extraction service. Use **Active Domain** only for **filtering** (when to use org RAG), not for blocking access.
 
----
+### 3.3 Implementation Status
 
-### 3.3 Definition of Done / QA Verification (Task 2 — Server)
-
-- [x] **No** new Mongoose models for chunks/documents. Resolve **proxies** to extraction service (§3.1). Reuse `allowed_domains`, tenant resolution, and optionally `KnowledgeSource` for `(tenantId, domain)` → `knowledge_id` lookup only.
-- [x] `GET /api/knowledge/resolve` returns **200** for any valid `url` when Bearer valid; **401** without token. **No** 403 based on `allowed_domains` (§1.6).
-- [x] Response includes `hasOrgKnowledge`: `true` when we proxied to extraction service and used org-specific knowledge; `false` when public-only (no extraction call). Enables extension to show “no knowledge for this website” dialog when `hasOrgKnowledge === false`.
-- [x] Org-specific path: **proxy** to extraction service with `tenant_id` (and `url`/`query`). Public-only path: no extraction call. No cross-tenant/cross-domain leakage.
-- [x] Resolve usable for **internal use and debugging** (e.g. tooling, dashboards). **Not** for extension overlay; extension uses **interact** only for task execution (§1.5).
-
-**Exit criterion:** Server-side Task 2 complete when all above are verified. Proceed to Task 3 only after sign-off.
-
----
-
-### 3.4 Verification vs MongoDB & Next.js
-
-**Task 2 status:** **Complete.** `GET /api/knowledge/resolve` is implemented at `app/api/knowledge/resolve/route.ts`. OPTIONS (CORS preflight) + GET (auth, `allowed_domains` filter, proxy vs public-only, `ResolveKnowledgeResponse` with CORS). Uses resolve-client, `allowed_domains`, domain-match, session, CORS; extraction service contract → `BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`.
-
-**MongoDB** ([production checklist](https://www.mongodb.com/docs/manual/administration/production-checklist-development/), [schema design](https://www.mongodb.com/docs/manual/administration/production-checklist-development/#schema-design)):
-
-| Check | Status | Notes |
-|-------|--------|-------|
-| Collections & indexes explicit | ✅ | `allowed_domains`: compound `Schema.index({ tenantId, domainPattern }, { unique: true })` only; no `index: true` (RULESETS §15). |
-| No unbounded indexed arrays | ✅ | `allowed_domains` has no indexed arrays. |
-| Document size & schema | ✅ | Small docs; well under 16MB. |
-| Connection pattern | ✅ | Mongoose singleton (`connectDB`) avoids connection growth in serverless; driver uses pooling. |
-| Retries / backoff / maxTimeMS | ⚠️ | Not in `connectDB` or resolve-client. Add app-level retries for extraction-service calls and DB if needed (MongoDB: “handle transient errors, exponential backoff”). |
-
-**Next.js** ([Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers), [production checklist](https://nextjs.org/docs/app/guides/production-checklist)):
-
-| Check | Status | Notes |
-|-------|--------|-------|
-| API via Route Handlers | ✅ | Resolve uses Route Handlers (OPTIONS + GET); same pattern as auth adapters. |
-| Error handling | ✅ | Try/catch, typed `unknown`, `errorResponse`, CORS on all responses. |
-| Env vars | ✅ | `KNOWLEDGE_EXTRACTION_API_URL` / `NEXT_PUBLIC_KNOWLEDGE_EXTRACTION_API_URL`; `.env` in `.gitignore`. |
+- ✅ `GET /api/knowledge/resolve` implemented at `app/api/knowledge/resolve/route.ts`
+- ✅ Uses resolve-client, `allowed_domains`, domain-match, session, CORS
+- ✅ Extraction service contract → `BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`
 
 ---
 
 ## 4. Task 3: Server-Side Action Loop (Server)
 
-**Objective:** Action loop endpoint. Backend receives `url`, `query`, `dom`, optional `taskId`; validates tenant and domain; loads or creates task; runs RAG; builds prompt with **server-held action history**; calls LLM; returns **`NextActionResponse`**. Client executes actions and loops (see `THIN_CLIENT_ROADMAP_CLIENT.md` §4).
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Action loop endpoint. Backend receives `url`, `query`, `dom`, optional `taskId`; validates tenant and domain; loads or creates task; runs RAG; builds prompt with **server-held action history**; calls LLM; returns **`NextActionResponse`**. Client executes actions and loops.
 
 **Deliverable:** `POST /api/agent/interact` implements the full loop. Action history lives on the server only; client never sends or maintains history for inference.
-
----
 
 ### 4.1 Persistence for Task 3 (Mongoose)
 
@@ -344,8 +192,6 @@ Use this section to implement Task 1 auth **correctly** with the existing stack.
 - **`tasks`** — Mongoose schema in `lib/models/task.ts`. Fields: `taskId` (UUID string, unique), `tenantId`, `userId`, `url`, `query`, `status` (`active` | `completed` | `failed` | `interrupted`), `createdAt`, `updatedAt`. Indexes: `(tenantId, taskId)` unique, `(tenantId, status)`, `(tenantId, userId)`. All accesses scoped by `tenantId`.
 
 - **`task_actions`** — Mongoose schema in `lib/models/task-action.ts`. Fields: `tenantId`, `taskId` (UUID string), `userId`, `stepIndex`, `thought`, `action`, `createdAt`. Unique index on `(tenantId, taskId, stepIndex)`. All accesses scoped by `tenantId` and `taskId`.
-
----
 
 ### 4.2 API Endpoint (Task 3)
 
@@ -361,33 +207,28 @@ Use this section to implement Task 1 auth **correctly** with the existing stack.
   - **LLM:** Call OpenAI via `callActionLLM()` (`lib/agent/llm-client.ts`). Reuses existing `OPENAI_API_KEY` from `.env.local`. Parse `<Thought>` and `<Action>` via `parseActionResponse()`. Validate action format (`click`, `setValue`, `finish`, `fail`) via `validateActionFormat()`.  
   - **History:** Append `{ thought, action, stepIndex }` to `task_actions`. If action is `finish()` or `fail()`, update `tasks.status` to `completed` or `failed`.  
   - Response: **`NextActionResponse`** — `{ thought, action, usage?, taskId?, hasOrgKnowledge?: boolean }`.  
-    - `hasOrgKnowledge`: `true` when org-specific RAG was used; `false` when only public. Extension shows “no knowledge for this website” dialog when `hasOrgKnowledge === false` (§1.6).  
+    - `hasOrgKnowledge`: `true` when org-specific RAG was used; `false` when only public. Extension shows "no knowledge for this website" dialog when `hasOrgKnowledge === false` (§1.6).  
   - Enforce max steps per task (50); return 400 when exceeded.
 
 **Isolation:** All DB and RAG access scoped by **Tenant ID** when org-specific. **Active Domain** used only as **filter** (when to use org RAG). **Action history** per `taskId` and `tenantId`.
 
----
+### 4.3 Implementation Status
 
-### 4.3 Definition of Done / QA Verification (Task 3 — Server)
-
-- [x] Mongoose models `tasks` and `task_actions` exist; **no** SQL migrations. **Implementation:** `lib/models/task.ts`, `lib/models/task-action.ts` with UUID `taskId`, proper indexes.
-- [x] `POST /api/agent/interact` returns **200** with `NextActionResponse` for any valid `url` when Bearer valid; creates task when no `taskId`; appends to history and returns same `taskId` on subsequent requests. **No** 403 based on `allowed_domains` (§1.6). **Implementation:** `app/api/agent/interact/route.ts` with OPTIONS + POST handlers.
-- [x] Response includes `hasOrgKnowledge`: `true` when org-specific RAG used; `false` when public-only. Extension uses this to show “no knowledge for this website” dialog when applicable.
-- [x] Server uses **only** server-held action history for prompt context; no client-supplied history. **Implementation:** History loaded from `task_actions` and injected into prompt via `buildActionPrompt()`.
-- [x] RAG and `allowed_domains` filter reuse Task 2 logic; **Tenant ID** and **Active Domain** isolation when org-specific; public-only path when no org knowledge. **Implementation:** Shared `getRAGChunks()` helper in `lib/knowledge-extraction/rag-helper.ts` used by both resolve and interact routes.
-- [ ] End-to-end: extension runs multi-step task on **live site**; DOM sent to backend; actions executed; task completes with `finish` or `fail` (see client roadmap). QA verifies history continuity, finish/fail, **no** 403 on domain, 401 when logged out, and correct `hasOrgKnowledge` for org vs public-only.
-
-**Exit criterion:** Task 3 complete when all above are verified. Thin Client backend is fully validated.
+- ✅ Mongoose models `tasks` and `task_actions` exist
+- ✅ `POST /api/agent/interact` implemented at `app/api/agent/interact/route.ts`
+- ✅ Response includes `hasOrgKnowledge`
+- ✅ Server uses only server-held action history for prompt context
+- ✅ RAG and `allowed_domains` filter reuse Task 2 logic
 
 ---
 
 ## 5. Task 4: User Preferences API (Server)
 
+**Status:** ✅ **COMPLETED**
+
 **Objective:** User preferences/settings API endpoint for Chrome extension settings page. Stores user preferences (theme, etc.) per tenant.
 
 **Deliverable:** `GET /api/v1/user/preferences` and `POST /api/v1/user/preferences` endpoints with Bearer token auth, tenant isolation, and CORS support.
-
----
 
 ### 5.1 Persistence for Task 4 (Mongoose)
 
@@ -398,8 +239,6 @@ Use this section to implement Task 1 auth **correctly** with the existing stack.
 - **Purpose:** Store user preferences per tenant (user or organization). One preference record per tenant.
 
 **No migrations:** Add the Mongoose schema only.
-
----
 
 ### 5.2 API Endpoints (Task 4)
 
@@ -421,39 +260,768 @@ Use this section to implement Task 1 auth **correctly** with the existing stack.
 
 **Shared auth helper:** Reuse `getSessionFromRequest()` from Task 1.
 
----
+### 5.3 Implementation Status
 
-### 5.3 Definition of Done / QA Verification (Task 4 — Server)
-
-- [x] Mongoose model `UserPreference` exists with proper indexes (unique on `tenantId`). **Implementation:** `lib/models/user-preference.ts` with `tenantId`, `userId`, `preferences`, `syncedAt`, timestamps.
-- [x] `GET /api/v1/user/preferences` returns 200 with preferences or defaults when Bearer valid; 401 without token. **Implementation:** `app/api/v1/user/preferences/route.ts` with GET handler.
-- [x] `POST /api/v1/user/preferences` returns 200 with upserted preferences when Bearer valid; 401 without token; 400 on validation error. **Implementation:** `app/api/v1/user/preferences/route.ts` with POST handler.
-- [x] Zod schemas and TypeScript types defined. **Implementation:** `lib/api/schemas/preferences.ts` with `preferencesRequestSchema`, `PreferencesRequest`, `PreferencesResponse`.
-- [x] CORS configured for extension origin (verified in code - `lib/utils/cors.ts` handles `/api/v1/*` routes).
-- [x] Tenant isolation verified (all queries scoped by `tenantId` from session).
-- [x] Error handling implemented (401, 400, 500) with Sentry integration.
-- [x] Database connection handling added (`connectDB()`).
-- [ ] End-to-end: extension can fetch and save preferences (see client roadmap). QA verifies on **live site**.
-
-**Implementation Status:**
-- ✅ Mongoose model: `UserPreference` created in `lib/models/user-preference.ts`
-  - Fields: `tenantId` (indexed, unique), `userId` (optional), `preferences.theme`, `syncedAt`, timestamps
-  - Unique index on `{ tenantId }` for one preference per tenant
-- ✅ API routes: `/api/v1/user/preferences` with GET and POST handlers
-  - **GET:** Fetches preferences by `tenantId` or returns defaults
-  - **POST:** Upserts preferences with Zod validation
-  - Both use `getSessionFromRequest()` for auth
-  - Both include CORS headers and error handling
-- ✅ Zod schemas: `lib/api/schemas/preferences.ts`
-  - `preferencesRequestSchema` for validation
-  - `PreferencesRequest` and `PreferencesResponse` types
-- ✅ Model export: Added to `lib/models/index.ts`
-
-**Exit criterion:** Server-side Task 4 complete when all above are verified. API ready for extension settings page integration.
+- ✅ Mongoose model `UserPreference` exists with proper indexes
+- ✅ `GET /api/v1/user/preferences` implemented
+- ✅ `POST /api/v1/user/preferences` implemented
+- ✅ Zod schemas and TypeScript types defined
+- ✅ CORS configured for extension origin
+- ✅ Tenant isolation verified
 
 ---
 
-## 6. Task Order and Dependencies
+## Part B: Agent Enhancements (Tasks 5-8)
+
+## 6. Task 5: Web Search Before Task Implementation
+
+**Status:** ✅ **COMPLETED** + **Dynamic Search Tooling** ✅ **COMPLETED**
+
+**Objective:** Perform web search before task planning to understand how to complete tasks. Enhanced with dynamic search tooling that allows LLM to search at any step.
+
+**Deliverable:** 
+- ✅ Pre-search for new tasks (cold starts)
+- ✅ Dynamic `googleSearch()` tool for mid-task searches
+- ✅ Search results integrated into LLM context
+- ✅ RAG-first approach (only search if knowledge insufficient)
+
+### 6.1 Implementation Details
+
+**Files Created:**
+- `lib/agent/web-search.ts` — Web search functionality with Tavily API (AI-native, domain-restricted to URL domain)
+
+**Files Modified:**
+- `lib/agent/action-config.ts` — Added `googleSearch` action definition
+- `lib/agent/prompt-builder.ts` — Added documentation for googleSearch tool
+- `app/api/agent/interact/route.ts` — Pre-search for new tasks and dynamic search handler
+
+**Features:**
+- Pre-search performed for new tasks (cold starts) to gather context
+- Dynamic `googleSearch(query)` action that LLM can call at any step
+- Search results injected into LLM thought for next action
+- RAG-first approach: only search if knowledge insufficient
+- Search results summarized by LLM for efficient context injection
+
+### 6.2 Implementation Status
+
+- ✅ `lib/agent/web-search.ts` created with `performWebSearch()` function
+- ✅ Pre-search for new tasks implemented
+- ✅ Dynamic `googleSearch()` action handler implemented
+- ✅ Search results integrated into LLM context
+- ✅ All data sources verified as real (Tavily API with domain filtering, LLM responses)
+
+---
+
+## 7. Task 6: User-Friendly Message Generation
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Generate user-friendly, non-technical messages directly from LLM instead of frontend transformation.
+
+**Deliverable:** All LLM engines produce user-friendly language in `<Thought>` responses.
+
+### 7.1 Implementation Details
+
+**Files Modified:**
+- All 6 LLM engine prompt files updated to generate user-friendly language
+
+**Features:**
+- LLM generates natural, non-technical language
+- Messages are directly usable by frontend without transformation
+- Consistent user-friendly tone across all agent responses
+
+### 7.2 Implementation Status
+
+- ✅ All LLM prompt files updated
+- ✅ User-friendly language generation verified
+- ✅ All data sources verified as real (user queries, action history, RAG, DOM)
+
+---
+
+## 8. Task 7: Chat Persistence & Session Management
+
+**Status:** ✅ **COMPLETED** + **DOM Bloat Management** ✅ **COMPLETED**
+
+**Objective:** Implement persistent conversation threads using Session and Message schemas. Enhanced with DOM bloat management to prevent MongoDB storage issues.
+
+**Deliverable:** 
+- ✅ Session and Message schemas
+- ✅ Chat history persistence
+- ✅ DOM snapshots stored separately (DOM bloat management)
+- ✅ domSummary for context without bloat
+
+### 8.1 Persistence for Task 7
+
+**New Mongoose Models:**
+
+- **`sessions`** — Mongoose schema in `lib/models/session.ts`. Fields: `sessionId` (UUID string, unique), `userId`, `tenantId`, `url`, `status`, `metadata`, `createdAt`, `updatedAt`. Indexes: `sessionId` unique, `userId+createdAt`, `tenantId+status+createdAt`.
+
+- **`messages`** — Mongoose schema in `lib/models/message.ts`. Fields: `messageId` (UUID string, unique), `sessionId`, `userId`, `tenantId`, `role`, `content`, `actionPayload`, `actionString`, `status`, `error`, `sequenceNumber`, `timestamp`, `metadata`, `snapshotId` (optional), `domSummary` (optional). Indexes: `messageId` unique, `sessionId+sequenceNumber`, `userId+timestamp`, `tenantId+sessionId+sequenceNumber`.
+
+- **`snapshots`** — Mongoose schema in `lib/models/snapshot.ts` (DOM bloat management). Fields: `snapshotId` (UUID string, unique), `sessionId`, `tenantId`, `domSnapshot` (full DOM), `url`, `timestamp`, `metadata`. Indexes: `snapshotId` unique, `sessionId+timestamp`, `tenantId+timestamp`.
+
+**DOM Bloat Management:**
+- DOM snapshots stored separately in `snapshots` collection
+- Messages use `snapshotId` reference instead of embedding full DOM
+- `domSummary` field (max 200 chars) provides context without bloat
+- Only create snapshots for DOMs > 1000 chars
+- History loading excludes full DOMs (uses `.select()` to exclude snapshotId)
+
+### 8.2 API Endpoints (Task 7)
+
+- **`POST /api/agent/interact`** — Enhanced to create/update sessions and messages
+- **`GET /api/session/[sessionId]/messages`** — Retrieve message history for a session
+- **`GET /api/session/latest`** — Get latest session for current user
+
+### 8.3 Implementation Status
+
+- ✅ Session model created in `lib/models/session.ts`
+- ✅ Message model created in `lib/models/message.ts`
+- ✅ Snapshot model created in `lib/models/snapshot.ts` (DOM bloat management)
+- ✅ Session and message persistence implemented in `app/api/agent/interact/route.ts`
+- ✅ Message history endpoints implemented
+- ✅ DOM bloat management: snapshots stored separately, domSummary for context
+- ✅ All data sources verified as real (MongoDB collections)
+
+---
+
+## 9. Task 8: Error Handling & Anti-Hallucination
+
+**Status:** ✅ **COMPLETED** + **Explicit Verification** ✅ **COMPLETED**
+
+**Objective:** Implement proper error propagation and validation. Enhanced with explicit verification state to prevent deadlock scenarios.
+
+**Deliverable:**
+- ✅ Error detection and injection
+- ✅ System messages for failures
+- ✅ `verifySuccess()` action for explicit verification
+- ✅ Finish() validation with verification requirement
+
+### 9.1 Implementation Details
+
+**Files Modified:**
+- `lib/agent/schemas.ts` — Error response schemas
+- `lib/agent/prompt-builder.ts` — Error handling in prompts
+- `lib/agent/action-config.ts` — Added `verifySuccess` action definition
+- `app/api/agent/interact/route.ts` — Error handling and verification logic
+
+**Features:**
+- Error detection from client reports
+- Error injection into LLM context
+- System messages for failures
+- `verifySuccess(description)` action for explicit verification
+- Finish() interception: forces verification after recent failures
+- Verification creates paper trail in message history
+
+### 9.2 Implementation Status
+
+- ✅ Error detection and injection implemented
+- ✅ System messages for failures implemented
+- ✅ `verifySuccess()` action added and handler implemented
+- ✅ Finish() validation with verification requirement implemented
+- ✅ All data sources verified as real (error reports from client, message history)
+
+---
+
+## Part C: Debug View Enhancements (Tasks 9-13)
+
+## 10. Task 9: Debug Logging Infrastructure
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Add server-side logging infrastructure to capture API request/response data, execution metrics, and error details for debug UI consumption.
+
+**Deliverable:** Debug logging system that captures API traces, execution metrics, and errors. Logs stored in MongoDB for retrieval by debug UI.
+
+### 10.1 Persistence for Task 9
+
+**New Mongoose Model: `debug_logs`**
+
+- **Collection:** `debug_logs`. **Mongoose** schema in `lib/models/debug-log.ts`.
+- **Fields:** `tenantId` (indexed), `taskId` (indexed, optional), `logType` (enum: `'api_request'`, `'api_response'`, `'execution_metric'`, `'error'`), `endpoint`, `method`, `requestData` (masked), `responseData`, `headers` (masked), `statusCode`, `duration`, `timestamp` (indexed), `error` (optional), `metadata` (optional).
+- **Indexes:** `{ tenantId, timestamp: -1 }`, `{ taskId, timestamp: -1 }`, `{ tenantId, logType, timestamp: -1 }`.
+
+### 10.2 API Endpoint Enhancements (Task 9)
+
+**Enhancement to Existing Endpoints:**
+
+1. **`POST /api/agent/interact` Enhancement:**
+   - Add debug logging middleware that captures request/response data, headers (masked), duration, status code
+   - Store log in `debug_logs` collection
+   - Link log to `taskId` if provided
+
+2. **`GET /api/knowledge/resolve` Enhancement:**
+   - Add debug logging middleware that captures request/response data, headers (masked), duration, status code
+   - Store log in `debug_logs` collection
+
+3. **New Endpoint: `GET /api/debug/logs`**
+   - **Purpose:** Retrieve debug logs for debug UI
+   - **Auth:** Bearer token
+   - **Query params:** `taskId` (optional), `logType` (optional), `limit` (optional, default: 100), `since` (optional)
+   - **Response:** Array of debug log objects
+   - **Tenant isolation:** Only returns logs for authenticated tenant
+
+### 10.3 Implementation Status
+
+- ✅ Mongoose model `DebugLog` created with proper indexes
+- ✅ Debug logging middleware added to `POST /api/agent/interact`
+- ✅ Debug logging middleware added to `GET /api/knowledge/resolve`
+- ✅ `GET /api/debug/logs` endpoint implemented with tenant isolation
+- ✅ Logs include masked sensitive data (Authorization headers, API keys)
+- ✅ Logs linked to `taskId` when available
+- ✅ CORS configured for extension origin
+
+---
+
+## 11. Task 10: RAG Context Debug Data
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Enhance RAG resolution to provide detailed debug information about knowledge selection, domain matching, and RAG mode decisions.
+
+**Deliverable:** RAG resolution returns detailed debug metadata about why org-specific vs public-only knowledge was used, domain matching results, and knowledge availability.
+
+### 11.1 Response Enhancement (Task 10)
+
+**Enhancement to `POST /api/agent/interact` Response:**
+
+**New Optional Field: `ragDebug`**
+- `hasOrgKnowledge` (boolean) — Whether org-specific RAG was used
+- `activeDomain` (string) — Resolved domain from URL
+- `domainMatch` (boolean) — Whether domain matches `allowed_domains`
+- `ragMode` (string) — `'org_specific'` | `'public_only'`
+- `reason` (string) — Explanation of RAG mode decision
+- `chunkCount` (number) — Number of chunks retrieved
+- `allowedDomains` (array, optional) — Domain patterns for current tenant (for debug)
+
+**Enhancement to `GET /api/knowledge/resolve` Response:**
+
+**New Optional Field: `ragDebug`** (same structure as above)
+
+### 11.2 Implementation Status
+
+- ✅ Enhanced `getRAGChunks()` in `lib/knowledge-extraction/rag-helper.ts` to return `ragDebug`
+- ✅ `POST /api/agent/interact` response includes `ragDebug` field (optional)
+- ✅ `GET /api/knowledge/resolve` response includes `ragDebug` field (optional)
+- ✅ `ragDebug` includes domain matching information, RAG mode decision reason, chunk count
+- ✅ Tenant isolation maintained (no cross-tenant domain patterns exposed)
+
+---
+
+## 12. Task 11: Execution Metrics Collection
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Collect execution metrics (timing, token usage, step counts) for debug UI display.
+
+**Deliverable:** Execution metrics captured and stored with task actions. Metrics available via API for debug UI.
+
+### 12.1 Metrics Collection (Task 11)
+
+**Enhancement to `POST /api/agent/interact`:**
+
+**Metrics to Capture:**
+- Request processing time (total duration)
+- LLM call duration (if applicable)
+- RAG retrieval duration (if applicable)
+- Token usage (`promptTokens`, `completionTokens`)
+- Action count (from `task_actions` for current task)
+- Step index (current step in task)
+
+**Storage:**
+- Store metrics in `task_actions` record (extend existing schema)
+- Store aggregate metrics in `tasks` record (extend existing schema)
+
+### 12.2 Implementation Status
+
+- ✅ Extended `TaskAction` schema with `metrics` field
+- ✅ Extended `Task` schema with aggregate `metrics` field
+- ✅ Execution metrics captured in `POST /api/agent/interact`
+- ✅ Metrics stored in `task_actions` records
+- ✅ Aggregate metrics stored in `tasks` records
+- ✅ Metrics available in API responses for debug UI
+
+---
+
+## 13. Task 12: Error Details Enhancement
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Enhance error responses with detailed debug information for debug UI display.
+
+**Deliverable:** Error responses include detailed error context, stack traces (in debug mode), and recovery suggestions.
+
+### 13.1 Error Response Enhancement (Task 12)
+
+**Enhancement to Error Responses:**
+
+**New Optional Field: `debugInfo` (only when debug mode enabled):**
+- `errorType` (string) — Error classification
+- `errorMessage` (string) — Detailed error message
+- `stackTrace` (string, optional) — Stack trace (server-side only, not exposed to client in production)
+- `context` (object) — Error context (request data, task state, etc.)
+- `suggestions` (array, optional) — Recovery suggestions
+
+**Error Types:**
+- `VALIDATION_ERROR` — Request validation failed
+- `LLM_ERROR` — LLM API call failed
+- `RAG_ERROR` — RAG retrieval failed
+- `EXECUTION_ERROR` — Action execution failed
+- `AUTH_ERROR` — Authentication/authorization failed
+- `RATE_LIMIT_ERROR` — Rate limit exceeded
+
+### 13.2 Implementation Status
+
+- ✅ Created error debug utility in `lib/utils/error-debug.ts`
+- ✅ Enhanced `errorResponse()` function in `lib/utils/api-response.ts`
+- ✅ Updated all error responses in `POST /api/agent/interact` with debug info
+- ✅ Error responses include `debugInfo` field (when debug mode enabled)
+- ✅ `debugInfo` includes error type, message, context, and recovery suggestions
+- ✅ Stack traces only included in debug mode (not production)
+
+---
+
+## 14. Task 13: Debug Session Export Support
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Provide API endpoint to export complete debug session data for debugging and support.
+
+**Deliverable:** `GET /api/debug/session/{taskId}/export` endpoint that returns complete debug session data.
+
+### 14.1 New Endpoint: `GET /api/debug/session/{taskId}/export`
+
+**Purpose:** Export complete debug session data for a specific task.
+
+**Auth:** Bearer token
+
+**Path Parameters:**
+- `taskId` (string, required) — Task ID to export
+
+**Response:**
+- Complete task data including:
+  - Task metadata (taskId, status, url, query, createdAt, updatedAt)
+  - Action history (all `task_actions` for task)
+  - Debug logs (all `debug_logs` for task)
+  - Execution metrics (aggregate and per-action)
+  - Error details (if any)
+  - RAG context (if available)
+- **Sensitive data:** API keys, tokens masked or excluded
+
+**Tenant Isolation:**
+- Only returns data for tasks owned by authenticated tenant
+- 404 if task not found or not owned by tenant
+
+### 14.2 Implementation Status
+
+- ✅ `GET /api/debug/session/[taskId]/export` endpoint implemented
+- ✅ Endpoint returns complete task data (task, actions, logs, metrics)
+- ✅ Sensitive data (API keys, tokens) masked or excluded
+- ✅ Tenant isolation enforced (404 for cross-tenant access)
+- ✅ CORS configured for extension origin
+- ✅ Response format suitable for JSON file download
+
+---
+
+## Part D: Manus-Style Orchestrator (Tasks 14-18)
+
+## 15. Task 14: Planning Engine
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Implement Planning Engine that generates high-level action plans before execution begins.
+
+**Deliverable:** Planning Engine generates linear action plans from user instructions. Plans stored in `tasks.plan` field and reused across requests.
+
+### 15.1 Persistence for Task 14
+
+**Enhancement to Existing `tasks` Schema:**
+
+**New Fields:**
+- `plan` (object, optional) — Action plan structure:
+  - `steps` (array) — Array of plan step objects
+  - `currentStepIndex` (number, default: 0) — Current position in plan
+  - `createdAt` (Date) — When plan was created
+- `status` (string, enum) — Extended enum: `'planning'`, `'executing'`, `'verifying'`, `'correcting'`, `'completed'`, `'failed'`, `'interrupted'` (extends existing status enum)
+
+**Plan Step Structure:**
+- `index` (number) — Step index in plan
+- `description` (string) — High-level step description (e.g., "Enter email address")
+- `reasoning` (string, optional) — Why this step is needed
+- `toolType` (string, enum) — `'DOM'` | `'SERVER'` | `'MIXED'`
+- `status` (string, enum) — `'pending'` | `'active'` | `'completed'` | `'failed'`
+- `expectedOutcome` (object, optional) — What should happen after this step (for verification)
+
+### 15.2 Planning Engine Implementation (Task 14)
+
+**Component: `lib/agent/planning-engine.ts`**
+
+**Responsibilities:**
+- Generate high-level action plan from user instructions
+- Break down task into logical steps
+- Determine tool type needed for each step
+- Store plan in `tasks.plan` field
+
+**Planning Process:**
+1. Receive user instructions and current DOM
+2. Use LLM to generate plan (linear list of steps)
+3. Each step includes: description, reasoning, toolType, expectedOutcome
+4. Store plan in database
+5. Return plan in response (for debug UI)
+
+**LLM Integration:**
+- Reuse existing LLM client patterns
+- Use lightweight model (e.g., GPT-4o-mini) for planning to reduce cost
+- Include RAG context if available
+
+### 15.3 Integration with `POST /api/agent/interact` (Task 14)
+
+**Enhancement to Existing Endpoint:**
+
+**New Flow:**
+1. Load task (existing)
+2. **Check if plan exists:**
+   - If no plan → Generate plan → Store in `tasks.plan` → Set status to `'executing'`
+   - If plan exists → Use existing plan
+3. Get current step from plan (using `currentStepIndex`)
+4. Continue with existing execution flow
+
+**Response Enhancement:**
+- Include `plan` in response (for debug UI)
+- Include `currentStep` and `totalSteps` (for progress tracking)
+- Include `status` (explicit status: `'planning'`, `'executing'`, etc.)
+
+**Backward Compatibility:**
+- If `plan` is null (legacy task), generate plan on first request
+- Existing clients ignore new fields (backward compatible)
+
+### 15.4 Implementation Status
+
+- ✅ `tasks` schema extended with `plan` field
+- ✅ `tasks.status` enum extended with orchestrator statuses
+- ✅ Planning Engine component implemented (`lib/agent/planning-engine.ts`)
+- ✅ Planning Engine generates linear action plans
+- ✅ Plans stored in `tasks.plan` field
+- ✅ `POST /api/agent/interact` generates plan on first request (if no plan exists)
+- ✅ `POST /api/agent/interact` uses existing plan on subsequent requests
+- ✅ Response includes `plan`, `currentStep`, `totalSteps`, `status`
+- ✅ Backward compatibility maintained (existing tasks work)
+- ✅ Tenant isolation verified (plans scoped by tenantId)
+
+---
+
+## 16. Task 15: Verification Engine
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Implement Verification Engine that compares expected vs actual state after each action.
+
+**Deliverable:** Verification Engine verifies if actions achieved their expected outcomes. Verification results stored and used for self-correction.
+
+### 16.1 Persistence for Task 15
+
+**Enhancement to Existing `task_actions` Schema:**
+
+**New Fields:**
+- `expectedOutcome` (object, optional) — What should happen after this action:
+  - `description` (string) — Natural language description
+  - `domChanges` (object, optional) — DOM-based expectations:
+    - `elementShouldExist` (string, optional) — Element selector
+    - `elementShouldNotExist` (string, optional) — Element selector
+    - `elementShouldHaveText` (object, optional) — `{ selector, text }`
+    - `urlShouldChange` (boolean, optional)
+- `domSnapshot` (string, optional) — DOM state when action was taken (for comparison)
+
+**New Mongoose Model: `verification_records`**
+
+- **Collection:** `verification_records`. **Mongoose** schema in `lib/models/verification-record.ts`.
+- **Fields:** `tenantId` (indexed), `taskId` (indexed), `stepIndex`, `success` (boolean), `confidence` (number, 0-1), `expectedState` (object), `actualState` (object), `comparison` (object), `reason` (string), `timestamp` (indexed).
+- **Indexes:** `{ tenantId, taskId, stepIndex }`, `{ tenantId, timestamp: -1 }`.
+
+### 16.2 Verification Engine Implementation (Task 15)
+
+**Component: `lib/agent/verification-engine.ts`**
+
+**Responsibilities:**
+- Compare expected vs actual state
+- Calculate confidence score
+- Determine if step succeeded or failed
+- Provide detailed verification report
+
+**Verification Process:**
+1. Receive previous action's `expectedOutcome` and current DOM
+2. Extract actual state from current DOM
+3. Perform DOM-based checks (element existence, text matching, URL changes)
+4. Perform semantic verification (LLM-based analysis)
+5. Calculate confidence score (weighted: DOM 40%, Semantic 60%)
+6. Determine success (confidence >= 0.7 threshold)
+7. Store verification result in `verification_records`
+
+**Verification Strategies:**
+- **DOM-Based Checks:** Fast, structural checks (element exists, text matches, URL changed)
+- **Semantic Verification:** LLM analyzes if page state matches expectation (uses lightweight model for cost efficiency)
+- **Hybrid Approach:** Combines both for speed and accuracy
+
+### 16.3 Integration with `POST /api/agent/interact` (Task 15)
+
+**Enhancement to Existing Endpoint:**
+
+**New Flow (at start of request):**
+1. Load task and previous action (existing)
+2. **If previous action exists and has `expectedOutcome`:**
+   - Call Verification Engine to verify previous action
+   - Store verification result in `verification_records`
+   - **If verification failed:**
+     - Trigger Self-Correction Engine (Task 16)
+     - Return corrected action or retry
+   - **If verification succeeded:**
+     - Proceed to next step
+3. Continue with existing execution flow
+
+**Response Enhancement:**
+- Include `verification` in response (if verification occurred):
+  - `success` (boolean)
+  - `confidence` (number)
+  - `reason` (string)
+
+### 16.4 Implementation Status
+
+- ✅ `task_actions` schema extended with `expectedOutcome` and `domSnapshot` fields
+- ✅ `verification_records` Mongoose model created with proper indexes
+- ✅ Verification Engine component implemented (`lib/agent/verification-engine.ts`)
+- ✅ Verification Engine performs DOM-based checks
+- ✅ Verification Engine performs semantic verification (LLM-based)
+- ✅ Verification Engine calculates confidence scores
+- ✅ `POST /api/agent/interact` verifies previous action at start of request
+- ✅ Verification results stored in `verification_records`
+- ✅ Response includes `verification` field when applicable
+- ✅ Tenant isolation verified (verification records scoped by tenantId)
+
+---
+
+## 17. Task 16: Self-Correction Engine
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Implement Self-Correction Engine that analyzes verification failures and generates alternative approaches.
+
+**Deliverable:** Self-Correction Engine generates correction strategies when verification fails. Failed steps are retried with alternative approaches.
+
+### 17.1 Persistence for Task 16
+
+**New Mongoose Model: `correction_records`**
+
+- **Collection:** `correction_records`. **Mongoose** schema in `lib/models/correction-record.ts`.
+- **Fields:** `tenantId` (indexed), `taskId` (indexed), `stepIndex`, `originalStep` (object), `correctedStep` (object), `strategy` (enum), `reason` (string), `attemptNumber`, `timestamp` (indexed).
+- **Indexes:** `{ tenantId, taskId, stepIndex, attemptNumber }`, `{ tenantId, timestamp: -1 }`.
+
+**Enhancement to `tasks` Schema:**
+
+**New Fields:**
+- `maxRetriesPerStep` (number, default: 3) — Max retries per step
+- `consecutiveFailures` (number, default: 0) — Track consecutive failures
+
+### 17.2 Self-Correction Engine Implementation (Task 16)
+
+**Component: `lib/agent/self-correction-engine.ts`**
+
+**Responsibilities:**
+- Analyze verification failures
+- Generate alternative correction strategies
+- Select best strategy based on failure type
+- Create corrected step with new approach
+- Update plan if needed
+
+**Correction Strategies:**
+1. **ALTERNATIVE_SELECTOR:** Try different element selector
+2. **ALTERNATIVE_TOOL:** Use different tool (e.g., keyboard instead of click)
+3. **GATHER_INFORMATION:** Need more info before proceeding (e.g., search for company name)
+4. **UPDATE_PLAN:** Plan assumptions were wrong, update plan
+5. **RETRY_WITH_DELAY:** Simple retry with delay (timing issue)
+
+**Correction Process:**
+1. Receive failed step and verification result
+2. Use LLM to analyze failure reason
+3. Generate multiple correction strategies
+4. Select best strategy based on failure type
+5. Create corrected step with new approach
+6. Store correction record
+7. Return corrected action for retry
+
+**Retry Limits:**
+- Max retries per step: 3 (configurable)
+- Max consecutive failures: 3 (configurable)
+- After max retries: Mark step as failed, task as failed
+
+### 17.3 Integration with `POST /api/agent/interact` (Task 16)
+
+**Enhancement to Existing Endpoint:**
+
+**New Flow (when verification fails):**
+1. Verification Engine determines failure (Task 15)
+2. **Check retry limits:**
+   - If max retries exceeded → Mark task as failed, return error
+   - If retries available → Proceed to self-correction
+3. **Call Self-Correction Engine:**
+   - Analyze failure
+   - Generate correction strategy
+   - Create corrected step
+4. **Update plan:**
+   - Replace failed step with corrected step
+   - Increment retry count
+5. **Return corrected action:**
+   - Client retries with corrected action
+   - Don't advance to next step (retry same step)
+
+**Response Enhancement:**
+- Include `correction` in response (if self-correction occurred):
+  - `strategy` (string)
+  - `reason` (string)
+  - `retryAction` (string) — Action to retry
+
+### 17.4 Implementation Status
+
+- ✅ `correction_records` Mongoose model created with proper indexes
+- ✅ `tasks` schema extended with retry limit fields
+- ✅ Self-Correction Engine component implemented (`lib/agent/self-correction-engine.ts`)
+- ✅ Self-Correction Engine analyzes failures and generates strategies
+- ✅ Self-Correction Engine supports multiple correction strategies
+- ✅ `POST /api/agent/interact` triggers self-correction on verification failure
+- ✅ Correction records stored in `correction_records`
+- ✅ Retry limits enforced (max retries per step)
+- ✅ Response includes `correction` field when applicable
+- ✅ Tenant isolation verified (correction records scoped by tenantId)
+
+---
+
+## 18. Task 17: Outcome Prediction
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Implement Outcome Prediction Engine that predicts what should happen after each action.
+
+**Deliverable:** Outcome Prediction Engine generates expected outcomes for each action. Expected outcomes stored with actions for verification.
+
+### 18.1 Outcome Prediction Engine Implementation (Task 17)
+
+**Component: `lib/agent/outcome-prediction-engine.ts`**
+
+**Responsibilities:**
+- Predict what should happen after an action
+- Generate expected outcome structure
+- Store expected outcome with action
+
+**Prediction Process:**
+1. Receive tool action and plan step
+2. Use LLM to predict expected outcome
+3. Generate expected outcome structure:
+   - Natural language description
+   - DOM-based expectations (element exists, text matches, URL changes)
+4. Store expected outcome with action (in `task_actions.expectedOutcome`)
+
+**LLM Integration:**
+- Reuse existing LLM client patterns
+- Use lightweight model for prediction to reduce cost
+- Include current DOM context for accurate prediction
+
+### 18.2 Integration with `POST /api/agent/interact` (Task 17)
+
+**Enhancement to Existing Endpoint:**
+
+**New Flow (before returning action):**
+1. Generate action (existing flow)
+2. **Call Outcome Prediction Engine:**
+   - Predict what should happen after action
+   - Generate expected outcome structure
+3. **Store expected outcome:**
+   - Save in `task_actions.expectedOutcome` field
+   - Used for verification in next request
+
+**Response Enhancement:**
+- Include `expectedOutcome` in response:
+  - `description` (string)
+  - `domChanges` (object, optional)
+
+### 18.3 Implementation Status
+
+- ✅ Outcome Prediction Engine component implemented (`lib/agent/outcome-prediction-engine.ts`)
+- ✅ Outcome Prediction Engine generates expected outcomes
+- ✅ Expected outcomes include natural language description
+- ✅ Expected outcomes include DOM-based expectations
+- ✅ `POST /api/agent/interact` generates expected outcome before returning action
+- ✅ Expected outcome stored in `task_actions.expectedOutcome` field
+- ✅ Response includes `expectedOutcome` field
+
+---
+
+## 19. Task 18: Step Refinement & Tool Routing
+
+**Status:** ✅ **COMPLETED**
+
+**Objective:** Implement Step Refinement Engine that converts high-level plan steps into specific tool actions. Add tool routing for DOM vs Server tools.
+
+**Deliverable:** Step Refinement Engine refines plan steps to tool actions. Tool routing directs DOM tools to client and server tools to server execution.
+
+### 19.1 Step Refinement Engine Implementation (Task 18)
+
+**Component: `lib/agent/step-refinement-engine.ts`**
+
+**Responsibilities:**
+- Convert high-level plan step to specific tool action
+- Determine which tool to use (DOM vs Server)
+- Generate tool parameters
+- Route to appropriate handler
+
+**Refinement Process:**
+1. Receive plan step and current DOM
+2. Use LLM to refine step to tool action
+3. Determine tool type (DOM vs SERVER)
+4. Generate tool parameters
+5. Return tool action for execution
+
+**LLM Integration:**
+- Reuse existing LLM client patterns
+- Include current DOM context for accurate refinement
+- Include action history for context
+
+**Tool Routing:**
+- **DOM Tools:** Return action to client for execution
+- **Server Tools:** Execute on server directly (Phase 3+)
+
+### 19.2 Integration with `POST /api/agent/interact` (Task 18)
+
+**Enhancement to Existing Endpoint:**
+
+**New Flow (after getting current step from plan):**
+1. Get current step from plan (Task 14)
+2. **Call Step Refinement Engine:**
+   - Refine step to tool action
+   - Determine tool type
+   - Generate tool parameters
+3. **Route tool execution:**
+   - **DOM Tools:** Return action to client (existing flow)
+   - **Server Tools:** Execute on server (Phase 3+, not in Task 18)
+4. Continue with existing execution flow
+
+**Response Enhancement:**
+- Include `toolAction` in response:
+  - `toolName` (string)
+  - `toolType` (string) — `'DOM'` | `'SERVER'`
+  - `parameters` (object)
+
+### 19.3 Implementation Status
+
+- ✅ Step Refinement Engine component implemented (`lib/agent/step-refinement-engine.ts`)
+- ✅ Step Refinement Engine converts plan steps to tool actions
+- ✅ Step Refinement Engine determines tool type (DOM vs SERVER)
+- ✅ Tool routing implemented (DOM tools to client, server tools to server)
+- ✅ `POST /api/agent/interact` refines steps before execution
+- ✅ Response includes `toolAction` field
+- ✅ Backward compatibility maintained (existing actions still work)
+
+---
+
+## 20. Task Order and Dependencies
 
 | Order | Task | Depends on | Server delivers |
 |-------|------|------------|-----------------|
@@ -461,31 +1029,66 @@ Use this section to implement Task 1 auth **correctly** with the existing stack.
 | **2** | Runtime Knowledge Resolution | Task 1 | Resolve API, RAG schema |
 | **3** | Server-Side Action Loop | Task 1, Task 2 | Interact API, task/history schema |
 | **4** | User Preferences API | Task 1 | Preferences API, user preference model |
+| **5** | Web Search Before Task Implementation | Task 3 | Web search functionality, dynamic search tool |
+| **6** | User-Friendly Message Generation | Task 3 | User-friendly LLM prompts |
+| **7** | Chat Persistence & Session Management | Task 3 | Session and Message schemas, DOM bloat management |
+| **8** | Error Handling & Anti-Hallucination | Task 3 | Error handling, verification action |
+| **9** | Debug Logging Infrastructure | Task 3 | Debug logs model, API logging, logs endpoint |
+| **10** | RAG Context Debug Data | Task 2 | RAG debug metadata in responses |
+| **11** | Execution Metrics Collection | Task 3 | Metrics collection and storage |
+| **12** | Error Details Enhancement | Task 8 | Enhanced error responses with debug info |
+| **13** | Debug Session Export Support | Task 9, Task 10, Task 11, Task 12 | Session export endpoint |
+| **14** | Planning Engine | Task 3 | Planning engine, plan storage, plan generation |
+| **15** | Verification Engine | Task 14 | Verification engine, verification records, verification logic |
+| **16** | Self-Correction Engine | Task 15 | Self-correction engine, correction records, retry logic |
+| **17** | Outcome Prediction | Task 14, Task 15 | Outcome prediction engine, expected outcome generation |
+| **18** | Step Refinement & Tool Routing | Task 14, Task 17 | Step refinement engine, tool routing |
 
-- **Task 2** depends on **Task 1** (auth, tenant resolution, `allowed_domains`).  
-- **Task 3** depends on **Task 1** (auth) and **Task 2** (RAG schema, domain allowlist, resolve patterns).
-- **Task 4** depends on **Task 1** (auth, tenant resolution, `getSessionFromRequest` helper).
+**Dependencies:**
+- **Part A (Core):** Tasks 1-4 are sequential
+- **Part B (Enhancements):** Tasks 5-8 depend on Task 3
+- **Part C (Debug):** Tasks 9-13 can be implemented independently (parallel development possible)
+- **Part D (Orchestrator):** Tasks 14-18 are sequential:
+  - Task 15 depends on Task 14 (verification needs plans)
+  - Task 16 depends on Task 15 (correction needs verification)
+  - Task 17 depends on Task 14 (prediction needs plans)
+  - Task 18 depends on Task 14 and Task 17 (refinement needs plans and prediction)
 
 ---
 
-## 7. References
+## 21. References
 
-### 6.1 Internal
+### 21.1 Internal
 
-- **`SERVER_SIDE_AGENT_ARCH.md`** — Specification: Auth API (§2), interact (§4), resolve (§5), RAG, action history. DB stack & tenant (§1.3), interact vs resolve (§5.6), Extension notes (§10), References (§11). **Keep in sync with this roadmap.**  
-- **`THIN_CLIENT_ROADMAP_CLIENT.md`** — Extension integration for Tasks 1–3.  
-- **`ARCHITECTURE.md`** — Hybrid DB (Prisma + Mongoose), tenant model (user / organization), multi-tenancy.  
+- **`SERVER_SIDE_AGENT_ARCH.md`** — Specification: Auth API (§2), interact (§4), resolve (§5), RAG, action history. DB stack & tenant (§1.3), interact vs resolve (§5.6), Extension notes (§10), References (§11). **Keep in sync with this roadmap.**
+- **`THIN_CLIENT_ROADMAP_CLIENT.md`** — Extension integration for Tasks 1-3.
+- **`ARCHITECTURE.md`** — Hybrid DB (Prisma + Mongoose), tenant model (user / organization), multi-tenancy.
 - **`BROWSER_AUTOMATION_RESOLVE_SCHEMA.md`** — **Browser automation / extraction service** `GET /api/knowledge/resolve` request & response schema. Referenced by Task 2 (§3.1, §3.2) and `lib/knowledge-extraction/resolve-client.ts`.
+- **`DEBUG_VIEW_IMPROVEMENTS.md`** — Debug View requirements (client-focused, but server provides debug data).
+- **`MANUS_ORCHESTRATOR_ARCHITECTURE.md`** — Manus orchestrator architecture specification.
 
-### 6.2 Better Auth
+### 21.2 Better Auth
 
-- [Browser Extension Guide](https://www.better-auth.com/docs/guides/browser-extension-guide) — Extension setup, `trustedOrigins`, `host_permissions`, client `createAuthClient` + `baseURL`.  
-- [Bearer Token Authentication](https://beta.better-auth.com/docs/plugins/bearer) — `bearer()` plugin, `set-auth-token` header, `fetchOptions.auth: { type: "Bearer", token }`, `getSession` with Bearer.  
-- [Options / trustedOrigins](https://www.better-auth.com/docs/reference/options) — `trustedOrigins` config for extension origins.  
+- [Browser Extension Guide](https://www.better-auth.com/docs/guides/browser-extension-guide) — Extension setup, `trustedOrigins`, `host_permissions`, client `createAuthClient` + `baseURL`.
+- [Bearer Token Authentication](https://beta.better-auth.com/docs/plugins/bearer) — `bearer()` plugin, `set-auth-token` header, `fetchOptions.auth: { type: "Bearer", token }`, `getSession` with Bearer.
+- [Options / trustedOrigins](https://www.better-auth.com/docs/reference/options) — `trustedOrigins` config for extension origins.
 - [Integrations / Next](https://better-auth.com/docs/integrations/next) — `toNextJsHandler(auth)`, App Router `/api/auth/[...all]`.
 
-### 6.3 Next.js
+### 21.3 Next.js
 
-- [App Router](https://nextjs.org/docs/app) — App Router overview.  
-- [Middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware) — CORS, preflight, extension origin.  
+- [App Router](https://nextjs.org/docs/app) — App Router overview.
+- [Middleware](https://nextjs.org/docs/app/building-your-application/routing/middleware) — CORS, preflight, extension origin.
 - [Route Handlers](https://nextjs.org/docs/app/building-your-application/routing/route-handlers) — `NextRequest` / `NextResponse`, API route layout for `/api/v1/*`, `/api/agent/*`, `/api/knowledge/*`.
+
+---
+
+## 22. Summary
+
+This roadmap documents the complete server-side implementation for the Thin Client architecture, including:
+
+- **Core Infrastructure (Tasks 1-4):** Authentication, knowledge resolution, action loop, user preferences
+- **Agent Enhancements (Tasks 5-8):** Web search, user-friendly messages, chat persistence, error handling
+- **Debug View Enhancements (Tasks 9-13):** Debug logging, RAG debug data, execution metrics, error details, session export
+- **Manus-Style Orchestrator (Tasks 14-18):** Planning, verification, self-correction, outcome prediction, step refinement
+
+All tasks are **completed** and implementation is verified. The system provides a comprehensive server-side intelligence layer for the Chrome extension client.

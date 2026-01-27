@@ -72,6 +72,23 @@ interface ResolveKnowledgeResponse {
 }
 
 /**
+ * DOM change information after action execution
+ * Helps the server understand what changed on the page
+ */
+interface DOMChangeInfo {
+  /** Number of elements that appeared */
+  addedCount: number;
+  /** Number of elements that disappeared */
+  removedCount: number;
+  /** Whether a dropdown/menu was detected */
+  dropdownDetected: boolean;
+  /** Dropdown options if detected (text/labels) */
+  dropdownOptions?: string[];
+  /** Time for DOM to stabilize in ms */
+  stabilizationTime: number;
+}
+
+/**
  * Request body for POST /api/agent/interact
  * Reference: THIN_CLIENT_ROADMAP.md §4.1 (Task 3: Server-Side Action Loop)
  * Reference: SERVER_SIDE_AGENT_ARCH.md §4.2 (POST /api/agent/interact)
@@ -95,6 +112,8 @@ interface AgentInteractRequest {
     success: boolean;
     actualState?: string; // What actually happened (for verification)
   };
+  // DOM change information after last action (helps server understand page state changes)
+  domChanges?: DOMChangeInfo;
 }
 
 /**
@@ -148,14 +167,59 @@ interface ActionPlan {
 }
 
 /**
+ * Missing information field structure
+ * Reference: REASONING_LAYER_IMPROVEMENTS.md v2.0
+ */
+export interface MissingInfoField {
+  field: string; // e.g., "patient_dob"
+  type: 'EXTERNAL_KNOWLEDGE' | 'PRIVATE_DATA'; // Can be found via search vs must ask user
+  description: string; // Human-readable description
+}
+
+/**
+ * Evidence structure supporting reasoning decisions
+ * Reference: REASONING_LAYER_IMPROVEMENTS.md v2.0
+ */
+export interface ReasoningEvidence {
+  sources: string[]; // e.g., ["chat_history", "page_dom", "rag_knowledge"]
+  quality: 'high' | 'medium' | 'low'; // Quality of evidence
+  gaps: string[]; // Missing information or uncertainties
+}
+
+/**
+ * Reasoning data from the backend's reasoning layer (Enhanced v2.0)
+ * Reference: REASONING_LAYER_IMPROVEMENTS.md v2.0
+ */
+export interface ReasoningData {
+  source: 'MEMORY' | 'PAGE' | 'WEB_SEARCH' | 'ASK_USER';
+  confidence: number; // 0.0 to 1.0 (REQUIRED) - Model's certainty based on evidence
+  reasoning: string; // User-friendly explanation of the reasoning process
+  missingInfo?: MissingInfoField[]; // Enhanced structure with type classification
+  evidence?: ReasoningEvidence; // Evidence supporting the decision (REQUIRED in v2.0)
+  // Iterative search information (for WEB_SEARCH source)
+  searchIteration?: {
+    attempt: number; // Current search attempt (1-indexed)
+    maxAttempts: number; // Maximum attempts allowed
+    refinedQuery?: string; // Refined query for this iteration
+    evaluationResult?: {
+      solved: boolean; // Whether results solved the problem
+      shouldRetry: boolean; // Whether to retry with refined query
+      shouldAskUser: boolean; // Whether to ask user instead
+      confidence: number; // Confidence in evaluation
+    };
+  };
+}
+
+/**
  * Response from POST /api/agent/interact
  * Reference: THIN_CLIENT_ROADMAP.md §4.1 (Task 3: Server-Side Action Loop)
  * Reference: SERVER_SIDE_AGENT_ARCH.md §4.2 (POST /api/agent/interact)
  * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §7.2 (Response Format) - Orchestrator enhancements
+ * Reference: REASONING_LAYER_IMPROVEMENTS.md - Reasoning layer enhancements
  */
 interface NextActionResponse {
   thought: string;
-  action: string; // e.g. "click(123)", "setValue(123, \"x\")", "finish()", "fail()"
+  action: string; // e.g. "click(123)", "setValue(123, \"x\")", "finish()", "fail()", "ask_user()"
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -167,10 +231,20 @@ interface NextActionResponse {
   plan?: ActionPlan; // Action plan from orchestrator
   currentStep?: number; // Current step number (1-indexed)
   totalSteps?: number; // Total steps in plan
-  status?: 'planning' | 'executing' | 'verifying' | 'correcting' | 'completed' | 'failed'; // Orchestrator status
+  status?: 'planning' | 'executing' | 'verifying' | 'correcting' | 'completed' | 'failed' | 'needs_user_input'; // Orchestrator status
   verification?: VerificationResult; // Verification result for previous step (Task 7)
   correction?: CorrectionResult; // Self-correction result for current step (Task 8)
   expectedOutcome?: string; // Expected outcome for next verification (Task 9)
+  // Reasoning layer enhancements (optional, backward compatible)
+  reasoning?: ReasoningData; // Reasoning metadata from the reasoning layer (Enhanced v2.0)
+  userQuestion?: string; // Question to ask user (when status is 'needs_user_input')
+  missingInformation?: MissingInfoField[]; // Enhanced missing information fields with type classification
+  reasoningContext?: {
+    searchPerformed?: boolean; // Whether web search was performed
+    searchSummary?: string; // Summary of search results
+    searchIterations?: number; // Number of search iterations performed
+    finalQuery?: string; // Final refined query used
+  };
 }
 
 // Get API base URL from environment or use default
@@ -200,6 +274,7 @@ class ApiClient {
 
   /**
    * Handle API errors with appropriate status codes
+   * Returns user-friendly error messages for common failure scenarios
    */
   private async handleError(response: Response): Promise<never> {
     const error: ApiError = {
@@ -228,6 +303,36 @@ class ApiClient {
         throw new Error('DOMAIN_NOT_ALLOWED');
       }
       throw new Error(`FORBIDDEN: ${error.message}`);
+    }
+
+    // Handle 400 - Bad Request (includes max retries, validation errors, etc.)
+    if (response.status === 400) {
+      const lowerMessage = error.message.toLowerCase();
+      
+      // Max retries exceeded - task failed after multiple attempts
+      if (lowerMessage.includes('max retries') || lowerMessage.includes('maximum retries') || 
+          error.code === 'MAX_RETRIES_EXCEEDED') {
+        throw new Error('MAX_RETRIES_EXCEEDED: The task could not be completed after multiple attempts. The page may have changed or the action could not be verified. Please try again or simplify your request.');
+      }
+      
+      // Verification failed
+      if (lowerMessage.includes('verification failed') || error.code === 'VERIFICATION_FAILED') {
+        throw new Error('VERIFICATION_FAILED: The action was attempted but could not be verified. The page may not have responded as expected.');
+      }
+      
+      // Invalid action
+      if (lowerMessage.includes('invalid action') || error.code === 'INVALID_ACTION') {
+        throw new Error('INVALID_ACTION: The requested action is not valid for this page.');
+      }
+      
+      // Element not found
+      if (lowerMessage.includes('element not found') || lowerMessage.includes('not found') ||
+          error.code === 'ELEMENT_NOT_FOUND') {
+        throw new Error('ELEMENT_NOT_FOUND: Could not find the element to interact with. The page may have changed.');
+      }
+      
+      // Generic 400 with original message
+      throw new Error(`BAD_REQUEST: ${error.message}`);
     }
 
     throw error;
@@ -493,7 +598,8 @@ class ApiClient {
       response: { body?: unknown; status: number; headers?: Record<string, string> };
       duration: number;
       error?: string;
-    }) => void
+    }) => void,
+    domChanges?: DOMChangeInfo
   ): Promise<NextActionResponse> {
     const body: AgentInteractRequest = {
       url,
@@ -504,6 +610,7 @@ class ApiClient {
       lastActionStatus,
       lastActionError,
       lastActionResult,
+      domChanges,
     };
 
     return this.request<NextActionResponse>('POST', '/api/agent/interact', body, logger);
@@ -617,5 +724,6 @@ export type {
   NextActionResponse, 
   AgentInteractRequest,
   PreferencesResponse,
-  PreferencesRequest
+  PreferencesRequest,
+  DOMChangeInfo
 };

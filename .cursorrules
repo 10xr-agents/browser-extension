@@ -106,6 +106,97 @@ export default Component;
 * Actions are accessed via: `state.settings.actions.actionName`
 * **Why?** Returning new objects/arrays from selectors creates new references on every render, causing Zustand to think state changed, triggering infinite re-renders
 
+**5. useEffect Dependencies (Prevents React Error #310):**
+* **⚠️ CRITICAL: NEVER include Zustand action functions in dependency arrays**
+  * Zustand actions are stable references and don't change between renders
+  * Including them causes infinite re-render loops (React Error #310)
+  * ❌ WRONG: `useEffect(() => { loadMessages(id); }, [id, loadMessages])`
+  * ✅ CORRECT: `useEffect(() => { loadMessages(id); }, [id])` - Only include state values
+  * ✅ CORRECT: Use eslint-disable with explanation:
+    ```tsx
+    useEffect(() => {
+      if (sessionId && messages.length === 0) {
+        loadMessages(sessionId);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sessionId, messages.length]); // loadMessages is stable from Zustand
+    ```
+
+**6. Rendering Safety (Prevents React Error #130):**
+* **⚠️ CRITICAL: ALWAYS validate data types before rendering**
+  * **React Error #130** occurs when objects/undefined/null are rendered as React children
+  * Error message: `Minified React error #130; visit https://reactjs.org/docs/error-decoder.html?invariant=130&args[]=undefined&args[]=`
+  * **Root Cause:** API responses, state values, or computed values may not match TypeScript types at runtime
+  * **Chakra UI Reference:** All Chakra UI components expect valid React children (strings, numbers, React elements, or arrays of these)
+  
+  **Type Guard Pattern (MANDATORY):**
+  ```tsx
+  // ❌ WRONG - Could render undefined/object
+  <Text>{message.content}</Text>
+  <Badge>{conversation.status}</Badge>
+  <Text>{entry.thought}</Text>
+  
+  // ✅ CORRECT - Always ensure string before rendering
+  <Text>
+    {typeof message.content === 'string' 
+      ? message.content 
+      : String(message.content || '')}
+  </Text>
+  
+  <Badge>
+    {typeof conversation.status === 'string' 
+      ? conversation.status 
+      : String(conversation.status || 'unknown')}
+  </Badge>
+  
+  <Text>
+    {typeof entry.thought === 'string' 
+      ? entry.thought 
+      : String(entry.thought || '')}
+  </Text>
+  ```
+  
+  **API Response Validation (MANDATORY):**
+  ```tsx
+  // ❌ WRONG - Assumes API returns correct types
+  content: msg.content
+  
+  // ✅ CORRECT - Validate and convert types when loading from API
+  content: typeof msg.content === 'string' 
+    ? msg.content 
+    : String(msg.content || '')
+  ```
+  
+  **Function Return Values (MANDATORY):**
+  ```tsx
+  // ❌ WRONG - Function might return undefined
+  const getMessage = (entry) => entry.thought;
+  <Text>{getMessage(entry)}</Text>
+  
+  // ✅ CORRECT - Ensure function always returns string
+  const getMessage = (entry: DisplayHistoryEntry): string => {
+    const thought = typeof entry.thought === 'string' 
+      ? entry.thought 
+      : String(entry.thought || '');
+    return thought || 'No message';
+  };
+  ```
+  
+  **Chakra UI Component Props:**
+  * All Chakra UI text components (`Text`, `Heading`, `Badge`, etc.) expect valid React children
+  * Use Chakra UI's built-in props for conditional rendering: `{value && <Text>{value}</Text>}` is safe IF value is validated
+  * For dynamic content, ALWAYS validate before passing to Chakra components
+  * Reference: Chakra UI Style Props documentation - all components follow React's children prop rules
+  
+  **Common Places to Add Guards:**
+  * All `{variable}` interpolations in JSX
+  * All values from API responses (`msg.content`, `msg.title`, etc.)
+  * All values from Zustand store that might be undefined
+  * All computed/transformed values (`transformThought()`, `formatDate()`, etc.)
+  * All object properties accessed with optional chaining (`entry?.thought`)
+  
+  **Why?** React Error #130 occurs when objects/undefined/null are rendered as children. TypeScript types don't guarantee runtime values match, especially with API responses or state that might be partially loaded.
+
 ---
 
 ## 2. Chakra UI Design System
@@ -804,6 +895,85 @@ yarn build
    - ✅ CORRECT: `const itemBg = useColorModeValue('white', 'gray.800'); {items.map(item => <Box bg={itemBg}>)}`
    - See §2 (Chakra UI Design System - Dark Mode Support) for correct patterns
 
+17. **No invalid React children (Prevents React Error #130)**: ALL values rendered as React children MUST be primitives (string, number) or valid React elements. NEVER render objects, undefined, null, or non-serializable values directly.
+   - **Error Details:**
+     - **Error Message:** `Minified React error #130; visit https://reactjs.org/docs/error-decoder.html?invariant=130&args[]=undefined&args[]=`
+     - **Root Cause:** Rendering `undefined`, `null`, objects, or non-serializable values as React children
+     - **Chakra UI Impact:** All Chakra UI components (`Text`, `Heading`, `Badge`, `Box`, etc.) expect valid React children per React's children prop rules
+     - **Reference:** Chakra UI Style Props documentation - components follow standard React children prop behavior
+   
+   - **Type Safety for API Data (MANDATORY):**
+     - When rendering content from API responses or state, ALWAYS ensure it's a string/number before rendering:
+     - ❌ WRONG: `<Text>{message.content}</Text>` - if `content` could be undefined/object/null
+     - ❌ WRONG: `<Badge>{conversation.status}</Badge>` - if status could be undefined
+     - ❌ WRONG: `<Text>{entry.thought}</Text>` - if thought could be undefined/object
+     - ✅ CORRECT: `<Text>{typeof message.content === 'string' ? message.content : String(message.content || '')}</Text>`
+     - ✅ CORRECT: `<Badge>{typeof conversation.status === 'string' ? conversation.status : String(conversation.status || 'unknown')}</Badge>`
+     - ✅ CORRECT: `<Text>{typeof entry.thought === 'string' ? entry.thought : String(entry.thought || '')}</Text>`
+   
+   - **API Response Validation (MANDATORY):**
+     - When loading data from APIs, validate and convert types immediately:
+     - ❌ WRONG: `content: msg.content` - assumes API returns correct type
+     - ❌ WRONG: `title: session.title` - assumes title is always a string
+     - ✅ CORRECT: `content: typeof msg.content === 'string' ? msg.content : String(msg.content || '')`
+     - ✅ CORRECT: `title: typeof session.title === 'string' ? session.title : String(session.title || 'New Session')`
+   
+   - **State Access Safety (MANDATORY):**
+     - Always validate data types when accessing nested state or computed values:
+     - ❌ WRONG: `{session.title}` - if title could be undefined
+     - ❌ WRONG: `{transformThought(entry.thought)}` - if transformThought might return undefined
+     - ❌ WRONG: `{formatDate(conversation.completedAt)}` - if date is invalid
+     - ✅ CORRECT: `{typeof session.title === 'string' ? session.title : String(session.title || '')}`
+     - ✅ CORRECT: Ensure helper functions always return strings:
+       ```tsx
+       const transformed = transformThought(entry.thought);
+       <Text>{typeof transformed === 'string' ? transformed : String(transformed || '')}</Text>
+       ```
+     - ✅ CORRECT: Validate dates before formatting:
+       ```tsx
+       const formatDate = (date: Date | undefined | null): string => {
+         if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
+           return 'Unknown date';
+         }
+         return date.toLocaleDateString();
+       };
+       ```
+   
+   - **Chakra UI Component Props:**
+     - All Chakra UI text components follow React's children prop rules
+     - Conditional rendering with `{value && <Text>{value}</Text>}` is safe ONLY if value is validated first
+     - For dynamic content, ALWAYS validate before passing to Chakra components
+     - Reference: Chakra UI documentation - Style Props and Component API follow standard React patterns
+   
+   - **Common Failure Points:**
+     * Rendering API response values without validation
+     * Rendering Zustand store values that might be undefined during loading
+     * Rendering computed/transformed values from helper functions
+     * Rendering object properties accessed with optional chaining
+     * Rendering values from `useMemo` or `useCallback` that might return undefined
+   
+   - **Why?** React Error #130 occurs when objects/undefined/null are rendered as children. TypeScript types don't guarantee runtime values match, especially with:
+     * API responses that may have different structures than expected
+     * State that might be partially loaded or in transition
+     * Helper functions that might return undefined for edge cases
+     * Optional chaining that returns undefined (`entry?.thought`)
+
+18. **No Zustand actions in useEffect dependencies (Prevents React Error #310)**: Zustand action functions are stable references and MUST NOT be included in `useEffect` dependency arrays. This causes infinite re-render loops.
+   - **Zustand Actions are Stable**: Action functions from Zustand slices never change between renders, so they don't need to be in dependencies.
+   - ❌ WRONG: `useEffect(() => { loadMessages(sessionId); }, [sessionId, loadMessages])` - `loadMessages` causes infinite loops
+   - ✅ CORRECT: `useEffect(() => { loadMessages(sessionId); }, [sessionId])` - Only include state values, not action functions
+   - ✅ CORRECT: Use `eslint-disable-next-line react-hooks/exhaustive-deps` with a comment explaining why:
+     ```tsx
+     useEffect(() => {
+       if (sessionId && messages.length === 0) {
+         loadMessages(sessionId);
+       }
+       // eslint-disable-next-line react-hooks/exhaustive-deps
+     }, [sessionId, messages.length]); // loadMessages is stable from Zustand, no need in deps
+     ```
+   - **When to Include**: Only include primitive values, arrays, or objects that should trigger re-runs. Zustand selectors that return primitives are fine: `[sessionId, messages.length]`
+   - **Why?** React Error #310 occurs when hooks are called with changing dependencies that cause infinite loops. Zustand actions are stable but including them tricks React into thinking dependencies changed.
+
 ---
 
 ## 11. Implementation Checklist
@@ -831,6 +1001,12 @@ yarn build
 - [ ] **ALL colors use useColorModeValue** - no hardcoded colors without dark mode support
 - [ ] **Dark mode tested** - component works correctly in both light and dark themes
 - [ ] **Color values defined at component top level** - not inside render loops
+- [ ] **NO Zustand actions in useEffect deps** - prevents React Error #310 (infinite loops)
+- [ ] **ALL rendered values are primitives/React elements** - prevents React Error #130 (invalid children)
+- [ ] **API response data validated** - ensure strings/numbers before rendering, never render objects directly
+- [ ] **Type guards on ALL JSX interpolations** - `{value}` must be validated: `{typeof value === 'string' ? value : String(value || '')}`
+- [ ] **Helper functions return strings** - `transformThought()`, `formatDate()`, etc. must always return strings, never undefined
+- [ ] **Chakra UI children validated** - All Chakra components (`Text`, `Badge`, `Heading`, etc.) receive validated children per React rules
 
 **Action System:**
 - [ ] New actions added to `availableActions.ts`

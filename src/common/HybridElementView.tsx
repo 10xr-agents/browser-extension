@@ -63,14 +63,16 @@ const HybridElementItem: React.FC<{ element: HybridElement; index: number }> = (
           <Box>
             <HStack spacing={2} mb={1}>
               <Badge colorScheme={sourceColorScheme} fontSize="xs" fontWeight="bold">
-                {element.source}
+                {typeof element.source === 'string' ? element.source : String(element.source || 'unknown')}
               </Badge>
               <Badge colorScheme="green" fontSize="xs">
-                ID: {element.id}
+                ID: {typeof element.id === 'string' || typeof element.id === 'number' 
+                  ? element.id 
+                  : String(element.id || 'unknown')}
               </Badge>
               {element.role && (
                 <Badge colorScheme="orange" fontSize="xs">
-                  {element.role}
+                  {typeof element.role === 'string' ? element.role : String(element.role || '')}
                 </Badge>
               )}
             </HStack>
@@ -127,7 +129,9 @@ const HybridElementItem: React.FC<{ element: HybridElement; index: number }> = (
                 Accessibility Node ID:
               </Text>
               <Text fontSize="xs" color={descColor} fontFamily="mono">
-                {element.axElement.axNodeId}
+                {typeof element.axElement.axNodeId === 'string' || typeof element.axElement.axNodeId === 'number'
+                  ? String(element.axElement.axNodeId)
+                  : String(element.axElement.axNodeId || 'unknown')}
               </Text>
             </Box>
           )}
@@ -137,7 +141,9 @@ const HybridElementItem: React.FC<{ element: HybridElement; index: number }> = (
                 Backend DOM Node ID:
               </Text>
               <Text fontSize="xs" color={descColor} fontFamily="mono">
-                {element.backendDOMNodeId}
+                {typeof element.backendDOMNodeId === 'string' || typeof element.backendDOMNodeId === 'number'
+                  ? String(element.backendDOMNodeId)
+                  : String(element.backendDOMNodeId || 'unknown')}
               </Text>
             </Box>
           )}

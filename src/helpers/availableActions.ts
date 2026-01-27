@@ -37,6 +37,15 @@ export const availableActions = [
     ],
   },
   {
+    name: 'waitForElement',
+    description: 'Wait for an element to appear on the page (useful after clicking buttons that open dropdowns/menus)',
+    args: [
+      { name: 'text', type: 'string', optional: true },
+      { name: 'role', type: 'string', optional: true },
+      { name: 'timeout', type: 'number', optional: true },
+    ],
+  },
+  {
     name: 'search',
     description: 'Search queries on search engines (DuckDuckGo, Google, Bing)',
     args: [
