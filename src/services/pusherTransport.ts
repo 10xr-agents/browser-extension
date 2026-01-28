@@ -1,9 +1,9 @@
 /**
- * Pusher/Soketi transport for real-time message sync
+ * Pusher/Sockudo transport for real-time message sync
  *
- * Connects to Soketi (Pusher-compatible) on port 3005, subscribes to
+ * Connects to Sockudo (Pusher-compatible) on port 3005, subscribes to
  * private-session-<sessionId>, binds new_message and interact_response.
- * Same auth as REST: Bearer token via channelAuthorization headers.
+ * Channel auth: POST to main server (e.g. port 3000) /api/pusher/auth with Bearer token.
  *
  * Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md §11.11, Client TODO List
  */
@@ -37,7 +37,7 @@ const getPusherConfig = (): {
   const key = process.env.WEBPACK_PUSHER_KEY ? String(process.env.WEBPACK_PUSHER_KEY) : '';
   const wsHost = process.env.WEBPACK_PUSHER_WS_HOST ? String(process.env.WEBPACK_PUSHER_WS_HOST) : 'localhost';
   const wsPort = process.env.WEBPACK_PUSHER_WS_PORT ? Number(process.env.WEBPACK_PUSHER_WS_PORT) : 3005;
-  // pusher-js requires cluster; for Soketi/custom wsHost we use a dummy (ignored when wsHost/wsPort are set)
+  // pusher-js requires cluster; for Sockudo/custom wsHost we use a dummy (ignored when wsHost/wsPort are set)
   const cluster = 'local';
   return {
     key,
@@ -112,12 +112,68 @@ class PusherTransport extends EventEmitter {
     return this.currentSessionId;
   }
 
+  /**
+   * Subscribe to a session channel on an existing Pusher instance.
+   * Used when switching chats: reuse the same WebSocket, only change the channel.
+   * If not yet connected, just sets currentSessionId so we subscribe when 'connected' fires.
+   * Triggers one POST /api/pusher/auth per new private channel (required by Sockudo).
+   */
+  private subscribeToSessionChannel(sessionId: string): void {
+    if (!this.pusher) return;
+
+    const connState = this.pusher.connection?.state ?? '';
+    if (connState !== 'connected') {
+      this.currentSessionId = sessionId;
+      return;
+    }
+
+    if (this.currentSessionId === sessionId && this.channel) return;
+
+    // Unsubscribe from previous channel (no new auth call)
+    if (this.currentSessionId) {
+      try {
+        this.pusher.unsubscribe(`private-session-${this.currentSessionId}`);
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (!msg.includes('CLOSING') && !msg.includes('CLOSED')) {
+          console.warn('[PusherTransport] Unsubscribe (switch) error:', error);
+        }
+      }
+      this.channel = null;
+    }
+
+    this.currentSessionId = sessionId;
+    const channelName = `private-session-${sessionId}`;
+    const channel = this.pusher.subscribe(channelName);
+
+    channel.bind('new_message', (payload: { type?: string; sessionId?: string; message?: Record<string, unknown> }) => {
+      const message = mapMessagePayload(payload);
+      if (message) this.emit('newMessage', message);
+    });
+
+    channel.bind('interact_response', () => {
+      this.emit('interact_response');
+    });
+
+    this.channel = channel;
+    console.log('[PusherTransport] Subscribed to session channel:', sessionId);
+  }
+
   async connect(sessionId: string): Promise<void> {
     if (this.connectionState === 'connected' && this.currentSessionId === sessionId) {
       return;
     }
 
-    if (this.currentSessionId && this.currentSessionId !== sessionId) {
+    // Session switch: reuse existing connection, only change channel (no disconnect/reconnect).
+    if (this.pusher && (this.connectionState === 'connected' || this.connectionState === 'connecting')) {
+      if (this.currentSessionId !== sessionId) {
+        this.subscribeToSessionChannel(sessionId);
+      }
+      return;
+    }
+
+    // No valid connection: disconnect any stale state then establish new connection.
+    if (this.pusher) {
       await this.disconnect();
     }
 
@@ -157,6 +213,7 @@ class PusherTransport extends EventEmitter {
         const pusherState = states.current;
         if (pusherState === 'connected') {
           this.setConnectionState('connected');
+          this.subscribeToSessionChannel(this.currentSessionId!);
           this.emit('connected', { sessionId: this.currentSessionId });
         } else if (pusherState === 'connecting' || pusherState === 'unavailable') {
           this.setConnectionState(pusherState === 'connecting' ? 'connecting' : 'reconnecting');
@@ -177,20 +234,8 @@ class PusherTransport extends EventEmitter {
         }
       });
 
-      const channelName = `private-session-${sessionId}`;
-      const channel = pusher.subscribe(channelName);
-
-      channel.bind('new_message', (payload: { type?: string; sessionId?: string; message?: Record<string, unknown> }) => {
-        const message = mapMessagePayload(payload);
-        if (message) this.emit('newMessage', message);
-      });
-
-      channel.bind('interact_response', () => {
-        this.emit('interact_response');
-      });
-
       this.pusher = pusher;
-      this.channel = channel;
+      // Channel subscription happens in state_change 'connected' via subscribeToSessionChannel
     } catch (error: unknown) {
       console.error('[PusherTransport] Connect error:', error);
       this.setConnectionState('failed');
