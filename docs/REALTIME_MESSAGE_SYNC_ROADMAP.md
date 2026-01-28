@@ -1,11 +1,13 @@
 # Real-Time Message Sync Roadmap (WebSocket Push-Based Retrieval)
 
-**Document Version:** 1.10  
+**Document Version:** 1.11  
 **Last Updated:** January 28, 2026  
 **Status:** Backend and client integration complete (Sockudo/Pusher); Manual QA pending  
 **Purpose:** Roadmap for migrating from poll-based to push-based message retrieval using Pusher/Sockudo
 
 **Sync with backend:** The backend repo may keep a separate copy of this roadmap (e.g. v1.5, "client integration pending"). **This doc is the extension-side source of truth:** client implementation is complete (Pusher transport, connection reuse, auth); backend is **Sockudo** on port **3005**, main server (Next.js) on **3000**; auth flow and 403 troubleshooting are in §11.11.
+
+**Changelog (1.11):** **403 fix guide added.** §11.12 row for "POST /api/pusher/auth 403" now describes likely cause (Session DB lookup / tenantId / userId) and points to **docs/PUSHER_AUTH_403_FIX.md** for a full fix guide and suggested Next.js route (dev-only 403 body to identify SESSION_NOT_FOUND vs USER_MISMATCH).
 
 **Changelog (1.10):** **Aligned with backend Sockudo naming.** Purpose and status now say Sockudo (not Soketi). §11.11 table: added backend env names `SOCKUDO_APP_ID`, `SOCKUDO_APP_KEY`, `SOCKUDO_APP_SECRET`, `SOCKUDO_HOST`, `SOCKUDO_PORT`. Added **Sync with backend** note above (backend may have its own roadmap copy; this doc = extension source of truth).
 
@@ -1823,7 +1825,7 @@ Extension-side integration with the **current** backend (Sockudo on port 3005, m
 |-------|--------|------------|-------------|
 | **"WebSocket is already in CLOSING or CLOSED state"** | Thrown by **pusher-js** when it calls `socket.close()` or `socket.send()` on a WebSocket that is already closing or closed (e.g. during disconnect, session switch, or internal retry/cleanup). | **Client:** In `pusherTransport.disconnect()` we only call `unsubscribe()` when `pusher.connection.state === 'connected'` and only call `pusher.disconnect()` when state is not `disconnected` / `failed` / `unavailable`. Each call is wrapped in try/catch. In `App.tsx`, a popup-level `window.addEventListener('error', …)` suppresses this exact message when thrown asynchronously by pusher-js. | The error may still appear in the console in some cases (e.g. internal pusher-js timers or connection callbacks). It is **harmless**: real-time sync and polling fallback continue to work. No user-facing fix required. |
 | **"Failed to get annotated DOM: Content script is not loaded on this page"** | Content script is not injected: restricted page (e.g. `chrome://`), page just loaded, DevTools attached, or extension reloaded without refreshing the tab. | N/A (expected). | User should **refresh the tab** and run the task on a normal HTTP(S) page. The extension shows a clear message; task stops gracefully. |
-| **POST /api/pusher/auth 403** | Server rejected channel auth: invalid/expired token, or user not allowed to subscribe to that session. | See **§11.11 — Why POST /api/pusher/auth and 403**: verify token in request, server-side JWT/session validation, and session-ownership check for `private-session-<sessionId>`; check CORS for extension origin. | Real-time sync falls back to polling; messages still load via REST. Fix token/session auth on backend to restore push. |
+| **POST /api/pusher/auth 403** | Server rejected channel auth. Common cause: **Session DB lookup** — no doc for `sessionId` + `tenantId`, or `doc.userId !== session.userId`. Less often: channel format or empty sessionId. | **Backend:** Ensure `getSessionFromRequest(req.headers)` reads `Authorization: Bearer <token>`. Session model must use `sessionId`, `tenantId`, `userId` matching the query; sessions must be created with the same `tenantId` that auth returns. Return 403 with a dev-only body (e.g. `SESSION_NOT_FOUND`, `USER_MISMATCH`) to see which check failed. See **docs/PUSHER_AUTH_403_FIX.md** for a full fix guide and suggested route. | Real-time sync falls back to polling; messages still load via REST. Fix backend session lookup / tenantId consistency to restore push. |
 
 ---
 
