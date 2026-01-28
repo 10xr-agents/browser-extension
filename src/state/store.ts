@@ -66,6 +66,7 @@ export const useAppState = create<StoreType>()(
         sessions: {
           sessions: state.sessions.sessions, // Sessions use timestamps (numbers), no conversion needed
           currentSessionId: state.sessions.currentSessionId,
+          currentDomain: state.sessions.currentDomain, // Domain-aware session tracking
           isHistoryOpen: state.sessions.isHistoryOpen,
         },
       }),
@@ -126,3 +127,27 @@ export const useAppState = create<StoreType>()(
 
 // @ts-expect-error used for debugging
 window.getState = useAppState.getState;
+
+// Initialize new tab listeners after store is created
+// Use dynamic import to avoid circular dependency issues (ESM hoists imports)
+// The setTimeout(0) ensures the store is fully initialized before listeners are set up
+// Initialize message sync manager for real-time message sync (WebSocket + polling fallback)
+// Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md §7 (Task 4)
+setTimeout(() => {
+  import('../services/messageSyncService').then(({ messageSyncManager }) => {
+    messageSyncManager.initialize(
+      useAppState.getState,
+      useAppState.setState as (fn: (state: unknown) => void) => void
+    );
+  }).catch((err) => {
+    console.error('[Store] Failed to initialize message sync manager:', err);
+  });
+}, 0);
+
+setTimeout(() => {
+  import('./currentTask').then(({ initializeNewTabListeners }) => {
+    initializeNewTabListeners();
+  }).catch((err) => {
+    console.error('[Store] Failed to initialize new tab listeners:', err);
+  });
+}, 0);

@@ -86,36 +86,69 @@ function parseArgValue(
  * into ActionPayload for execution
  */
 export function parseAction(actionString: string): ParsedAction {
-  const actionPattern = /(\w+)\((.*?)\)/;
-  const actionParts = actionString.match(actionPattern);
+  // Normalize: trim whitespace/newlines (backend may send with padding)
+  const raw = actionString;
+  const actionStringTrimmed =
+    typeof actionString === 'string' ? actionString.trim() : String(actionString || '').trim();
+
+  if (!actionStringTrimmed) {
+    return {
+      error: `Invalid action format: Action was empty or not a string. Received: ${JSON.stringify(raw?.slice?.(0, 100) ?? raw)}`,
+    };
+  }
+
+  const actionPattern = /^(\w+)\((.*)\)\s*$/s;
+  const actionParts = actionStringTrimmed.match(actionPattern);
 
   if (!actionParts) {
-    // Handle finish() and fail() which have no arguments
-    if (actionString === 'finish()' || actionString === 'fail()') {
-      const actionName = actionString.replace('()', '');
+    // Handle finish(), fail(), and variants without parens (backend may send "finish" or "done")
+    const lower = actionStringTrimmed.toLowerCase();
+    const normalizedNoArgs =
+      lower === 'finish' || lower === 'fail' || lower === 'done'
+        ? lower === 'done'
+          ? 'finish()'
+          : `${lower}()`
+        : null;
+
+    if (normalizedNoArgs) {
+      const actionName = normalizedNoArgs.replace('()', '');
       const availableAction = availableActions.find(
         (action) => action.name === actionName
       );
 
-      if (!availableAction) {
+      if (availableAction) {
         return {
-          error: `Invalid action: "${actionName}" is not a valid action.`,
+          thought: '',
+          action: normalizedNoArgs,
+          parsedAction: {
+            name: actionName,
+            args: {},
+          } as ActionPayload,
         };
       }
+    }
 
-      return {
-        thought: '', // Will be set by caller
-        action: actionString,
-        parsedAction: {
-          name: actionName,
-          args: {},
-        } as ActionPayload,
-      };
+    // Handle finish() and fail() with parens (after trim)
+    if (actionStringTrimmed === 'finish()' || actionStringTrimmed === 'fail()') {
+      const actionName = actionStringTrimmed.replace('()', '');
+      const availableAction = availableActions.find(
+        (action) => action.name === actionName
+      );
+
+      if (availableAction) {
+        return {
+          thought: '',
+          action: actionStringTrimmed,
+          parsedAction: {
+            name: actionName,
+            args: {},
+          } as ActionPayload,
+        };
+      }
     }
 
     return {
-      error:
-        'Invalid action format: Action should be in the format functionName(arg1, arg2, ...).',
+      error: `Invalid action format: Action should be in the format functionName(arg1, arg2, ...). Received: ${JSON.stringify(actionStringTrimmed.slice(0, 80))}`,
     };
   }
 
@@ -142,7 +175,7 @@ export function parseAction(actionString: string): ParsedAction {
 
     return {
       thought: '', // Will be set by caller
-      action: actionString,
+      action: actionStringTrimmed,
       parsedAction: {
         name: actionName,
         args: {},
@@ -241,7 +274,7 @@ export function parseAction(actionString: string): ParsedAction {
 
   return {
     thought: '', // Will be set by caller
-    action: actionString,
+    action: actionStringTrimmed,
     parsedAction,
   };
 }

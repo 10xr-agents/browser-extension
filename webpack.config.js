@@ -59,6 +59,14 @@ loadEnvFile(path.join(__dirname, '.env.local'));
 loadEnvFile(path.join(__dirname, `.env.${mode}`));
 loadEnvFile(path.join(__dirname, `.env.${mode}.local`));
 
+// Build-time check: log whether Pusher key will be injected (so "PUSHER_KEY not set" can be debugged)
+const pusherKeyAtBuild = process.env.WEBPACK_PUSHER_KEY || process.env.NEXT_PUBLIC_PUSHER_KEY || process.env.PUSHER_KEY || '';
+if (pusherKeyAtBuild) {
+  console.log('[webpack] Pusher key will be injected (value redacted)');
+} else {
+  console.warn('[webpack] WEBPACK_PUSHER_KEY not set; extension will use polling. Set it in .env.local and rebuild.');
+}
+
 var options = {
   mode: mode,
   // Use Webpack 5.103.0+ built-in dotenv feature
@@ -81,11 +89,12 @@ var options = {
     popup: path.join(__dirname, 'src', 'pages', 'Popup', 'index.jsx'),
     background: path.join(__dirname, 'src', 'pages', 'Background', 'index.js'),
     contentScript: path.join(__dirname, 'src', 'pages', 'Content', 'index.ts'),
+    nativeDialogOverride: path.join(__dirname, 'src', 'pages', 'Content', 'nativeDialogOverride.js'),
     devtools: path.join(__dirname, 'src', 'pages', 'Devtools', 'index.js'),
     panel: path.join(__dirname, 'src', 'pages', 'Panel', 'index.jsx'),
   },
   chromeExtensionBoilerplate: {
-    notHotReload: ['background', 'contentScript', 'devtools'],
+    notHotReload: ['background', 'contentScript', 'devtools', 'nativeDialogOverride'],
   },
   output: {
     filename: '[name].bundle.js',
@@ -176,6 +185,16 @@ var options = {
       ),
       'process.env.API_BASE': JSON.stringify(
         process.env.WEBPACK_API_BASE || process.env.NEXT_PUBLIC_API_BASE || process.env.API_BASE || 'https://api.example.com'
+      ),
+      // Pusher/Soketi for real-time message sync (REALTIME_MESSAGE_SYNC_ROADMAP.md §11.11)
+      'process.env.WEBPACK_PUSHER_KEY': JSON.stringify(
+        process.env.WEBPACK_PUSHER_KEY || process.env.NEXT_PUBLIC_PUSHER_KEY || process.env.PUSHER_KEY || ''
+      ),
+      'process.env.WEBPACK_PUSHER_WS_HOST': JSON.stringify(
+        process.env.WEBPACK_PUSHER_WS_HOST || process.env.PUSHER_WS_HOST || 'localhost'
+      ),
+      'process.env.WEBPACK_PUSHER_WS_PORT': JSON.stringify(
+        process.env.WEBPACK_PUSHER_WS_PORT || process.env.PUSHER_WS_PORT || '3005'
       ),
       // DEBUG_MODE - read from .env files (loaded by built-in dotenv, even without prefix)
       // Built-in dotenv loads ALL variables into process.env during build, but only exposes prefixed ones

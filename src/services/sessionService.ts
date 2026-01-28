@@ -5,9 +5,17 @@
  * Uses backend API endpoints when available, falls back to local storage for offline support.
  * The schema matches the backend API structure for seamless integration.
  * 
+ * **Domain-Aware Sessions:**
+ * Sessions are now domain-aware - each domain can have its own active session.
+ * When users navigate to a new domain, the extension will:
+ * 1. Check if there's an existing active session for that domain
+ * 2. If yes, switch to that session
+ * 3. If no, create a new session for that domain
+ * 
  * API Endpoints:
  * - GET /api/session/[sessionId]/messages - Get messages for a session (with limit, since params)
  * - GET /api/session/latest - Get latest session (with optional status filter)
+ * - PATCH /api/session/[sessionId] - Rename session (backend requirement)
  * 
  * Storage Keys (fallback):
  * - `chat_sessions_index`: Array of Session objects (the list for the drawer)
@@ -16,7 +24,10 @@
  * Reference: 
  * - Multi-Session Chat Interface Implementation
  * - BACKEND_MISSING_ITEMS.md §2 (Session Management Endpoints)
+ * - Domain-Aware Sessions Feature
  */
+
+import { extractDomain, formatSessionTitle } from '../helpers/domainUtils';
 
 /**
  * Session object matching backend schema
@@ -28,9 +39,13 @@ export interface Session {
   title: string;
   createdAt: number; // Unix timestamp (milliseconds)
   url: string;
+  /** Root domain for domain-aware session switching (e.g., "google.com") */
+  domain?: string;
   updatedAt?: number; // Unix timestamp (milliseconds)
   messageCount?: number;
   status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
+  /** Whether this session can be renamed by the user */
+  isRenamed?: boolean;
 }
 
 /**
@@ -257,20 +272,32 @@ export async function loadSession(
 
 /**
  * Create a new session
- * Generates a UUID, creates a generic title, and saves it to the index
+ * Generates a UUID, creates a domain-prefixed title, and saves it to the index
+ * 
+ * @param initialUrl - The URL where the session was started
+ * @param taskDescription - Optional description for the task (will be prefixed with domain)
  */
-export async function createNewSession(initialUrl: string = ''): Promise<Session> {
+export async function createNewSession(initialUrl: string = '', taskDescription?: string): Promise<Session> {
   const sessionId = generateSessionId();
   const now = Date.now();
   
+  // Extract domain from URL for domain-aware sessions
+  const domainInfo = extractDomain(initialUrl);
+  const domain = domainInfo.isValid ? domainInfo.rootDomain : '';
+  
+  // Format title with domain prefix
+  const title = formatSessionTitle(domain, taskDescription || 'New Task');
+  
   const session: Session = {
     sessionId,
-    title: 'New Task',
+    title,
     createdAt: now,
     url: initialUrl,
+    domain, // Store domain for quick lookup
     updatedAt: now,
     messageCount: 0,
     status: 'active',
+    isRenamed: false,
   };
   
   try {
@@ -291,6 +318,135 @@ export async function createNewSession(initialUrl: string = ''): Promise<Session
     return session;
   } catch (error) {
     console.error('Error creating new session:', error);
+    throw error;
+  }
+}
+
+/**
+ * Find an active session for a specific domain
+ * Returns the most recently updated active session for the domain
+ * 
+ * @param domain - The root domain to search for (e.g., "google.com")
+ * @returns The most recent active session for the domain, or null if none found
+ */
+export async function findSessionByDomain(domain: string): Promise<Session | null> {
+  if (!domain) return null;
+  
+  try {
+    const sessions = await listSessions({ status: 'active' });
+    
+    // Find sessions matching this domain
+    const domainSessions = sessions.filter(session => {
+      // Check stored domain field first
+      if (session.domain === domain) return true;
+      
+      // Fallback: extract domain from URL
+      if (session.url) {
+        const sessionDomain = extractDomain(session.url);
+        return sessionDomain.isValid && sessionDomain.rootDomain === domain;
+      }
+      
+      return false;
+    });
+    
+    if (domainSessions.length === 0) {
+      return null;
+    }
+    
+    // Return most recently updated session
+    domainSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return domainSessions[0];
+  } catch (error) {
+    console.error(`Error finding session for domain ${domain}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Get or create a session for a specific URL/domain
+ * This is the main entry point for domain-aware session management
+ * 
+ * @param url - The current URL
+ * @returns Existing session for the domain or a newly created one
+ */
+export async function getOrCreateSessionForUrl(url: string): Promise<{ session: Session; isNew: boolean }> {
+  const domainInfo = extractDomain(url);
+  
+  if (!domainInfo.isValid) {
+    // Invalid URL - create a generic session
+    const session = await createNewSession(url);
+    return { session, isNew: true };
+  }
+  
+  // Try to find an existing active session for this domain
+  const existingSession = await findSessionByDomain(domainInfo.rootDomain);
+  
+  if (existingSession) {
+    // Update the session's URL to the current URL (same domain, different page)
+    await updateSession(existingSession.sessionId, {
+      url,
+      updatedAt: Date.now(),
+    });
+    return { session: existingSession, isNew: false };
+  }
+  
+  // No existing session - create new one for this domain
+  const newSession = await createNewSession(url);
+  return { session: newSession, isNew: true };
+}
+
+/**
+ * Rename a session
+ * Allows users to customize the session title
+ * 
+ * @param sessionId - The session ID to rename
+ * @param newTitle - The new title (domain prefix will be preserved if not already in title)
+ * @param preserveDomainPrefix - Whether to automatically add domain prefix if missing (default: true)
+ */
+export async function renameSession(
+  sessionId: string,
+  newTitle: string,
+  preserveDomainPrefix: boolean = true
+): Promise<void> {
+  try {
+    const sessions = await getLocalSessions();
+    const session = sessions.find(s => s.sessionId === sessionId);
+    
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    
+    let finalTitle = newTitle.trim();
+    
+    // If preserveDomainPrefix is true and the new title doesn't have a domain prefix,
+    // add the domain prefix from the session
+    if (preserveDomainPrefix && session.domain) {
+      const domainPrefix = `${session.domain}: `;
+      if (!finalTitle.startsWith(domainPrefix) && !finalTitle.includes(': ')) {
+        finalTitle = `${domainPrefix}${finalTitle}`;
+      }
+    }
+    
+    // Try API first (backend requirement)
+    try {
+      const { apiClient } = await import('../api/client');
+      // Note: This endpoint needs to be implemented on the backend
+      // See BACKEND_REQUIREMENTS section below
+      await apiClient.request('PATCH', `/api/session/${sessionId}`, {
+        title: finalTitle,
+      });
+    } catch (apiError) {
+      console.debug('API rename unavailable, updating local only:', apiError);
+    }
+    
+    // Update local storage
+    await updateSession(sessionId, {
+      title: finalTitle,
+      isRenamed: true,
+      updatedAt: Date.now(),
+    });
+  } catch (error) {
+    console.error(`Error renaming session ${sessionId}:`, error);
     throw error;
   }
 }
@@ -440,16 +596,83 @@ export async function deleteSession(sessionId: string): Promise<void> {
 
 /**
  * Update session title from first user message
+ * Preserves domain prefix if the session has a domain
  */
 export async function updateSessionTitleFromMessage(
   sessionId: string,
   firstUserMessage: string
 ): Promise<void> {
-  const title = firstUserMessage.length > 50 
-    ? firstUserMessage.substring(0, 50) + '...' 
-    : firstUserMessage;
-  
-  await updateSession(sessionId, { title });
+  try {
+    // Get the session to check for domain
+    const sessions = await getLocalSessions();
+    const session = sessions.find(s => s.sessionId === sessionId);
+    
+    if (!session) {
+      console.warn(`Session ${sessionId} not found, cannot update title`);
+      return;
+    }
+    
+    // Skip if user has already renamed the session
+    if (session.isRenamed) {
+      console.debug(`Session ${sessionId} was renamed by user, skipping auto-title update`);
+      return;
+    }
+    
+    // Get domain from session or extract from URL
+    let domain = session.domain;
+    if (!domain && session.url) {
+      const domainInfo = extractDomain(session.url);
+      domain = domainInfo.isValid ? domainInfo.rootDomain : '';
+    }
+    
+    // Format title with domain prefix
+    const title = formatSessionTitle(domain || '', firstUserMessage, 60);
+    
+    await updateSession(sessionId, { title });
+  } catch (error) {
+    console.error(`Error updating session title for ${sessionId}:`, error);
+  }
+}
+
+/**
+ * Migrate existing sessions to add domain field
+ * Call this on extension startup to backfill domain data
+ */
+export async function migrateSessionsWithDomain(): Promise<void> {
+  try {
+    const sessions = await getLocalSessions();
+    let updated = false;
+    
+    const migratedSessions = sessions.map(session => {
+      // Skip if already has domain
+      if (session.domain) {
+        return session;
+      }
+      
+      // Extract domain from URL
+      if (session.url) {
+        const domainInfo = extractDomain(session.url);
+        if (domainInfo.isValid) {
+          updated = true;
+          return {
+            ...session,
+            domain: domainInfo.rootDomain,
+          };
+        }
+      }
+      
+      return session;
+    });
+    
+    if (updated) {
+      await chrome.storage.local.set({
+        [SESSIONS_INDEX_KEY]: migratedSessions,
+      });
+      console.log('Migrated sessions with domain data');
+    }
+  } catch (error) {
+    console.error('Error migrating sessions:', error);
+  }
 }
 
 /**

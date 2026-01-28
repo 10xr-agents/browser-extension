@@ -49,6 +49,18 @@ This documentation provides a comprehensive understanding of the Spadeworks Copi
 
 **Note:** For architecture overview, see [Client-Side Architecture](./CLIENT_ARCHITECTURE.md). This roadmap provides detailed task-based implementation guidance.
 
+### [Real-Time Message Sync Roadmap](./REALTIME_MESSAGE_SYNC_ROADMAP.md) ⭐ **NEW**
+**WebSocket-based push message retrieval roadmap:**
+- Current poll-based architecture analysis
+- WebSocket implementation (Tasks 1-7)
+- Connection management with reconnection logic
+- Zustand store integration for real-time updates
+- Polling fallback for resilience
+- UI status indicators (connection state, typing)
+- Backend WebSocket endpoint requirements
+
+**Status:** ⏳ **PLANNING** — Ready for implementation
+
 ### [Thin Server Roadmap](./THIN_SERVER_ROADMAP.md)
 Server-side implementation roadmap:
 - Backend API implementation
@@ -108,6 +120,39 @@ Server-side implementation roadmap:
 **Note:** 
 - Client-side implementation details are in [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §7 (DOM Processing Pipeline)
 - Extension Thin Client Migration details (§5.7) are in [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §6 (Thin Client Implementation)
+
+### [Production Readiness Guide](./PRODUCTION_READINESS.md) ⭐ **PRODUCTION-GRADE IMPROVEMENTS**
+**Production-ready improvements and edge case handling:**
+- **Virtual Element Handling** - Text node menu items (recent fix for "New/Search" issue)
+- **6 Hidden Failure Modes** - React inputs, Shadow DOM, hover-only elements, click interception, iframes, stale elements
+- **4 Missing Layers of Robustness** - Synthetic events, visual lies (overlays), dynamic stability, iframe support
+- **5 Advanced Edge Cases** - Stale element race conditions, new tab disconnects, native dialogs, hydration gaps, bot detection
+- **DOM Processing Implementation Details** - Complete pipeline, interactive detection, snapshot system, hybrid elements
+- **Implementation Checklist** - Completed items and TODO list with priorities
+- **Testing Recommendations** - Test cases for virtual elements and production fixes
+
+**This document provides:**
+- Detailed implementation code for all production fixes
+- Edge case handling strategies
+- Real-world web application compatibility improvements
+- Step-by-step fixes for common failure modes
+
+**Status:** Virtual element handling ✅ **COMPLETE**, Production fixes ⚠️ **TODO**
+
+### [Domain-Aware Sessions](./DOMAIN_AWARE_SESSIONS.md) ⭐ **SESSION MANAGEMENT**
+**Domain-aware session management for multi-tab workflows:**
+- **Automatic Session Switching** - Sessions auto-switch when domain changes
+- **Domain-Prefixed Titles** - Sessions named with domain prefix (e.g., "google.com: Search flights")
+- **Session Rename** - Users can rename sessions while preserving domain prefix
+- **Backend API** - Full API support for domain-aware operations
+
+**Features:**
+- When navigating to a new domain, creates or switches to domain-specific session
+- Chat History drawer shows domain badges and rename option
+- Migration for existing sessions to add domain field
+- Backend endpoints: `PATCH /api/session/[id]`, `GET /api/session/by-domain/[domain]`
+
+**Status:** ✅ **FULLY IMPLEMENTED** (Frontend + Backend)
 
 
 ## Quick Reference
@@ -185,7 +230,8 @@ Every design decision considers token usage and API cost optimization
 **For Client-Side (Extension) Development:**
 1. Start with [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) ⭐ for complete client-side understanding
 2. Review [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for detailed task-based implementation reference
-3. Deep dive into specific areas as needed
+3. Check [Production Readiness Guide](./PRODUCTION_READINESS.md) for production-grade improvements and edge case handling
+4. Deep dive into specific areas as needed
 
 **For Server-Side Development:**
 1. Study [Server-Side Agent Architecture](./SERVER_SIDE_AGENT_ARCH.md) for backend specification
@@ -222,6 +268,9 @@ See [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §3 (Component Architec
 
 ### Modifying DOM Processing
 See [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §7 (DOM Processing Pipeline) for processing architecture and enhancement strategies
+
+### Production-Grade Improvements
+See [Production Readiness Guide](./PRODUCTION_READINESS.md) for edge case handling, production fixes, and robustness improvements
 
 ### Thin Client Implementation
 See [Client-Side Architecture](./CLIENT_ARCHITECTURE.md) §6 (Thin Client Implementation) for architecture overview, and [Thin Client Roadmap](./THIN_CLIENT_ROADMAP.md) for detailed task-based implementation guide

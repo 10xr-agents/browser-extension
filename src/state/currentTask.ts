@@ -14,7 +14,7 @@ import {
 } from '../helpers/disableExtensions';
 import { callDOMAction } from '../helpers/domActions';
 import { parseAction, ParsedAction } from '../helpers/parseAction';
-import { apiClient, type DOMChangeInfo } from '../api/client';
+import { apiClient, type DOMChangeInfo, type ClientObservations, RateLimitError, NotFoundError } from '../api/client';
 import templatize from '../helpers/shrinkHTML/templatize';
 import { getSimplifiedDom } from '../helpers/simplifyDom';
 import { sleep } from '../helpers/utils';
@@ -137,6 +137,7 @@ export type CurrentTaskSlice = {
   hybridElements: HybridElement[] | null; // Hybrid elements combining accessibility and DOM data (Task 7)
   coverageMetrics: CoverageMetrics | null; // Coverage metrics for accessibility-first selection (Task 8)
   hasOrgKnowledge: boolean | null; // RAG mode: true = org-specific, false = public-only, null = unknown
+  virtualElementCoordinates: Map<number, { x: number; y: number }>; // Map of virtual element indices to click coordinates
   // Manus orchestrator plan data (Task 6)
   plan: ActionPlan | null; // Action plan from orchestrator
   currentStep: number | null; // Current step number (1-indexed, from API)
@@ -155,6 +156,21 @@ export type CurrentTaskSlice = {
     | 'performing-query'
     | 'performing-action'
     | 'waiting';
+  // Message loading state (prevents infinite retry loops)
+  messagesLoadingState: {
+    isLoading: boolean;
+    lastAttemptSessionId: string | null;
+    lastAttemptTime: number | null;
+    error: string | null;
+    retryCount: number;
+  };
+  // Real-time message sync (WebSocket + polling fallback)
+  // Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md
+  wsConnectionState: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'fallback';
+  /** When wsConnectionState is 'fallback', explains why (e.g. 'No token', 'Pusher auth failed'). */
+  wsFallbackReason: string | null;
+  isServerTyping: boolean;
+  serverTypingContext: string | null;
   actions: {
     runTask: (onError: (error: string) => void) => Promise<void>;
     interrupt: () => void;
@@ -167,6 +183,133 @@ export type CurrentTaskSlice = {
     updateMessageStatus: (messageId: string, status: ChatMessage['status'], error?: { message: string; code: string }) => void; // Update message status
   };
 };
+// ============================================================================
+// CRITICAL FIX: New Tab Handling (Section 4.2)
+// Track last action time and handle new tab/tab switch events
+// 
+// Reference: PRODUCTION_READINESS.md §4.2 (The "New Tab" Disconnect)
+// 
+// NOTE: These listeners are set up after the store is created in setupNewTabListeners()
+// to ensure useAppState is available. The function is called at the end of this file.
+// ============================================================================
+
+/**
+ * Setup chrome listeners for new tab/tab switch detection.
+ * Must be called after store is created to ensure useAppState is available.
+ * 
+ * This is a deferred setup to avoid "get is not defined" errors when the
+ * module is first loaded (before the store slice is created).
+ */
+function setupNewTabListeners() {
+  // Import useAppState dynamically to avoid circular dependencies
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { useAppState } = require('./store');
+  
+  // Listen for storage changes (new tab/tab switch detected by background script)
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      
+      // Use useAppState.getState() instead of get() since we're at module level
+      const state = useAppState.getState();
+      const currentTask = state.currentTask;
+      if (!currentTask || currentTask.status !== 'running') return;
+      
+      // Handle new tab detection
+      if (changes.newTabDetected && changes.newTabDetected.newValue) {
+        const newTabInfo = changes.newTabDetected.newValue;
+        const now = Date.now();
+        
+        // Check if this is recent (within 2 seconds)
+        if (now - newTabInfo.timestamp < 2000) {
+          console.log('Auto-switching to new tab after agent action:', {
+            oldTabId: currentTask.tabId,
+            newTabId: newTabInfo.tabId,
+            newTabUrl: newTabInfo.url,
+          });
+          
+          // Update active tab ID using useAppState.setState with Immer
+          useAppState.setState((draft: any) => {
+            draft.currentTask.tabId = newTabInfo.tabId;
+            draft.currentTask.url = newTabInfo.url || null;
+          });
+          
+          // Add system message to conversation
+          useAppState.getState().currentTask.actions.addAssistantMessage(
+            `[System] Browser opened new tab (URL: ${newTabInfo.url || 'unknown'}). Agent focus switched to new tab.`,
+            'system',
+            { name: 'system', args: {} }
+          );
+          
+          // Clear the flag
+          chrome.storage.local.remove('newTabDetected').catch(() => {});
+        }
+      }
+      
+      // Handle tab switch
+      if (changes.tabSwitched && changes.tabSwitched.newValue) {
+        const switchInfo = changes.tabSwitched.newValue;
+        
+        if (currentTask.tabId !== switchInfo.tabId) {
+          console.log('Tab switched during task execution:', {
+            oldTabId: currentTask.tabId,
+            newTabId: switchInfo.tabId,
+          });
+          
+          // Update active tab ID using useAppState.setState with Immer
+          useAppState.setState((draft: any) => {
+            draft.currentTask.tabId = switchInfo.tabId;
+          });
+          
+          // Add system message
+          useAppState.getState().currentTask.actions.addAssistantMessage(
+            `[System] User switched to tab ${switchInfo.tabId}. Agent focus updated.`,
+            'system',
+            { name: 'system', args: {} }
+          );
+          
+          // Clear the flag
+          chrome.storage.local.remove('tabSwitched').catch(() => {});
+        }
+      }
+    });
+  }
+
+  // Also listen for runtime messages (backup mechanism)
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.type === 'NEW_TAB_DETECTED' || message.type === 'TAB_SWITCHED') {
+        // Handle via storage listener above (more reliable)
+        // This is just a backup
+      }
+      return false;
+    });
+  }
+}
+
+// Flag to track if listeners have been set up (prevent double initialization)
+let newTabListenersInitialized = false;
+
+/**
+ * Initialize new tab listeners (called once when store is ready)
+ * Safe to call multiple times - will only initialize once
+ */
+export function initializeNewTabListeners(): void {
+  if (newTabListenersInitialized) return;
+  newTabListenersInitialized = true;
+  
+  // Defer setup to ensure store is fully initialized
+  // Use setTimeout to avoid potential circular dependency issues during initial load
+  setTimeout(() => {
+    try {
+      setupNewTabListeners();
+      console.log('[CurrentTask] New tab listeners initialized');
+    } catch (error) {
+      console.error('[CurrentTask] Failed to setup new tab listeners:', error);
+    }
+  }, 0);
+}
+
 export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
   set,
   get
@@ -187,6 +330,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
   hybridElements: null,
   coverageMetrics: null,
   hasOrgKnowledge: null,
+  virtualElementCoordinates: new Map(),
   plan: null,
   currentStep: null,
   totalSteps: null,
@@ -195,6 +339,17 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
   correctionHistory: [],
   status: 'idle',
   actionStatus: 'idle',
+  messagesLoadingState: {
+    isLoading: false,
+    lastAttemptSessionId: null,
+    lastAttemptTime: null,
+    error: null,
+    retryCount: 0,
+  },
+  wsConnectionState: 'disconnected',
+  wsFallbackReason: null,
+  isServerTyping: false,
+  serverTypingContext: null,
   actions: {
     runTask: async (onError) => {
       /**
@@ -246,14 +401,47 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         // Add user's response as a new user message
         get().currentTask.actions.addUserMessage(safeInstructions);
       } else {
-        // New task - clear everything
+        // New task - preserve existing sessionId to continue the same chat context
+        // Only clear task-specific state, not sessionId (sessionId is only cleared via startNewChat)
+        const existingSessionId = get().currentTask.sessionId;
+        const currentSessionId = get().sessions.currentSessionId;
+        const existingMessages = get().currentTask.messages;
+        
+        // Use existing sessionId if available, otherwise use currentSessionId from sessions state
+        // If neither exists, session will be created lazily by the server on first API call
+        const sessionIdToUse = existingSessionId || currentSessionId;
+        
+        // If we have a sessionId but no messages, load them first
+        if (sessionIdToUse && (!existingMessages || existingMessages.length === 0)) {
+          await get().currentTask.actions.loadMessages(sessionIdToUse);
+        }
+        
         set((state) => {
           state.currentTask.instructions = safeInstructions;
           state.currentTask.displayHistory = [];
-          // CRITICAL: Always initialize messages as empty array, NEVER undefined
-          state.currentTask.messages = [];
+          // CRITICAL: Preserve existing messages when continuing same session
+          // Only clear messages when starting a new chat (via startNewChat)
+          // This ensures all messages in the session are visible (Cursor-like scrollable chat)
+          if (!sessionIdToUse) {
+            // No sessionId = new chat, clear messages
+            state.currentTask.messages = [];
+          } else {
+            // If sessionIdToUse exists, preserve existing messages
+            // They're already loaded above if they were missing
+            // This allows users to scroll up and see all previous messages in the session
+            if (!Array.isArray(state.currentTask.messages)) {
+              state.currentTask.messages = [];
+            }
+            // Messages array is preserved - don't clear it
+          }
           state.currentTask.taskId = null; // Reset taskId for new task
-          state.currentTask.sessionId = null; // Reset sessionId for new task
+          // Preserve sessionId - don't reset it, continue using the same chat session
+          // sessionId is only cleared when user explicitly starts a new chat via startNewChat
+          if (sessionIdToUse) {
+            state.currentTask.sessionId = sessionIdToUse;
+            // Ensure this session is set as current in sessions state
+            get().sessions.actions.setCurrentSession(sessionIdToUse);
+          }
           state.currentTask.status = 'running';
           state.currentTask.actionStatus = 'attaching-debugger';
           state.currentTask.createdAt = new Date();
@@ -313,6 +501,80 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           let domResult: SimplifiedDomResult | null = null;
           try {
             domResult = await getSimplifiedDom(tabId);
+
+            // Guard: content script may not be loaded (getSimplifiedDom returns null)
+            if (!domResult) {
+              set((state) => {
+                state.currentTask.displayHistory.push({
+                  thought:
+                    'Error: Could not extract page content. The content script may not be loaded. Try refreshing the page or closing Chrome DevTools if it\'s open.',
+                  action: '',
+                  parsedAction: {
+                    error: 'Could not extract page content. Content script may not be loaded.',
+                  },
+                });
+                state.currentTask.status = 'error';
+              });
+              break;
+            }
+
+            // CRITICAL FIX: Merge virtual elements (text node menu items) into hybridElements
+            // BEFORE sending DOM to server, so LLM can see and click them
+            if (domResult.hybridElements) {
+              try {
+                const snapshot = await getInteractiveElementSnapshot();
+                const virtualElementsMap = new Map<number, { x: number; y: number }>();
+                let nextVirtualIndex = domResult.hybridElements.length;
+                
+                // Find virtual elements in the snapshot that aren't in hybridElements
+                for (const [, element] of snapshot) {
+                  if (element.isVirtual && element.virtualCoordinates && element.id) {
+                    // Check if this virtual element is already represented in hybridElements
+                    const alreadyExists = domResult.hybridElements.some(he => 
+                      he.name === element.text || 
+                      (element.text && he.name?.includes(element.text)) ||
+                      (element.text && he.description?.includes(element.text))
+                    );
+                    
+                    if (!alreadyExists && element.text) {
+                      // Create a HybridElement for this virtual element
+                      const virtualHybridElement: HybridElement = {
+                        id: nextVirtualIndex,
+                        role: element.role || 'menuitem',
+                        name: element.text,
+                        description: null,
+                        value: null,
+                        interactive: true,
+                        attributes: {
+                          'data-virtual-id': element.id,
+                          'data-is-virtual': 'true',
+                        },
+                        source: 'dom',
+                      };
+                      
+                      domResult.hybridElements.push(virtualHybridElement);
+                      virtualElementsMap.set(nextVirtualIndex, element.virtualCoordinates);
+                      nextVirtualIndex++;
+                      
+                      console.log('Merged virtual element into hybridElements (before server):', {
+                        virtualId: element.id,
+                        hybridIndex: nextVirtualIndex - 1,
+                        text: element.text,
+                        coordinates: element.virtualCoordinates,
+                      });
+                    }
+                  }
+                }
+                
+                // Store virtual element coordinates for click handling
+                set((state) => {
+                  state.currentTask.virtualElementCoordinates = virtualElementsMap;
+                });
+              } catch (virtualMergeError: unknown) {
+                const errorMessage = virtualMergeError instanceof Error ? virtualMergeError.message : String(virtualMergeError);
+                console.warn('Failed to merge virtual elements before server, continuing without them:', errorMessage);
+              }
+            }
           } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             console.error('Failed to get simplified DOM:', errorMessage);
@@ -330,21 +592,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             });
             break;
           }
-          
-          if (!domResult) {
-            set((state) => {
-              state.currentTask.displayHistory.push({
-                thought: 'Error: Could not extract page content. The content script may not be loaded. Try refreshing the page or closing Chrome DevTools if it\'s open.',
-                action: '',
-                parsedAction: {
-                  error: 'Could not extract page content. Content script may not be loaded.',
-                },
-              });
-              state.currentTask.status = 'error';
-            });
-            break;
-          }
-          
+
+          // domResult is non-null here (early check above)
           // Store accessibility tree and elements for UI display (if available)
           if (domResult.accessibilityTree) {
             set((state) => {
@@ -386,13 +635,75 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           // Store hybrid elements for UI display (Task 7)
           if (domResult.hybridElements) {
             const hybridElements = domResult.hybridElements;
-            set((state) => {
-              // Use cast to work around Immer's WritableDraft type issue with DOM elements
-              state.currentTask.hybridElements = hybridElements as typeof state.currentTask.hybridElements;
-            });
+            
+            // CRITICAL FIX: Merge virtual elements (text node menu items) into hybridElements
+            // Virtual elements are detected client-side from text nodes in ul[name="menuEntries"]
+            // They need to be added to hybridElements so the LLM can see and click them
+            try {
+              const snapshot = await getInteractiveElementSnapshot();
+              const virtualElementsMap = new Map<number, { x: number; y: number }>();
+              let nextVirtualIndex = hybridElements.length;
+              
+              // Find virtual elements in the snapshot that aren't in hybridElements
+              for (const [, element] of snapshot) {
+                if (element.isVirtual && element.virtualCoordinates && element.id) {
+                  // Check if this virtual element is already represented in hybridElements
+                  // by checking if any hybridElement has matching text
+                  const alreadyExists = hybridElements.some(he => 
+                    he.name === element.text || 
+                    (element.text && he.name?.includes(element.text)) ||
+                    (element.text && he.description?.includes(element.text))
+                  );
+                  
+                  if (!alreadyExists && element.text) {
+                    // Create a HybridElement for this virtual element
+                    const virtualHybridElement: HybridElement = {
+                      id: nextVirtualIndex,
+                      role: element.role || 'menuitem',
+                      name: element.text,
+                      description: null,
+                      value: null,
+                      interactive: true,
+                      attributes: {
+                        'data-virtual-id': element.id,
+                        'data-is-virtual': 'true',
+                      },
+                      source: 'dom',
+                    };
+                    
+                    hybridElements.push(virtualHybridElement);
+                    virtualElementsMap.set(nextVirtualIndex, element.virtualCoordinates);
+                    nextVirtualIndex++;
+                    
+                    console.log('Merged virtual element into hybridElements:', {
+                      virtualId: element.id,
+                      hybridIndex: nextVirtualIndex - 1,
+                      text: element.text,
+                      coordinates: element.virtualCoordinates,
+                    });
+                  }
+                }
+              }
+              
+              set((state) => {
+                // Use cast to work around Immer's WritableDraft type issue with DOM elements
+                state.currentTask.hybridElements = hybridElements as typeof state.currentTask.hybridElements;
+                // Store virtual element coordinates for click handling
+                state.currentTask.virtualElementCoordinates = virtualElementsMap;
+              });
+            } catch (virtualMergeError: unknown) {
+              const errorMessage = virtualMergeError instanceof Error ? virtualMergeError.message : String(virtualMergeError);
+              console.warn('Failed to merge virtual elements, continuing without them:', errorMessage);
+              set((state) => {
+                // Use cast to work around Immer's WritableDraft type issue with DOM elements
+                state.currentTask.hybridElements = hybridElements as typeof state.currentTask.hybridElements;
+                state.currentTask.virtualElementCoordinates = new Map();
+              });
+            }
           } else {
             set((state) => {
               state.currentTask.hybridElements = null;
+              state.currentTask.virtualElementCoordinates = new Map();
             });
           }
 
@@ -417,11 +728,37 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           setActionStatus('performing-query');
 
           try {
-            // Get current taskId and sessionId from state
+            // Get current taskId and sessionId from state (taskId must be sent on follow-up requests so backend continues same task)
             const currentTaskId = get().currentTask.taskId;
             const currentSessionId = get().currentTask.sessionId;
+            if (currentTaskId) {
+              console.debug('[CurrentTask] Sending follow-up request with taskId:', currentTaskId.slice(0, 8) + '...');
+            }
             const lastActionResult = get().currentTask.lastActionResult;
             const lastDOMChanges = get().currentTask.lastDOMChanges;
+
+            // CRITICAL: Capture the CURRENT URL just before sending interact request
+            // This ensures the server receives the actual current page URL, not the stale URL from task start
+            // The lastDOMChanges.previousUrl (if any) contains the URL BEFORE the last action was executed
+            let currentUrl = url; // Default to initial URL
+            try {
+              const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+              if (currentTab?.url) {
+                currentUrl = currentTab.url;
+                // Update stored URL in state
+                if (currentUrl !== get().currentTask.url) {
+                  console.log('[CurrentTask] URL changed since task start:', {
+                    originalUrl: url,
+                    currentUrl,
+                  });
+                  set((state) => {
+                    state.currentTask.url = currentUrl;
+                  });
+                }
+              }
+            } catch (urlError: unknown) {
+              console.warn('Failed to capture current URL before interact:', urlError);
+            }
 
             // Get debug actions for logging
             const addNetworkLog = get().debug?.actions.addNetworkLog;
@@ -440,9 +777,21 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 }
               : undefined;
 
-            // Call agentInteract API with logging, error, and DOM change information
+            // Build clientObservations from lastDOMChanges (optional; improves verification accuracy)
+            // Reference: Verification process — clientObservations (v3.0)
+            const clientObservations: ClientObservations | undefined = lastDOMChanges
+              ? {
+                  didUrlChange: lastDOMChanges.urlChanged,
+                  didDomMutate:
+                    (lastDOMChanges.addedCount ?? 0) + (lastDOMChanges.removedCount ?? 0) > 0,
+                  // didNetworkOccur: not tracked yet (would require content script network counter)
+                }
+              : undefined;
+
+            // Call agentInteract API with logging, error, DOM change, and client observations
+            // IMPORTANT: Use currentUrl (just captured above), not the stale 'url' from task start
             const response = await apiClient.agentInteract(
-              url,
+              currentUrl,
               safeInstructions,
               currentDom,
               currentTaskId,
@@ -460,22 +809,33 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   error: log.error,
                 });
               } : undefined,
-              lastDOMChanges || undefined // Pass DOM changes if available
+              lastDOMChanges || undefined,
+              clientObservations
             );
 
-            // Store taskId and sessionId if returned (first request or server-assigned)
-            if (response.taskId) {
+            // Normalize response: support top-level or wrapped { data: { ... } } (backend contract)
+            const res = response && typeof response === 'object' && 'data' in response && response.data && typeof response.data === 'object'
+              ? (response as { data: Record<string, unknown> }).data
+              : (response as Record<string, unknown>);
+
+            // Store taskId from response so follow-up requests send it (required for loop to advance)
+            // Support both camelCase (taskId) and snake_case (task_id)
+            const taskIdFromResponse = (res?.taskId ?? (res?.task_id as string | undefined)) as string | undefined;
+            if (taskIdFromResponse) {
               set((state) => {
-                state.currentTask.taskId = response.taskId!;
-                // Use taskId as sessionId if sessionId not provided (backward compatibility)
+                state.currentTask.taskId = taskIdFromResponse;
                 if (!state.currentTask.sessionId) {
-                  state.currentTask.sessionId = response.taskId;
+                  state.currentTask.sessionId = taskIdFromResponse;
                 }
               });
+              console.debug('[CurrentTask] Stored taskId for follow-up requests:', taskIdFromResponse.slice(0, 8) + '...');
             }
-            if (response.sessionId) {
+
+            // Store sessionId if returned
+            const sessionIdFromResponse = res?.sessionId as string | undefined;
+            if (sessionIdFromResponse) {
               set((state) => {
-                state.currentTask.sessionId = response.sessionId!;
+                state.currentTask.sessionId = sessionIdFromResponse;
               });
               
               // Create or update session summary using sessionService
@@ -484,7 +844,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 : safeInstructions;
               
               // Update or create session entry (updateSession will create if it doesn't exist)
-              await get().sessions.actions.updateSession(response.sessionId, {
+              await get().sessions.actions.updateSession(sessionIdFromResponse, {
                 title: sessionTitle,
                 url: url,
                 createdAt: get().currentTask.createdAt?.getTime() || Date.now(),
@@ -497,7 +857,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               await get().sessions.actions.loadSessions();
               
               // Set as current session
-              get().sessions.actions.setCurrentSession(response.sessionId);
+              get().sessions.actions.setCurrentSession(sessionIdFromResponse);
             } else if (get().currentTask.sessionId) {
               // If we already have a sessionId but server didn't return one, update the session
               const sessionTitle = safeInstructions.length > 50 
@@ -614,11 +974,26 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
 
             setActionStatus('performing-action');
             
-            // Type guard: Ensure response.thought and response.action are strings to prevent React error #130
-            const safeThought = typeof response.thought === 'string' ? response.thought : String(response.thought || '');
-            const safeAction = typeof response.action === 'string' ? response.action : String(response.action || '');
+            // Use normalized res (defined above) for thought and action
+            const actionValue = res?.action;
+            const thoughtValue = res?.thought;
             
-            // Parse action string
+            // Type guard: Ensure thought and action are strings to prevent React error #130
+            const safeThought = typeof thoughtValue === 'string' ? thoughtValue : String(thoughtValue ?? '');
+            const safeActionRaw = typeof actionValue === 'string' ? actionValue : String(actionValue ?? '');
+            const safeAction = safeActionRaw.trim(); // Backend may send with whitespace/newlines
+            
+            // Client-side verification: log when action is missing so we can confirm backend contract
+            if (!safeAction) {
+              console.warn(
+                '[CurrentTask] Interact response missing or empty action. Backend should return { action: "click(123)" }. Received keys:',
+                res && typeof res === 'object' ? Object.keys(res) : 'non-object',
+                'action type:',
+                typeof actionValue
+              );
+            }
+            
+            // Parse action string (parseAction also trims and normalizes)
             const parsed = parseAction(safeAction);
             
             // Add thought from response
@@ -811,12 +1186,44 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             let executionResult: ActionExecutionResult | null = null;
             let domChangeReport: DOMChangeReport | null = null;
             
+            // CRITICAL: Capture URL BEFORE executing action (for verification)
+            // This allows the server to detect URL changes after actions like click()
+            let beforeUrl: string = url; // Default to initial URL
+            try {
+              const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+              if (currentTab?.url) {
+                beforeUrl = currentTab.url;
+              }
+            } catch (urlError: unknown) {
+              console.warn('Failed to capture URL before action:', urlError);
+            }
+            
             // Capture DOM snapshot BEFORE executing action (for change tracking)
             let beforeSnapshot: Map<string, ElementInfo> = new Map();
             try {
               beforeSnapshot = await getInteractiveElementSnapshot();
             } catch (snapshotError: unknown) {
               console.warn('Failed to capture DOM snapshot before action:', snapshotError);
+            }
+            
+            // Check if we're clicking a dropdown/popup button (hasPopup attribute)
+            // This helps us wait longer for menu items to appear
+            let isDropdownClick = false;
+            if (actionName === 'click' && actionArgs && 'elementId' in actionArgs) {
+              const elementId = actionArgs.elementId as number;
+              const hybridElements = get().currentTask.hybridElements;
+              if (hybridElements && Array.isArray(hybridElements) && elementId >= 0 && elementId < hybridElements.length) {
+                const element = hybridElements[elementId];
+                // Check if element has hasPopup attribute (indicates dropdown/popup button)
+                if (element && (element.hasPopup || element.attributes?.['aria-haspopup'] || element.attributes?.['data-has-popup'])) {
+                  isDropdownClick = true;
+                  console.log('Detected dropdown/popup button click, will wait longer for menu items to appear', {
+                    elementId,
+                    hasPopup: element.hasPopup,
+                    ariaHaspopup: element.attributes?.['aria-haspopup'],
+                  });
+                }
+              }
             }
             
             try {
@@ -843,12 +1250,55 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 }
               }
               
-              // Wait for DOM changes and track what appeared/disappeared
+              // CRITICAL FIX: Update last action time for new tab detection
+              // Store in chrome.storage so background script can access it
+              const actionTime = Date.now();
               try {
-                domChangeReport = await waitForDOMChangesAfterAction(beforeSnapshot, {
-                  minWait: 500,
-                  maxWait: 5000, // Max 5 seconds for dropdown/menu detection
-                  stabilityThreshold: 300, // DOM stable for 300ms
+                await chrome.storage.local.set({
+                  lastActionTime: actionTime,
+                  currentTaskStatus: get().currentTask.status,
+                });
+              } catch (error) {
+                console.warn('Failed to store last action time:', error);
+              }
+              
+              // Wait for DOM changes and track what appeared/disappeared
+              // If this was a dropdown click, wait longer to ensure menu items are fully rendered
+              try {
+                const waitConfig = isDropdownClick
+                  ? {
+                      minWait: 1000, // Wait at least 1 second for dropdown to open
+                      maxWait: 8000, // Max 8 seconds for menu items to appear
+                      stabilityThreshold: 500, // DOM stable for 500ms (longer for dropdowns)
+                    }
+                  : {
+                      minWait: 500,
+                      maxWait: 5000, // Max 5 seconds for dropdown/menu detection
+                      stabilityThreshold: 300, // DOM stable for 300ms
+                    };
+                
+                console.log('Waiting for DOM changes after action', {
+                  action: actionString,
+                  isDropdownClick,
+                  waitConfig,
+                  beforeSnapshotSize: beforeSnapshot.size,
+                });
+                
+                domChangeReport = await waitForDOMChangesAfterAction(beforeSnapshot, waitConfig);
+                
+                console.log('DOM changes detected', {
+                  addedCount: domChangeReport.addedElements.length,
+                  removedCount: domChangeReport.removedElements.length,
+                  dropdownDetected: domChangeReport.dropdownDetected,
+                  dropdownItemsCount: domChangeReport.dropdownItems?.length || 0,
+                  stabilizationTime: domChangeReport.stabilizationTime,
+                  addedElements: domChangeReport.addedElements.slice(0, 5).map(el => ({
+                    tagName: el.tagName,
+                    role: el.role,
+                    text: el.text?.substring(0, 30),
+                    id: el.id,
+                    interactive: el.interactive,
+                  })),
                 });
                 
                 // Log DOM changes for debugging
@@ -862,15 +1312,58 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     domChangeReport.dropdownItems.slice(0, 5).map(i => i.text).filter(Boolean).join(', ')
                   }${domChangeReport.dropdownItems.length > 5 ? '...' : ''}`;
                   
+                  console.log('Dropdown menu detected after click:', {
+                    itemCount: domChangeReport.dropdownItems.length,
+                    items: domChangeReport.dropdownItems.map(i => ({
+                      text: i.text,
+                      role: i.role,
+                      id: i.id,
+                      interactive: i.interactive,
+                    })),
+                    stabilizationTime: domChangeReport.stabilizationTime,
+                  });
+                  
                   // Enhance execution result with dropdown context
                   if (executionResult) {
                     executionResult.actualState = executionResult.actualState 
                       ? `${executionResult.actualState}. ${dropdownContext}`
                       : dropdownContext;
                   }
+                  
+                  // If dropdown was detected but no menu items found, log warning
+                  if (domChangeReport.dropdownItems.length === 0) {
+                    console.warn('Dropdown detected but no menu items found - menu items may not be interactive yet');
+                  }
+                } else if (isDropdownClick && !domChangeReport.dropdownDetected) {
+                  // If we clicked a dropdown but didn't detect it, log warning
+                  console.warn('Clicked dropdown button but dropdown not detected - menu may not have appeared', {
+                    elementId: actionArgs && 'elementId' in actionArgs ? actionArgs.elementId : 'unknown',
+                    addedElements: domChangeReport.addedElements.length,
+                    removedElements: domChangeReport.removedElements.length,
+                  });
                 }
                 
-                // Store DOM changes in state for next API call
+                // Capture URL AFTER action execution (for detecting navigation)
+                let afterUrl: string = beforeUrl;
+                try {
+                  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                  if (currentTab?.url) {
+                    afterUrl = currentTab.url;
+                  }
+                } catch (urlError: unknown) {
+                  console.warn('Failed to capture URL after action:', urlError);
+                }
+                
+                const urlChanged = beforeUrl !== afterUrl;
+                if (urlChanged) {
+                  console.log('URL changed after action:', {
+                    action: actionString,
+                    beforeUrl,
+                    afterUrl,
+                  });
+                }
+                
+                // Store DOM changes in state for next API call (including URL change info for verification)
                 set((state) => {
                   state.currentTask.lastDOMChanges = {
                     addedCount: domChangeReport!.addedElements.length,
@@ -878,7 +1371,14 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     dropdownDetected: domChangeReport!.dropdownDetected,
                     dropdownOptions: domChangeReport!.dropdownItems?.map(i => i.text).filter(Boolean) as string[] | undefined,
                     stabilizationTime: domChangeReport!.stabilizationTime,
+                    // Include URL change info for server-side verification
+                    previousUrl: beforeUrl,
+                    urlChanged,
                   };
+                  // Update stored URL if it changed
+                  if (urlChanged) {
+                    state.currentTask.url = afterUrl;
+                  }
                 });
               } catch (domWaitError: unknown) {
                 console.warn('DOM change tracking failed, falling back to fixed wait:', domWaitError);
@@ -959,6 +1459,13 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             }
 
             if (wasStopped()) break;
+
+            // If dropdown was detected, add extra wait to ensure menu items are fully interactive
+            // This helps ensure menu items are included in the next DOM capture
+            if (domChangeReport?.dropdownDetected && domChangeReport.dropdownItems && domChangeReport.dropdownItems.length > 0) {
+              console.log('Dropdown detected, adding extra wait to ensure menu items are interactive before next DOM capture');
+              await sleep(500); // Additional 500ms wait to ensure menu items are fully rendered and interactive
+            }
 
             // Max steps limit (50)
             if (get().currentTask.displayHistory.length >= 50) {
@@ -1173,6 +1680,21 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         state.currentTask.lastActionResult = null;
         state.currentTask.lastDOMChanges = null;
         
+        // Reset messages loading state (prevents stale error states)
+        state.currentTask.messagesLoadingState = {
+          isLoading: false,
+          lastAttemptSessionId: null,
+          lastAttemptTime: null,
+          error: null,
+          retryCount: 0,
+        };
+
+        // Reset real-time sync state (MessageSyncManager.stopSync called by UI)
+        state.currentTask.wsConnectionState = 'disconnected';
+        state.currentTask.wsFallbackReason = null;
+        state.currentTask.isServerTyping = false;
+        state.currentTask.serverTypingContext = null;
+        
         // Clear orchestrator state
         state.currentTask.plan = null;
         state.currentTask.currentStep = null;
@@ -1212,13 +1734,117 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
       }
     },
     loadMessages: async (sessionId: string) => {
-      // Safety: Always initialize messages as empty array first to prevent undefined
+      const loadingState = get().currentTask.messagesLoadingState;
+      const now = Date.now();
+      
+      // === PREVENT INFINITE LOOPS ===
+      // 1. Check if already loading
+      if (loadingState.isLoading) {
+        console.debug('[loadMessages] Already loading, skipping duplicate call');
+        return;
+      }
+      
+      // 2. Check if this is the same session we just tried (with cooldown)
+      // Minimum 5 seconds between retries for the same session
+      const MIN_RETRY_INTERVAL = 5000;
+      // Maximum 60 seconds for rate limit errors
+      const MAX_RETRY_INTERVAL = 60000;
+      
+      if (loadingState.lastAttemptSessionId === sessionId && loadingState.lastAttemptTime) {
+        const timeSinceLastAttempt = now - loadingState.lastAttemptTime;
+        
+        // If we have an error, use exponential backoff
+        if (loadingState.error) {
+          const backoffMs = Math.min(
+            MIN_RETRY_INTERVAL * Math.pow(2, loadingState.retryCount),
+            MAX_RETRY_INTERVAL
+          );
+          
+          if (timeSinceLastAttempt < backoffMs) {
+            console.debug(`[loadMessages] In backoff period (${Math.round((backoffMs - timeSinceLastAttempt) / 1000)}s remaining), skipping`);
+            return;
+          }
+        } else {
+          // No error, but still apply minimum interval
+          if (timeSinceLastAttempt < MIN_RETRY_INTERVAL) {
+            console.debug('[loadMessages] Too soon since last attempt, skipping');
+            return;
+          }
+        }
+      }
+      
+      // 3. Check if we've exceeded max retries (10 attempts)
+      const MAX_RETRIES = 10;
+      if (loadingState.lastAttemptSessionId === sessionId && loadingState.retryCount >= MAX_RETRIES) {
+        console.warn(`[loadMessages] Max retries (${MAX_RETRIES}) exceeded for session ${sessionId}`);
+        return;
+      }
+      
+      // Mark as loading
       set((state) => {
-        state.currentTask.sessionId = sessionId;
-        state.currentTask.messages = []; // Initialize as empty array to prevent undefined
+        state.currentTask.messagesLoadingState.isLoading = true;
+        state.currentTask.messagesLoadingState.lastAttemptSessionId = sessionId;
+        state.currentTask.messagesLoadingState.lastAttemptTime = now;
       });
       
+      // Get current messages BEFORE loading (to preserve newly added messages that haven't been saved yet)
+      const existingMessages = get().currentTask.messages || [];
+      const previousSessionId = get().currentTask.sessionId;
+      
+      // Safety: Always initialize messages as empty array first to prevent undefined
+      // BUT: Only clear if we're switching to a different session
+      // If it's the same session, preserve existing messages to avoid losing newly added ones
+      set((state) => {
+        state.currentTask.sessionId = sessionId;
+        // Reset retry count if switching sessions
+        if (previousSessionId !== sessionId) {
+          state.currentTask.messages = [];
+          state.currentTask.messagesLoadingState.retryCount = 0;
+          state.currentTask.messagesLoadingState.error = null;
+        } else if (!Array.isArray(state.currentTask.messages)) {
+          state.currentTask.messages = [];
+        }
+      });
+      
+      // Helper function to merge messages by ID (preserves existing messages, updates/adds new ones)
+      // Sort by sequenceNumber when available (backend ordering), else by timestamp
+      const mergeMessages = (existing: ChatMessage[], loaded: ChatMessage[]): ChatMessage[] => {
+        const messageMap = new Map<string, ChatMessage>();
+        
+        // First, add all existing messages to the map (preserve newly added messages)
+        existing.forEach(msg => {
+          if (msg && msg.id) {
+            messageMap.set(msg.id, msg);
+          }
+        });
+        
+        // Then, update/add loaded messages (loaded messages take precedence for updates)
+        loaded.forEach(msg => {
+          if (msg && msg.id) {
+            messageMap.set(msg.id, msg);
+          }
+        });
+        
+        // Convert back to array and sort: prefer sequenceNumber (backend ordering), fallback to timestamp
+        const merged = Array.from(messageMap.values());
+        merged.sort((a, b) => {
+          const seqA = a.sequenceNumber;
+          const seqB = b.sequenceNumber;
+          if (typeof seqA === 'number' && typeof seqB === 'number') {
+            return seqA - seqB;
+          }
+          const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+          const timeB = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+          return timeA - timeB;
+        });
+        
+        return merged;
+      };
+      
       try {
+        // Get current messages (may have been preserved above)
+        let currentMessages = get().currentTask.messages || [];
+        
         // Try to load from chrome.storage.local first (for offline support)
         const result = await chrome.storage.local.get(`session_messages_${sessionId}`);
         const storedMessages = result[`session_messages_${sessionId}`];
@@ -1233,6 +1859,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               content: typeof msg.content === 'string' ? msg.content : String(msg.content || ''),
               status: msg.status || 'sent',
               timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+              sequenceNumber: typeof msg.sequenceNumber === 'number' ? msg.sequenceNumber : undefined,
               actionPayload: msg.actionPayload,
               meta: msg.meta ? {
                 ...msg.meta,
@@ -1244,8 +1871,10 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               error: msg.error,
             }));
           
+          // Merge with existing messages instead of replacing
+          currentMessages = mergeMessages(currentMessages, validMessages);
           set((state) => {
-            state.currentTask.messages = validMessages;
+            state.currentTask.messages = currentMessages;
           });
         }
         
@@ -1266,6 +1895,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 content: typeof msg.content === 'string' ? msg.content : String(msg.content || ''),
                 status: msg.status || 'sent',
                 timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(), // API returns ISO 8601 string
+                sequenceNumber: typeof msg.sequenceNumber === 'number' ? msg.sequenceNumber : undefined,
                 actionPayload: msg.actionPayload,
                 meta: {
                   steps: [], // API doesn't return steps, they're client-side only
@@ -1273,34 +1903,86 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 error: msg.error,
               }));
             
+            // Merge with existing messages instead of replacing
+            currentMessages = get().currentTask.messages || [];
+            const merged = mergeMessages(currentMessages, validMessages);
             set((state) => {
-              state.currentTask.messages = validMessages;
+              state.currentTask.messages = merged;
+              // Clear error state on success
+              state.currentTask.messagesLoadingState.error = null;
+              state.currentTask.messagesLoadingState.retryCount = 0;
             });
             
             // Save to local storage for offline support
             await get().currentTask.actions.saveMessages();
           } else {
-            // If API returned empty array or invalid response, ensure messages is still an array
-            set((state) => {
-              state.currentTask.messages = [];
-            });
+            // If API returned empty array or invalid response, preserve existing messages
+            // Only clear if we have no existing messages
+            currentMessages = get().currentTask.messages || [];
+            if (currentMessages.length === 0) {
+              set((state) => {
+                state.currentTask.messages = [];
+                // Clear error state - empty response is not an error
+                state.currentTask.messagesLoadingState.error = null;
+                state.currentTask.messagesLoadingState.retryCount = 0;
+              });
+            }
           }
         } catch (apiError: unknown) {
-          // API call failed - if we have local messages, keep them; otherwise clear
-          if (!storedMessages || !Array.isArray(storedMessages) || storedMessages.length === 0) {
-            console.debug('Failed to load messages from API and no local cache:', apiError);
+          // === HANDLE API ERRORS WITH PROPER BACKOFF ===
+          const errorMessage = apiError instanceof Error ? apiError.message : String(apiError);
+          
+          // Handle rate limit errors - don't retry immediately
+          if (apiError instanceof RateLimitError) {
+            console.warn('[loadMessages] Rate limit hit:', errorMessage);
+            set((state) => {
+              state.currentTask.messagesLoadingState.error = 'RATE_LIMITED';
+              state.currentTask.messagesLoadingState.retryCount += 1;
+            });
+          }
+          // Handle not found errors - session doesn't exist, stop retrying
+          else if (apiError instanceof NotFoundError) {
+            console.warn('[loadMessages] Session not found:', sessionId);
+            set((state) => {
+              state.currentTask.messagesLoadingState.error = 'NOT_FOUND';
+              state.currentTask.messagesLoadingState.retryCount = MAX_RETRIES; // Stop retrying
+            });
+          }
+          // Handle other errors with backoff
+          else {
+            console.debug('Failed to load messages from API:', errorMessage);
+            set((state) => {
+              state.currentTask.messagesLoadingState.error = errorMessage;
+              state.currentTask.messagesLoadingState.retryCount += 1;
+            });
+          }
+          
+          // API call failed - preserve existing messages if we have them
+          currentMessages = get().currentTask.messages || [];
+          if (currentMessages.length === 0 && (!storedMessages || !Array.isArray(storedMessages) || storedMessages.length === 0)) {
             set((state) => {
               state.currentTask.messages = [];
             });
-          } else {
-            console.debug('API unavailable, using cached messages:', apiError);
           }
         }
       } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         console.error('Failed to load messages:', error);
+        
+        // Record error for backoff
+        set((state) => {
+          state.currentTask.messagesLoadingState.error = errorMessage;
+          state.currentTask.messagesLoadingState.retryCount += 1;
+        });
+        
         // Safety: Always ensure messages is an array, never undefined
         set((state) => {
           state.currentTask.messages = [];
+        });
+      } finally {
+        // Always clear loading state
+        set((state) => {
+          state.currentTask.messagesLoadingState.isLoading = false;
         });
       }
       

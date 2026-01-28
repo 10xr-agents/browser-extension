@@ -34,12 +34,36 @@ const App = () => {
   const [hasOrgKnowledge, setHasOrgKnowledge] = useState<boolean | null>(null);
   const [currentRoute, setCurrentRoute] = useState<Route>('/');
   const [isDebugViewOpen, setIsDebugViewOpen] = useState(false);
-  
+
+  // Suppress pusher-js "WebSocket is already in CLOSING or CLOSED state" when thrown asynchronously
+  useEffect(() => {
+    const handler = (event: ErrorEvent): boolean => {
+      const msg =
+        event.message ??
+        (event.error instanceof Error ? event.error.message : String(event.error ?? ''));
+      if (
+        typeof msg === 'string' &&
+        msg.includes('WebSocket') &&
+        (msg.includes('CLOSING') || msg.includes('CLOSED'))
+      ) {
+        event.preventDefault();
+        return true;
+      }
+      return false;
+    };
+    window.addEventListener('error', handler);
+    return () => window.removeEventListener('error', handler);
+  }, []);
+
   const setUser = useAppState((state) => state.settings.actions.setUser);
   const setTenant = useAppState((state) => state.settings.actions.setTenant);
   const clearAuth = useAppState((state) => state.settings.actions.clearAuth);
   const addNetworkLog = useAppState((state) => state.debug.actions.addNetworkLog);
   const updateRAGContext = useAppState((state) => state.debug.actions.updateRAGContext);
+  // Domain-aware session management
+  const initializeDomainAwareSessions = useAppState((state) => state.sessions.actions.initializeDomainAwareSessions);
+  const switchToUrlSession = useAppState((state) => state.sessions.actions.switchToUrlSession);
+  const currentDomain = useAppState((state) => state.sessions.currentDomain);
   // Use user directly from store - this will trigger re-render when login updates it
   const user = useAppState((state) => state.settings.user);
   
@@ -128,6 +152,9 @@ const App = () => {
         setUser(session.user);
         setTenant(session.tenantId, session.tenantName);
         
+        // Initialize domain-aware sessions
+        await initializeDomainAwareSessions();
+        
         // Load theme preferences
         try {
           const preferences = await apiClient.getPreferences();
@@ -138,6 +165,16 @@ const App = () => {
           // Theme loading is optional, continue if it fails
           console.debug('Could not load theme preferences:', prefError);
         }
+        
+        // Auto-switch to session for current tab's domain
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab?.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {
+            await switchToUrlSession(tab.url);
+          }
+        } catch (urlError) {
+          console.debug('Could not auto-switch session for current URL:', urlError);
+        }
       } catch (error) {
         // 401 or network error - not authenticated
         clearAuth();
@@ -147,7 +184,55 @@ const App = () => {
     };
 
     checkSession();
-  }, [setUser, setTenant, setTheme, clearAuth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setUser, setTenant, setTheme, clearAuth]); // initializeDomainAwareSessions and switchToUrlSession are stable
+  
+  // Handle URL changes - switch sessions when domain changes
+  useEffect(() => {
+    if (!user) return;
+    
+    const handleUrlChange = async (url: string) => {
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        try {
+          await switchToUrlSession(url);
+        } catch (error) {
+          console.debug('Could not switch session for URL change:', error);
+        }
+      }
+    };
+    
+    // Listen for tab updates (navigation within the same tab)
+    const handleTabUpdate = (
+      tabId: number,
+      changeInfo: chrome.tabs.TabChangeInfo,
+      tab: chrome.tabs.Tab
+    ) => {
+      if (changeInfo.status === 'complete' && tab?.url) {
+        handleUrlChange(tab.url);
+      }
+    };
+    
+    // Listen for tab activation (switching to a different tab)
+    const handleTabActivation = async (activeInfo: chrome.tabs.TabActiveInfo) => {
+      try {
+        const tab = await chrome.tabs.get(activeInfo.tabId);
+        if (tab?.url) {
+          handleUrlChange(tab.url);
+        }
+      } catch (error) {
+        console.debug('Could not get tab info on activation:', error);
+      }
+    };
+    
+    chrome.tabs.onUpdated.addListener(handleTabUpdate);
+    chrome.tabs.onActivated.addListener(handleTabActivation);
+    
+    return () => {
+      chrome.tabs.onUpdated.removeListener(handleTabUpdate);
+      chrome.tabs.onActivated.removeListener(handleTabActivation);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]); // switchToUrlSession is stable from Zustand
 
   // Dark mode color values - defined at component top level
   const bgColor = useColorModeValue('white', 'gray.900');

@@ -12,9 +12,10 @@ import {
   Box,
   Text,
   Flex,
+  HStack,
   useColorModeValue,
 } from '@chakra-ui/react';
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import { BsStopFill } from 'react-icons/bs';
 import { FiSend } from 'react-icons/fi';
 import { Icon, IconButton } from '@chakra-ui/react';
@@ -26,6 +27,8 @@ import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
 import ErrorBoundary from './ErrorBoundary';
 import ChatHistoryDrawer from './ChatHistoryDrawer';
 import DomainStatus from './components/DomainStatus';
+import { TypingIndicator } from './TypingIndicator';
+import { messageSyncManager } from '../services/messageSyncService';
 
 interface TaskUIProps {
   hasOrgKnowledge?: boolean | null;
@@ -41,7 +44,11 @@ const TaskUI: React.FC<TaskUIProps> = ({
   onNavigate,
 }) => {
   // Split selectors to avoid creating new objects on every render (prevents infinite loops)
-  const taskHistory = useAppState((state) => state.currentTask.displayHistory);
+  // Safety check: Ensure displayHistory is always an array
+  const taskHistory = useAppState((state) => {
+    const history = state.currentTask.displayHistory;
+    return Array.isArray(history) ? history : [];
+  });
   const taskStatus = useAppState((state) => state.currentTask.status);
   const runTask = useAppState((state) => state.currentTask.actions.runTask);
   const instructions = useAppState((state) => state.ui.instructions);
@@ -68,8 +75,8 @@ const TaskUI: React.FC<TaskUIProps> = ({
 
   const [activeUrl, setActiveUrl] = useState<string>('');
   const [showKnowledge, setShowKnowledge] = useState(false);
-  
-  // Session management
+
+  // Session management and message state (declared before effects that use them)
   const isHistoryOpen = useAppState((state) => state.sessions.isHistoryOpen);
   const setHistoryOpen = useAppState((state) => state.sessions.actions.setHistoryOpen);
   const createNewChat = useAppState((state) => state.sessions.actions.createNewChat);
@@ -78,22 +85,85 @@ const TaskUI: React.FC<TaskUIProps> = ({
   const taskInProgress = state.taskStatus === 'running';
   const sessionId = useAppState((state) => state.currentTask.sessionId);
   const loadMessages = useAppState((state) => state.currentTask.actions.loadMessages);
-  const messages = useAppState((state) => state.currentTask.messages);
-  
+  // Safety check: Ensure messages is always an array
+  const messages = useAppState((state) => {
+    const msgs = state.currentTask.messages;
+    return Array.isArray(msgs) ? msgs : [];
+  });
+  // Get loading state to prevent infinite loops
+  const messagesLoadingState = useAppState((state) => state.currentTask.messagesLoadingState);
+
   // Check if we're waiting for user input (ASK_USER state)
   const waitingForUserInput = useAppState((state) => {
-    const lastMessage = state.currentTask.messages[state.currentTask.messages.length - 1];
-    return lastMessage?.userQuestion && 
+    // Safety check: Ensure messages is an array before accessing
+    const messagesArray = Array.isArray(state.currentTask.messages) ? state.currentTask.messages : [];
+    if (messagesArray.length === 0) return false;
+
+    const lastMessage = messagesArray[messagesArray.length - 1];
+    return lastMessage?.userQuestion &&
            (lastMessage.status === 'pending' || lastMessage.meta?.reasoning?.source === 'ASK_USER');
   });
 
-  // Load messages on mount if sessionId exists
+  // Scroll container ref for auto-scrolling to bottom on new messages
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when messages change (Cursor-like behavior)
   useEffect(() => {
-    if (sessionId && messages.length === 0) {
+    // Safety check: Ensure messages and taskHistory are arrays before accessing .length
+    const messagesArray = Array.isArray(messages) ? messages : [];
+    const taskHistoryArray = Array.isArray(taskHistory) ? taskHistory : [];
+
+    if (scrollContainerRef.current && (messagesArray.length > 0 || taskHistoryArray.length > 0)) {
+      // Small delay to ensure DOM has updated
+      setTimeout(() => {
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        }
+      }, 100);
+    }
+  }, [messages, taskHistory]); // Scroll when messages or history changes
+
+  // Load messages on mount if sessionId exists
+  // Uses loading state to prevent infinite retry loops
+  useEffect(() => {
+    // Don't try to load if:
+    // 1. No sessionId
+    // 2. Already loading
+    // 3. Have an error that's blocking retries (handled by loadMessages itself)
+    // 4. Already have messages
+    if (!sessionId) return;
+    if (messagesLoadingState.isLoading) return;
+    
+    const messagesArray = Array.isArray(messages) ? messages : [];
+    if (messagesArray.length === 0) {
       loadMessages(sessionId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, messages.length]); // loadMessages is stable from Zustand, no need in deps
+  }, [sessionId]); // Only trigger on sessionId change - loadMessages handles its own state
+
+  // Real-time message sync: start WebSocket (or polling fallback) when sessionId is set
+  // Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md
+  useEffect(() => {
+    if (!sessionId) return;
+    messageSyncManager.startSync(sessionId);
+    return () => {
+      messageSyncManager.stopSync();
+    };
+  }, [sessionId]);
+
+  // Visibility-based reconnect: when popup becomes visible again, reconnect if needed
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && sessionId) {
+        const wsState = useAppState.getState().currentTask.wsConnectionState;
+        if (wsState !== 'connected' && wsState !== 'connecting' && wsState !== 'reconnecting') {
+          messageSyncManager.startSync(sessionId);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [sessionId]);
 
   // Get active tab URL on mount and when tab changes
   useEffect(() => {
@@ -184,13 +254,16 @@ const TaskUI: React.FC<TaskUIProps> = ({
       interruptTask();
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    
+
+    // Stop real-time message sync before clearing state
+    messageSyncManager.stopSync();
+
     // Clear current task state (clears messages, displayHistory, instructions)
     startNewChat();
-    
+
     // Create new session
     await createNewChat(activeUrl);
-    
+
     // Clear instructions explicitly (startNewChat should do this, but ensure it)
     setInstructions('');
   }, [activeUrl, createNewChat, startNewChat, isRunning, interruptTask, setInstructions, taskStatus]);
@@ -215,6 +288,7 @@ const TaskUI: React.FC<TaskUIProps> = ({
 
       {/* Zone B: Scrollable Document Stream */}
       <Box 
+        ref={scrollContainerRef}
         flex="1" 
         overflowY="auto" 
         overflowX="hidden" 
@@ -282,6 +356,7 @@ const TaskUI: React.FC<TaskUIProps> = ({
         zIndex={20}
         minW="0"
       >
+        <TypingIndicator />
         <Box
           borderWidth="1px"
           borderColor={floatingInputBorder}

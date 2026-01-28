@@ -26,6 +26,7 @@ import { DownloadIcon, ArrowLeftIcon } from '@chakra-ui/icons';
 import { FiArrowLeft } from 'react-icons/fi';
 import { useAppState } from '../state/store';
 import DebugPanel from './DebugPanel';
+import { ConnectionStatusBadge } from './ConnectionStatusBadge';
 import { exportDebugSession } from '../helpers/exportDebugSession';
 import ErrorBoundary from './ErrorBoundary';
 
@@ -199,6 +200,20 @@ const SystemView: React.FC<SystemViewProps> = ({ onBackToChat }) => {
             <Text fontSize="sm" fontWeight="medium" color={textColor}>
               {totalTokens.toLocaleString()}
             </Text>
+          </Box>
+
+          {/* Real-time connection (Pusher / Polling) - debug only */}
+          <Box
+            p={3}
+            borderWidth="1px"
+            borderColor={borderColor}
+            borderRadius="md"
+            bg={bgColor}
+          >
+            <Text fontSize="xs" color={descColor} mb={1}>
+              Real-time
+            </Text>
+            <ConnectionStatusBadge />
           </Box>
         </SimpleGrid>
       </Box>

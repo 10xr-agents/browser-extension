@@ -69,6 +69,82 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   // No need to clean up panel state - Chrome handles this automatically
 });
 
+// ============================================================================
+// CRITICAL FIX: New Tab Handling (Section 4.2)
+// Auto-follow logic to switch agent's attention when new tabs open
+// 
+// Reference: PRODUCTION_READINESS.md §4.2 (The "New Tab" Disconnect)
+// ============================================================================
+
+const ACTION_WINDOW_MS = 2000; // 2 seconds window
+
+// Listen for new tab creation
+chrome.tabs.onCreated.addListener(async (tab) => {
+  try {
+    // Check if we have a running task by checking chrome.storage
+    const storage = await chrome.storage.local.get(['lastActionTime', 'currentTaskStatus']);
+    
+    if (storage.currentTaskStatus === 'running' && storage.lastActionTime) {
+      // Get last action time from storage (set by currentTask.ts)
+      const lastActionTime = storage.lastActionTime;
+      const now = Date.now();
+      
+      // If tab was created within action window, assume it's from agent action
+      if (now - lastActionTime < ACTION_WINDOW_MS) {
+        // Store new tab info in storage for currentTask to pick up
+        await chrome.storage.local.set({
+          newTabDetected: {
+            tabId: tab.id,
+            url: tab.url || tab.pendingUrl || 'unknown',
+            timestamp: now,
+          },
+        });
+        
+        // Also send message (in case popup is listening)
+        chrome.runtime.sendMessage({
+          type: 'NEW_TAB_DETECTED',
+          tabId: tab.id,
+          url: tab.url || tab.pendingUrl || 'unknown',
+        }).catch(() => {
+          // Ignore errors - no listeners registered yet
+        });
+        
+        console.log('New tab detected after agent action:', {
+          tabId: tab.id,
+          url: tab.url || tab.pendingUrl,
+        });
+      }
+    }
+  } catch (error) {
+    console.warn('Error handling new tab:', error);
+  }
+});
+
+// Also handle tab activation (user manually switches tabs)
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    // Store tab switch info in storage
+    await chrome.storage.local.set({
+      tabSwitched: {
+        tabId: activeInfo.tabId,
+        windowId: activeInfo.windowId,
+        timestamp: Date.now(),
+      },
+    });
+    
+    // Also send message (in case popup is listening)
+    chrome.runtime.sendMessage({
+      type: 'TAB_SWITCHED',
+      tabId: activeInfo.tabId,
+      windowId: activeInfo.windowId,
+    }).catch(() => {
+      // Ignore errors - no listeners registered yet
+    });
+  } catch (error) {
+    console.warn('Error handling tab switch:', error);
+  }
+});
+
 // Handle keyboard shortcut (Ctrl+Shift+Y / Cmd+Shift+Y)
 chrome.commands.onCommand.addListener((command) => {
   if (command === '_execute_action') {

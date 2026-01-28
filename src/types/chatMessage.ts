@@ -49,6 +49,8 @@ export type ChatMessage = {
   content: string; // Main text/thought (user instruction or assistant thought)
   status: MessageStatus;
   timestamp: Date;
+  /** Backend ordering field; use for reliable sort when available (oldest first) */
+  sequenceNumber?: number;
   
   // For assistant messages
   actionPayload?: {

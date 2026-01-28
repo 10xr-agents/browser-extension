@@ -34,18 +34,27 @@ const TaskHistoryUser: React.FC = () => {
   const instructions = useAppState((state) => state.currentTask.instructions);
   const sessionId = useAppState((state) => state.currentTask.sessionId);
   const loadMessages = useAppState((state) => state.currentTask.actions.loadMessages);
+  // Get loading state to prevent infinite loops
+  const messagesLoadingState = useAppState((state) => state.currentTask.messagesLoadingState);
   const accessibilityElements = useAppState((state) => state.currentTask.accessibilityElements);
   const correctionHistory = useAppState((state) => state.currentTask.correctionHistory);
   const verificationHistory = useAppState((state) => state.currentTask.verificationHistory);
   // NOTE: previousConversations removed - now handled by ChatHistoryDrawer
   
   // Load messages on mount if sessionId exists
+  // Uses loading state to prevent infinite retry loops
   useEffect(() => {
-    if (sessionId && messages.length === 0) {
-      loadMessages(sessionId);
-    }
+    // Don't try to load if:
+    // 1. No sessionId
+    // 2. Already loading
+    // 3. Already have messages
+    if (!sessionId) return;
+    if (messagesLoadingState.isLoading) return;
+    if (messages.length > 0) return;
+    
+    loadMessages(sessionId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, messages.length]); // loadMessages is stable from Zustand, no need in deps
+  }, [sessionId]); // Only trigger on sessionId change - loadMessages handles its own state
 
   // Color definitions - ALL at component top level
   const userMessageBg = useColorModeValue('blue.50', 'blue.900/20');

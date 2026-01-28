@@ -29,14 +29,15 @@ export function parseResponse(text: string): ParsedResponse {
   }
 
   const thought = thoughtMatch[1];
-  const actionString = actionMatch[1];
-  const actionPattern = /(\w+)\((.*?)\)/;
+  const actionString = (actionMatch[1] && typeof actionMatch[1] === 'string'
+    ? actionMatch[1].trim()
+    : String(actionMatch[1] || '').trim());
+  const actionPattern = /^(\w+)\((.*)\)\s*$/s;
   const actionParts = actionString.match(actionPattern);
 
   if (!actionParts) {
     return {
-      error:
-        'Invalid action format: Action should be in the format functionName(arg1, arg2, ...).',
+      error: `Invalid action format: Action should be in the format functionName(arg1, arg2, ...). Got: ${JSON.stringify(actionString.slice(0, 80))}`,
     };
   }
 

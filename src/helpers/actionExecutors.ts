@@ -207,22 +207,170 @@ export async function executeFindText(args: { text: string }) {
   await sleep(500);
 }
 
+/**
+ * Scroll a specific container to bring an element into view
+ * CRITICAL FIX: Advanced Scroll Targeting (Section 5.4) - Container-aware scrolling
+ * 
+ * Reference: PRODUCTION_READINESS.md §5.4 (Advanced Scroll Targeting)
+ */
+export async function executeScrollContainer(args: { elementId: number; direction?: 'up' | 'down' | 'left' | 'right' }) {
+  const { scrollContainer } = await import('./domActions');
+  const objectId = await getElementObjectId(args.elementId);
+  const direction = args.direction || 'down';
+  
+  // Use the scrollContainer function from domActions
+  // Note: We need to expose this function or implement it here
+  // For now, let's implement it inline
+  const scrollParentResult = (await sendCommand('Runtime.callFunctionOn', {
+    objectId,
+    functionDeclaration: `
+      function() {
+        let element = this;
+        
+        while (element && element !== document.body && element !== document.documentElement) {
+          const style = window.getComputedStyle(element);
+          const overflowY = style.overflowY;
+          const overflowX = style.overflowX;
+          
+          if (
+            (overflowY === 'auto' || overflowY === 'scroll') ||
+            (overflowX === 'auto' || overflowX === 'scroll')
+          ) {
+            if (element.scrollHeight > element.clientHeight ||
+                element.scrollWidth > element.clientWidth) {
+              return element;
+            }
+          }
+          
+          element = element.parentElement;
+        }
+        
+        return null;
+      }
+    `,
+  })) as { objectId?: string } | null;
+  
+  if (scrollParentResult?.objectId) {
+    // Scroll the specific container
+    await sendCommand('Runtime.callFunctionOn', {
+      objectId: scrollParentResult.objectId,
+      functionDeclaration: `
+        function() {
+          const targetElement = arguments[0];
+          const direction = arguments[1];
+          
+          const containerRect = this.getBoundingClientRect();
+          const elementRect = targetElement.getBoundingClientRect();
+          
+          const relativeTop = elementRect.top - containerRect.top;
+          const relativeLeft = elementRect.left - containerRect.left;
+          
+          if (direction === 'down' || direction === 'up') {
+            this.scrollTop = relativeTop - (this.clientHeight / 2) + (elementRect.height / 2);
+          }
+          
+          if (direction === 'left' || direction === 'right') {
+            this.scrollLeft = relativeLeft - (this.clientWidth / 2) + (elementRect.width / 2);
+          }
+        }
+      `,
+      arguments: [{ objectId }, direction],
+    });
+    await sleep(500);
+  } else {
+    // Fallback to standard scrollIntoView
+    await sendCommand('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `
+        function() {
+          this.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      `,
+    });
+    await sleep(1000);
+  }
+}
+
+/**
+ * Wait for a specific condition to be met
+ * CRITICAL FIX: Wait for Condition (Section 5.5) - Smart Patience
+ * 
+ * Reference: PRODUCTION_READINESS.md §5.5 ("Wait for Condition")
+ */
+export async function executeWaitFor(args: { condition: string }) {
+  const tabId = useAppState.getState().currentTask.tabId;
+  if (tabId === -1) {
+    throw new Error('No active tab');
+  }
+  
+  let condition: {
+    type: 'text' | 'selector' | 'element_count' | 'url_change' | 'custom';
+    value: string;
+    timeout?: number;
+    pollInterval?: number;
+  };
+  
+  try {
+    condition = JSON.parse(args.condition);
+  } catch (error) {
+    throw new Error(`Invalid condition JSON: ${args.condition}`);
+  }
+  
+  const timeout = condition.timeout || 60000; // Default 60 seconds
+  const pollInterval = condition.pollInterval || 500; // Default 500ms
+  const startTime = Date.now();
+  
+  while (Date.now() - startTime < timeout) {
+    try {
+      // Use RPC to check condition in content script
+      const { callRPC } = await import('./pageRPC');
+      const conditionMet = await callRPC('checkWaitCondition', [condition], 1, tabId);
+      
+      if (conditionMet) {
+        console.log(`Wait condition met: ${condition.type} = ${condition.value}`);
+        return;
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.warn('Error checking wait condition:', errorMessage);
+    }
+    
+    await sleep(pollInterval);
+  }
+  
+  throw new Error(`Timeout waiting for condition: ${condition.type} = ${condition.value} (timeout: ${timeout}ms)`);
+}
+
 // ============================================================================
 // MOUSE & TOUCH ACTIONS
 // ============================================================================
 
+/**
+ * Hover mouse over an element
+ * CRITICAL FIX: Hover-Only Elements (Section 2.3) - Enhanced with proper hydration wait
+ * 
+ * Reference: PRODUCTION_READINESS.md §2.3 (The "Hover-Only" Elements)
+ */
 export async function executeHover(args: { index: number }) {
   const objectId = await getElementObjectId(args.index);
   await scrollIntoView(objectId);
   const { x, y } = await getCenterCoordinates(objectId);
   
+  // CRITICAL FIX: Use Chrome Debugger API to simulate real mouse movement
+  // This ensures JavaScript hover events are properly triggered
   await sendCommand('Input.dispatchMouseEvent', {
     type: 'mouseMoved',
     x,
     y,
     button: 'left',
   });
-  await sleep(300);
+  
+  // CRITICAL FIX: Wait for DOM to hydrate (menu items to appear)
+  // Increased from 300ms to 500ms to ensure menus are fully interactive
+  await sleep(500);
+  
+  // Note: After hover, the next DOM snapshot should be taken to detect newly appeared menu items
+  // This is handled automatically by waitForDOMChangesAfterAction in currentTask.ts
 }
 
 export async function executeDoubleClick(args: { index: number }) {
@@ -1260,10 +1408,12 @@ export const actionExecutors: Record<string, (args: any) => Promise<any>> = {
   goForward: executeGoForward,
   wait: executeWait,
   waitForElement: executeWaitForElement,
+  wait_for: executeWaitFor,
   search: executeSearch,
   
   // Page Interaction
   scroll: executeScroll,
+  scroll_container: executeScrollContainer,
   findText: executeFindText,
   
   // Mouse & Touch

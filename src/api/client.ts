@@ -86,6 +86,24 @@ interface DOMChangeInfo {
   dropdownOptions?: string[];
   /** Time for DOM to stabilize in ms */
   stabilizationTime: number;
+  /** URL before the action was executed (for detecting navigation) */
+  previousUrl?: string;
+  /** Whether the URL changed after the action */
+  urlChanged?: boolean;
+}
+
+/**
+ * Client observations witnessed by the extension after executing an action.
+ * Optional; improves verification accuracy (avoids false "no change" failures).
+ * Reference: Verification process doc — clientObservations (v3.0)
+ */
+export interface ClientObservations {
+  /** Whether a network request completed during/after the action (e.g. API call) */
+  didNetworkOccur?: boolean;
+  /** Whether the DOM was mutated (elements added/removed/changed) */
+  didDomMutate?: boolean;
+  /** Whether the URL changed (navigation occurred) */
+  didUrlChange?: boolean;
 }
 
 /**
@@ -114,6 +132,8 @@ interface AgentInteractRequest {
   };
   // DOM change information after last action (helps server understand page state changes)
   domChanges?: DOMChangeInfo;
+  /** Optional: extension-witnessed observations (improves verification accuracy) */
+  clientObservations?: ClientObservations;
 }
 
 /**
@@ -258,6 +278,34 @@ export const API_BASE = (
   'https://api.example.com'
 ).replace(/\/$/, '');
 
+// Import rate limiter for exponential backoff and request deduplication
+import { rateLimiter } from './rateLimiter';
+
+/**
+ * Custom error class for rate limit errors
+ */
+export class RateLimitError extends Error {
+  public readonly resetAt: Date | null;
+  public readonly retryAfter: number | null;
+
+  constructor(message: string, resetAt?: Date | null, retryAfter?: number | null) {
+    super(message);
+    this.name = 'RateLimitError';
+    this.resetAt = resetAt || null;
+    this.retryAfter = retryAfter || null;
+  }
+}
+
+/**
+ * Custom error class for resource not found errors
+ */
+export class NotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotFoundError';
+  }
+}
+
 class ApiClient {
   /**
    * Get stored access token from chrome.storage.local
@@ -275,19 +323,54 @@ class ApiClient {
   /**
    * Handle API errors with appropriate status codes
    * Returns user-friendly error messages for common failure scenarios
+   * Also records rate limits and errors for backoff management
    */
-  private async handleError(response: Response): Promise<never> {
+  private async handleError(response: Response, path: string): Promise<never> {
     const error: ApiError = {
       message: 'Unknown error',
       status: response.status,
     };
 
+    let resetAt: string | undefined;
+    let retryAfterHeader: string | null = null;
+
     try {
-      const data = (await response.json()) as { message?: string; error?: string; code?: string };
+      const data = (await response.json()) as { 
+        message?: string; 
+        error?: string; 
+        code?: string;
+        resetAt?: string; // Rate limit reset time from response body
+      };
       error.message = data.message || data.error || error.message;
       error.code = data.code;
+      resetAt = data.resetAt;
     } catch {
       error.message = `HTTP ${response.status}: ${response.statusText}`;
+    }
+
+    // Extract Retry-After header if present
+    retryAfterHeader = response.headers.get('Retry-After');
+
+    // Handle 429 - Rate Limit Exceeded
+    if (response.status === 429) {
+      const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+      const resetAtDate = resetAt ? new Date(resetAt) : null;
+      
+      // Record rate limit for backoff
+      rateLimiter.recordRateLimit(path, resetAt, retryAfterSeconds);
+      
+      throw new RateLimitError(
+        `Rate limit exceeded. ${resetAtDate ? `Resets at ${resetAtDate.toISOString()}` : 'Please try again later.'}`,
+        resetAtDate,
+        retryAfterSeconds || null
+      );
+    }
+
+    // Handle 404 - Resource Not Found
+    if (response.status === 404) {
+      // Record 404 to prevent hammering (session might not exist)
+      rateLimiter.recordClientError(path, 404);
+      throw new NotFoundError(`Resource not found: ${path}`);
     }
 
     // Handle 401 - clear token and show login
@@ -303,6 +386,12 @@ class ApiClient {
         throw new Error('DOMAIN_NOT_ALLOWED');
       }
       throw new Error(`FORBIDDEN: ${error.message}`);
+    }
+
+    // Handle 5xx - Server errors (use backoff)
+    if (response.status >= 500) {
+      rateLimiter.recordServerError(path);
+      throw new Error(`SERVER_ERROR: ${error.message}`);
     }
 
     // Handle 400 - Bad Request (includes max retries, validation errors, etc.)
@@ -340,6 +429,7 @@ class ApiClient {
 
   /**
    * Generic request method with Bearer token authentication
+   * Includes rate limiting, exponential backoff, and request deduplication
    * Optionally logs network calls for debug panel
    */
   async request<T>(
@@ -353,13 +443,50 @@ class ApiClient {
       response: { body?: unknown; status: number; headers?: Record<string, string> };
       duration: number;
       error?: string;
-    }) => void
+    }) => void,
+    options?: {
+      skipRateLimitCheck?: boolean; // For critical requests that should not be rate-limited
+      skipDeduplication?: boolean; // For requests that should not be deduplicated
+    }
   ): Promise<T> {
     const token = await this.getToken();
     
     // Allow login endpoint without token
     if (!token && path !== '/api/v1/auth/login') {
       throw new Error('UNAUTHORIZED');
+    }
+
+    // === RATE LIMIT CHECK ===
+    // Check if we should wait before making this request
+    if (!options?.skipRateLimitCheck) {
+      // Check if max retries exceeded
+      if (rateLimiter.hasExceededMaxRetries(path)) {
+        const waitTime = rateLimiter.getWaitTime(path);
+        if (waitTime > 0) {
+          console.warn(`[ApiClient] Max retries exceeded for ${path}, blocking for ${waitTime}ms`);
+          throw new RateLimitError(
+            `Too many failed requests. Please wait before retrying.`,
+            new Date(Date.now() + waitTime),
+            Math.ceil(waitTime / 1000)
+          );
+        }
+      }
+
+      const waitTime = rateLimiter.getWaitTime(path);
+      if (waitTime > 0) {
+        console.log(`[ApiClient] Rate limited, waiting ${waitTime}ms before request to ${path}`);
+        await rateLimiter.sleep(waitTime);
+      }
+    }
+
+    // === REQUEST DEDUPLICATION ===
+    // For GET requests, check if an identical request is already in-flight
+    if (method === 'GET' && !options?.skipDeduplication) {
+      const inFlightRequest = rateLimiter.getInFlightRequest<T>(method, path, body);
+      if (inFlightRequest) {
+        console.debug(`[ApiClient] Deduplicating in-flight request: ${method} ${path}`);
+        return inFlightRequest;
+      }
     }
 
     const headers: Record<string, string> = {
@@ -384,84 +511,107 @@ class ApiClient {
     let responseHeaders: Record<string, string> = {};
     let errorMessage: string | undefined;
 
-    try {
-      const response = await fetch(`${API_BASE}${path}`, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-        credentials: 'omit', // Chrome extension doesn't use cookies
-      });
+    // Create the request promise
+    const requestPromise = (async (): Promise<T> => {
+      try {
+        const response = await fetch(`${API_BASE}${path}`, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : undefined,
+          credentials: 'omit', // Chrome extension doesn't use cookies
+        });
 
-      responseStatus = response.status;
-      
-      // Extract response headers (limited set for security)
-      response.headers.forEach((value, key) => {
-        if (['content-type', 'content-length'].includes(key.toLowerCase())) {
-          responseHeaders[key] = value;
+        responseStatus = response.status;
+        
+        // Extract response headers (limited set for security)
+        response.headers.forEach((value, key) => {
+          if (['content-type', 'content-length', 'retry-after'].includes(key.toLowerCase())) {
+            responseHeaders[key] = value;
+          }
+        });
+
+        if (!response.ok) {
+          await this.handleError(response, path);
         }
-      });
 
-      if (!response.ok) {
-        await this.handleError(response);
+        // Record success - clear any rate limit state
+        rateLimiter.recordSuccess(path);
+
+        // Handle 204 No Content
+        if (response.status === 204) {
+          responseBody = undefined as T;
+        } else {
+          responseBody = (await response.json()) as T;
+        }
+
+        const duration = Date.now() - startTime;
+
+        // Log successful request
+        if (logger) {
+          logger({
+            method,
+            endpoint: path,
+            request: {
+              body: body ? (typeof body === 'string' ? body : JSON.stringify(body).substring(0, 1000)) : undefined,
+              headers: maskedHeaders,
+            },
+            response: {
+              body: responseBody ? (typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody).substring(0, 1000)) : undefined,
+              status: responseStatus,
+              headers: responseHeaders,
+            },
+            duration,
+          });
+        }
+
+        return responseBody;
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        errorMessage = error instanceof Error ? error.message : String(error);
+
+        // Log failed request
+        if (logger) {
+          logger({
+            method,
+            endpoint: path,
+            request: {
+              body: body ? (typeof body === 'string' ? body : JSON.stringify(body).substring(0, 1000)) : undefined,
+              headers: maskedHeaders,
+            },
+            response: {
+              body: undefined,
+              status: responseStatus || 0,
+              headers: responseHeaders,
+            },
+            duration,
+            error: errorMessage,
+          });
+        }
+
+        // Re-throw specific error types
+        if (error instanceof RateLimitError || error instanceof NotFoundError) {
+          throw error;
+        }
+        
+        if (error instanceof Error && error.message === 'UNAUTHORIZED') {
+          throw error;
+        }
+
+        // Network errors - record for potential backoff
+        if (!responseStatus || responseStatus === 0) {
+          rateLimiter.recordServerError(path);
+        }
+
+        throw new Error(`Network error: ${errorMessage}`);
       }
+    })();
 
-      // Handle 204 No Content
-      if (response.status === 204) {
-        responseBody = undefined as T;
-      } else {
-        responseBody = (await response.json()) as T;
-      }
-
-      const duration = Date.now() - startTime;
-
-      // Log successful request
-      if (logger) {
-        logger({
-          method,
-          endpoint: path,
-          request: {
-            body: body ? (typeof body === 'string' ? body : JSON.stringify(body).substring(0, 1000)) : undefined,
-            headers: maskedHeaders,
-          },
-          response: {
-            body: responseBody ? (typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody).substring(0, 1000)) : undefined,
-            status: responseStatus,
-            headers: responseHeaders,
-          },
-          duration,
-        });
-      }
-
-      return responseBody;
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      errorMessage = error instanceof Error ? error.message : String(error);
-
-      // Log failed request
-      if (logger) {
-        logger({
-          method,
-          endpoint: path,
-          request: {
-            body: body ? (typeof body === 'string' ? body : JSON.stringify(body).substring(0, 1000)) : undefined,
-            headers: maskedHeaders,
-          },
-          response: {
-            body: undefined,
-            status: responseStatus || 0,
-            headers: responseHeaders,
-          },
-          duration,
-          error: errorMessage,
-        });
-      }
-
-      if (error instanceof Error && error.message === 'UNAUTHORIZED') {
-        throw error;
-      }
-      // Network errors
-      throw new Error(`Network error: ${errorMessage}`);
+    // Register in-flight request for deduplication (GET only)
+    if (method === 'GET' && !options?.skipDeduplication) {
+      rateLimiter.setInFlightRequest(method, path, requestPromise, body);
     }
+
+    return requestPromise;
   }
 
   /**
@@ -599,7 +749,8 @@ class ApiClient {
       duration: number;
       error?: string;
     }) => void,
-    domChanges?: DOMChangeInfo
+    domChanges?: DOMChangeInfo,
+    clientObservations?: ClientObservations
   ): Promise<NextActionResponse> {
     const body: AgentInteractRequest = {
       url,
@@ -611,6 +762,7 @@ class ApiClient {
       lastActionError,
       lastActionResult,
       domChanges,
+      clientObservations,
     };
 
     return this.request<NextActionResponse>('POST', '/api/agent/interact', body, logger);
@@ -649,18 +801,20 @@ class ApiClient {
   ): Promise<{
     sessionId: string;
     messages: Array<{
-      messageId: string;
-      role: 'user' | 'assistant' | 'system';
-      content: string;
-      actionPayload?: object;
-      actionString?: string;
-      status?: 'success' | 'failure' | 'pending';
-      error?: object;
-      timestamp: string;
-      metadata?: object;
-    }>;
-    total: number;
-  }> {
+        messageId: string;
+        role: 'user' | 'assistant' | 'system';
+        content: string;
+        actionPayload?: object;
+        actionString?: string;
+        status?: 'success' | 'failure' | 'pending';
+        error?: object;
+        timestamp: string;
+        /** Backend ordering; sort by this when available (ascending = oldest first) */
+        sequenceNumber?: number;
+        metadata?: object;
+      }>;
+      total: number;
+    }> {
     const params = new URLSearchParams();
     if (limit) params.append('limit', limit.toString());
     if (since) params.append('since', since.toISOString());
@@ -679,6 +833,7 @@ class ApiClient {
         status?: 'success' | 'failure' | 'pending';
         error?: object;
         timestamp: string;
+        sequenceNumber?: number;
         metadata?: object;
       }>;
       total: number;
@@ -819,5 +974,6 @@ export type {
   AgentInteractRequest,
   PreferencesResponse,
   PreferencesRequest,
-  DOMChangeInfo
+  DOMChangeInfo,
+  ClientObservations
 };

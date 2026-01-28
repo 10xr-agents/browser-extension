@@ -46,6 +46,13 @@ export const availableActions = [
     ],
   },
   {
+    name: 'wait_for',
+    description: 'Wait until a specific condition is met (text appears, selector found, URL changes, element count changes). Example: wait_for({"type":"text","value":"Download Ready","timeout":60000})',
+    args: [
+      { name: 'condition', type: 'string' }, // JSON string of WaitCondition
+    ],
+  },
+  {
     name: 'search',
     description: 'Search queries on search engines (DuckDuckGo, Google, Bing)',
     args: [
@@ -79,6 +86,14 @@ export const availableActions = [
       { name: 'down', type: 'boolean', optional: true },
       { name: 'pages', type: 'number', optional: true },
       { name: 'index', type: 'number', optional: true },
+    ],
+  },
+  {
+    name: 'scroll_container',
+    description: 'Scrolls a specific container to bring an element into view (useful for modals, sidebars, infinite scroll lists)',
+    args: [
+      { name: 'elementId', type: 'number' },
+      { name: 'direction', type: 'string', optional: true }, // 'up' | 'down' | 'left' | 'right'
     ],
   },
   {

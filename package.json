@@ -15,7 +15,7 @@
     "start": "node utils/webserver.js",
     "start:clean": "lsof -ti:3001 | xargs kill -9 2>/dev/null; node utils/webserver.js",
     "prettier": "prettier --write '**/*.{js,jsx,ts,tsx,json,css,scss,md}'",
-    "test": "jest",
+    "test": "jest --config=jest.config.js",
     "lint": "eslint src/ --ext .js,.jsx,.ts,.tsx"
   },
   "dependencies": {
@@ -29,6 +29,7 @@
     "lodash": "^4.17.21",
     "openai": "^4.78.1",
     "openpipe": "^0.43.0",
+    "pusher-js": "^8.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-hot-loader": "^4.13.1",

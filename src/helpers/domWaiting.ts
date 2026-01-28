@@ -64,6 +64,10 @@ export interface ElementInfo {
   text?: string;
   /** Whether the element is interactive */
   interactive: boolean;
+  /** For virtual elements (text nodes), store click coordinates */
+  virtualCoordinates?: { x: number; y: number };
+  /** Indicates this is a virtual element created from a text node */
+  isVirtual?: boolean;
 }
 
 export interface DropdownItem {
@@ -94,6 +98,8 @@ export async function getInteractiveElementSnapshot(): Promise<Map<string, Eleme
         name: el.name,
         text: el.text,
         interactive: el.interactive,
+        virtualCoordinates: el.virtualCoordinates,
+        isVirtual: el.isVirtual,
       });
     }
     return map;
@@ -105,6 +111,7 @@ export async function getInteractiveElementSnapshot(): Promise<Map<string, Eleme
 
 /**
  * Compare two element snapshots and return the changes
+ * Also detects elements that became visible (were hidden before, now visible)
  */
 export function compareDOMSnapshots(
   before: Map<string, ElementInfo>,
@@ -127,6 +134,51 @@ export function compareDOMSnapshots(
     }
   }
   
+  // Also detect elements that might have been hidden before but are now visible
+  // This helps detect dropdown menu items that were in the DOM but hidden
+  // Menu items often don't have stable IDs, so we use text+role+position as fallback
+  const afterByTextRole = new Map<string, ElementInfo>();
+  for (const [, element] of after) {
+    // Only consider interactive elements with text (likely menu items)
+    if (element.interactive && element.text && element.text.trim().length > 0) {
+      const textRoleKey = `${element.tagName}-${element.role || 'no-role'}-${element.text.trim().substring(0, 50)}`;
+      // Keep the first element with this text+role combination
+      if (!afterByTextRole.has(textRoleKey)) {
+        afterByTextRole.set(textRoleKey, element);
+      }
+    }
+  }
+  
+  // Check if any of these text+role combinations are new (not in before snapshot)
+  for (const [textRoleKey, element] of afterByTextRole) {
+    // Check if this element was in the before snapshot
+    const beforeKey = element.id || `${element.tagName}-${element.text?.substring(0, 20)}`;
+    if (!before.has(beforeKey)) {
+      // Also check by text+role to catch elements that were hidden
+      let foundInBefore = false;
+      for (const [, beforeElement] of before) {
+        if (beforeElement.text === element.text && 
+            beforeElement.tagName === element.tagName && 
+            beforeElement.role === element.role) {
+          foundInBefore = true;
+          break;
+        }
+      }
+      
+      // If not found in before, this is a newly visible element (likely a menu item)
+      if (!foundInBefore) {
+        // Check if we already added this element
+        const alreadyAdded = added.some(e => 
+          (e.id && e.id === element.id) || 
+          (e.text === element.text && e.tagName === element.tagName && e.role === element.role)
+        );
+        if (!alreadyAdded) {
+          added.push(element);
+        }
+      }
+    }
+  }
+  
   return { added, removed };
 }
 
@@ -141,17 +193,46 @@ export function detectDropdownMenu(addedElements: ElementInfo[]): {
   // 1. Multiple elements with role="menuitem" or role="option"
   // 2. Elements inside a container with role="menu" or role="listbox"
   // 3. Multiple clickable elements that appeared at once
+  // 4. Elements with text like "New/Search", "Dashboard", etc. that appear together (menu items)
   
-  const menuItems = addedElements.filter(el => 
-    el.role === 'menuitem' || 
-    el.role === 'option' ||
-    el.role === 'menuitemcheckbox' ||
-    el.role === 'menuitemradio' ||
-    (el.interactive && (el.tagName === 'LI' || el.tagName === 'A'))
-  );
+  const menuItems = addedElements.filter(el => {
+    // Check for explicit menu roles
+    if (el.role === 'menuitem' || 
+        el.role === 'option' ||
+        el.role === 'menuitemcheckbox' ||
+        el.role === 'menuitemradio') {
+      return true;
+    }
+    
+    // Check for interactive elements that look like menu items
+    if (el.interactive && (el.tagName === 'LI' || el.tagName === 'A' || el.tagName === 'BUTTON')) {
+      // If it has text content, it's likely a menu item
+      if (el.text && el.text.trim().length > 0) {
+        return true;
+      }
+    }
+    
+    // Check for elements with text that suggests they're menu items
+    // (e.g., "New/Search", "Dashboard", "Visits", "Records")
+    if (el.text && el.text.trim().length > 0 && el.text.trim().length < 50) {
+      // Short text with common menu item patterns
+      const text = el.text.trim().toLowerCase();
+      if (text.includes('/') || // "New/Search"
+          text === 'dashboard' ||
+          text === 'visits' ||
+          text === 'records' ||
+          el.interactive) {
+        return true;
+      }
+    }
+    
+    return false;
+  });
   
   // If we have 2+ menu items appearing at once, likely a dropdown
-  const isDropdown = menuItems.length >= 2;
+  // Also check if we have at least 1 menu item with text (might be a single-item menu)
+  const isDropdown = menuItems.length >= 2 || 
+                     (menuItems.length >= 1 && menuItems.some(item => item.text && item.text.trim().length > 0));
   
   const items: DropdownItem[] = menuItems.map(el => ({
     id: el.id,
@@ -165,7 +246,10 @@ export function detectDropdownMenu(addedElements: ElementInfo[]): {
 
 /**
  * Wait for DOM to stabilize (no changes for a period of time)
- * Uses polling to detect when mutations stop occurring
+ * CRITICAL FIX: Dynamic Stability Check (Section 3.3) - Enhanced with network idle detection
+ * Uses polling to detect when mutations stop occurring AND network requests complete
+ * 
+ * Reference: PRODUCTION_READINESS.md §3.3 (The "Dynamic Stability" Check)
  */
 export async function waitForDOMStabilization(
   config: DOMWaitConfig = {}
@@ -175,12 +259,33 @@ export async function waitForDOMStabilization(
   const startTime = Date.now();
   let lastChangeTime = startTime;
   let previousSnapshot: Map<string, ElementInfo> | null = null;
+  let mutationCount = 0;
+  
+  // CRITICAL FIX: Track network activity for dynamic stability check
+  // Monitor network requests (if available via Performance API)
+  const checkNetworkIdle = async (): Promise<boolean> => {
+    try {
+      // Use RPC to check network activity in content script context
+      // Performance API is only available in content script, not background
+      const networkStatus = await callRPC('checkNetworkIdle', [], 1);
+      if (typeof networkStatus === 'boolean') {
+        return networkStatus;
+      }
+      // Fallback: assume idle if we can't check
+      return true;
+    } catch (error) {
+      // If RPC fails, assume network is idle (don't block on network check failures)
+      console.warn('Network idle check failed, assuming idle:', error);
+      return true;
+    }
+  };
   
   // Initial wait
   await sleep(cfg.minWait);
   
   while (Date.now() - startTime < cfg.maxWait) {
     const currentSnapshot = await getInteractiveElementSnapshot();
+    const networkIdle = await checkNetworkIdle();
     
     if (previousSnapshot) {
       const { added, removed } = compareDOMSnapshots(previousSnapshot, currentSnapshot);
@@ -188,8 +293,12 @@ export async function waitForDOMStabilization(
       if (added.length > 0 || removed.length > 0) {
         // DOM changed, reset stability timer
         lastChangeTime = Date.now();
-      } else if (Date.now() - lastChangeTime >= cfg.stabilityThreshold) {
-        // DOM has been stable for the threshold period
+        mutationCount += added.length + removed.length;
+      } else if (
+        Date.now() - lastChangeTime >= cfg.stabilityThreshold &&
+        networkIdle
+      ) {
+        // DOM has been stable for the threshold period AND network is idle
         return {
           stabilizationTime: Date.now() - startTime,
           timedOut: false,

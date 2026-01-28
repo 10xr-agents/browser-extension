@@ -2,6 +2,8 @@ import getAnnotatedDOM, {
   getUniqueElementSelectorId,
   getInteractiveElementSnapshot,
   waitForElementAppearance,
+  checkNetworkIdle,
+  checkWaitCondition,
 } from '../pages/Content/getAnnotatedDOM';
 import { copyToClipboard } from '../pages/Content/copyToClipboard';
 
@@ -40,6 +42,8 @@ export const rpcMethods = {
   getUniqueElementSelectorId,
   getInteractiveElementSnapshot,
   waitForElementAppearance,
+  checkNetworkIdle,
+  checkWaitCondition,
   ripple,
   copyToClipboard,
 } as const;
