@@ -90,6 +90,8 @@ interface DOMChangeInfo {
   previousUrl?: string;
   /** Whether the URL changed after the action */
   urlChanged?: boolean;
+  /** Whether any network request occurred during/after the action (for verification) */
+  didNetworkOccur?: boolean;
 }
 
 /**
@@ -838,6 +840,40 @@ class ApiClient {
       }>;
       total: number;
     }>('GET', path);
+  }
+
+  /**
+   * Get active task for a session (recovery fallback when chrome.storage fails).
+   * Returns 200 with taskId when an active task exists for the session and URL; 404 when none.
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md § Client Contract: taskId Persistence
+   */
+  async getActiveTask(
+    sessionId: string,
+    currentTabUrl: string
+  ): Promise<{
+    taskId: string;
+    query: string;
+    status: string;
+    currentStepIndex: number;
+    createdAt: string;
+    updatedAt: string;
+  } | null> {
+    try {
+      const params = new URLSearchParams({ url: currentTabUrl });
+      const path = `/api/session/${encodeURIComponent(sessionId)}/task/active?${params.toString()}`;
+      const result = await this.request<{
+        taskId: string;
+        query: string;
+        status: string;
+        currentStepIndex: number;
+        createdAt: string;
+        updatedAt: string;
+      }>('GET', path);
+      return result;
+    } catch (error: unknown) {
+      if (error instanceof NotFoundError) return null;
+      throw error;
+    }
   }
 
   /**

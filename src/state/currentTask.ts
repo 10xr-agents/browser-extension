@@ -34,6 +34,8 @@ import {
   type DOMChangeReport,
   type ElementInfo,
 } from '../helpers/domWaiting';
+import { persistTaskState, getTaskIdForTab } from '../helpers/taskPersistence';
+import { callRPC } from '../helpers/pageRPC';
 
 /**
  * Generate a UUID v4
@@ -728,9 +730,19 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           setActionStatus('performing-query');
 
           try {
-            // Get current taskId and sessionId from state (taskId must be sent on follow-up requests so backend continues same task)
-            const currentTaskId = get().currentTask.taskId;
+            // Get current taskId and sessionId (recover from storage if state lost — e.g. refresh)
+            // Reference: INTERACT_FLOW_WALKTHROUGH.md § Client Contract: taskId Persistence
+            let currentTaskId = get().currentTask.taskId;
             const currentSessionId = get().currentTask.sessionId;
+            if (!currentTaskId) {
+              currentTaskId = (await getTaskIdForTab(tabId)) ?? undefined;
+              if (currentTaskId) {
+                set((state) => {
+                  state.currentTask.taskId = currentTaskId!;
+                });
+                console.debug('[CurrentTask] Recovered taskId from storage:', currentTaskId.slice(0, 8) + '...');
+              }
+            }
             if (currentTaskId) {
               console.debug('[CurrentTask] Sending follow-up request with taskId:', currentTaskId.slice(0, 8) + '...');
             }
@@ -760,6 +772,22 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               console.warn('Failed to capture current URL before interact:', urlError);
             }
 
+            // Recovery fallback: if still no taskId but we have sessionId, try GET /api/session/{sessionId}/task/active
+            if (!currentTaskId && currentSessionId && currentUrl) {
+              try {
+                const active = await apiClient.getActiveTask(currentSessionId, currentUrl);
+                if (active?.taskId) {
+                  currentTaskId = active.taskId;
+                  set((state) => {
+                    state.currentTask.taskId = currentTaskId!;
+                  });
+                  console.debug('[CurrentTask] Recovered taskId from API:', currentTaskId.slice(0, 8) + '...');
+                }
+              } catch {
+                // Ignore; proceed without taskId (server will start new task)
+              }
+            }
+
             // Get debug actions for logging
             const addNetworkLog = get().debug?.actions.addNetworkLog;
 
@@ -778,13 +806,13 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               : undefined;
 
             // Build clientObservations from lastDOMChanges (optional; improves verification accuracy)
-            // Reference: Verification process — clientObservations (v3.0)
+            // Reference: INTERACT_FLOW_WALKTHROUGH.md § Client Contract: clientObservations
             const clientObservations: ClientObservations | undefined = lastDOMChanges
               ? {
                   didUrlChange: lastDOMChanges.urlChanged,
                   didDomMutate:
                     (lastDOMChanges.addedCount ?? 0) + (lastDOMChanges.removedCount ?? 0) > 0,
-                  // didNetworkOccur: not tracked yet (would require content script network counter)
+                  didNetworkOccur: lastDOMChanges.didNetworkOccur,
                 }
               : undefined;
 
@@ -828,6 +856,14 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   state.currentTask.sessionId = taskIdFromResponse;
                 }
               });
+              // Persist taskId by tab so we recover after refresh/restart (INTERACT_FLOW_WALKTHROUGH § taskId Persistence)
+              const urlToStore = get().currentTask.url ?? url;
+              persistTaskState(tabId, {
+                taskId: taskIdFromResponse,
+                sessionId: (res?.sessionId as string | undefined) ?? get().currentTask.sessionId ?? null,
+                url: urlToStore,
+                timestamp: Date.now(),
+              }).catch(() => {});
               console.debug('[CurrentTask] Stored taskId for follow-up requests:', taskIdFromResponse.slice(0, 8) + '...');
             }
 
@@ -1205,6 +1241,14 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             } catch (snapshotError: unknown) {
               console.warn('Failed to capture DOM snapshot before action:', snapshotError);
             }
+
+            // Mark start of network observation window for clientObservations.didNetworkOccur
+            // Reference: INTERACT_FLOW_WALKTHROUGH.md § Client Contract: clientObservations
+            try {
+              await callRPC('setNetworkObservationMark', [], 1, tabId);
+            } catch {
+              // Non-fatal; didNetworkOccur will be undefined
+            }
             
             // Check if we're clicking a dropdown/popup button (hasPopup attribute)
             // This helps us wait longer for menu items to appear
@@ -1262,8 +1306,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 console.warn('Failed to store last action time:', error);
               }
               
-              // Wait for DOM changes and track what appeared/disappeared
-              // If this was a dropdown click, wait longer to ensure menu items are fully rendered
+              // Wait for DOM stability before next capture (prevents "snapshot race" — INTERACT_FLOW_WALKTHROUGH § Stability Wait)
+              // minWait 500ms, DOM settled 300ms, network idle; dropdown clicks use longer waits
               try {
                 const waitConfig = isDropdownClick
                   ? {
@@ -1362,6 +1406,14 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     afterUrl,
                   });
                 }
+
+                // Did any network request occur during/after action? (for clientObservations.didNetworkOccur)
+                let didNetworkOccur = false;
+                try {
+                  didNetworkOccur = (await callRPC('getDidNetworkOccurSinceMark', [], 1, tabId)) ?? false;
+                } catch {
+                  // Non-fatal
+                }
                 
                 // Store DOM changes in state for next API call (including URL change info for verification)
                 set((state) => {
@@ -1374,6 +1426,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     // Include URL change info for server-side verification
                     previousUrl: beforeUrl,
                     urlChanged,
+                    didNetworkOccur,
                   };
                   // Update stored URL if it changed
                   if (urlChanged) {

@@ -664,3 +664,39 @@ export function checkNetworkIdle(): boolean {
     return true;
   }
 }
+
+/** Timestamp set before action execution; used to detect network activity during/after action. */
+let networkObservationMark: number = 0;
+
+/**
+ * Mark the start of the observation window for network activity.
+ * Call before executing an action; then use getDidNetworkOccurSinceMark() after stability wait.
+ * Reference: INTERACT_FLOW_WALKTHROUGH.md § Client Contract: clientObservations
+ */
+export function setNetworkObservationMark(): void {
+  networkObservationMark = Date.now();
+}
+
+/**
+ * Returns true if any resource request completed after the last setNetworkObservationMark().
+ * Used for clientObservations.didNetworkOccur to improve verification accuracy.
+ */
+export function getDidNetworkOccurSinceMark(): boolean {
+  try {
+    if (typeof performance === 'undefined' || !performance.getEntriesByType || networkObservationMark <= 0) {
+      return false;
+    }
+    const entries = performance.getEntriesByType('resource');
+    for (const entry of entries) {
+      if (entry instanceof PerformanceResourceTiming && entry.responseEnd > 0) {
+        if (entry.responseEnd >= networkObservationMark) {
+          return true;
+        }
+      }
+    }
+    return false;
+  } catch (error) {
+    console.warn('getDidNetworkOccurSinceMark failed:', error);
+    return false;
+  }
+}

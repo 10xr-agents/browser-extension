@@ -4,6 +4,8 @@ import getAnnotatedDOM, {
   waitForElementAppearance,
   checkNetworkIdle,
   checkWaitCondition,
+  setNetworkObservationMark,
+  getDidNetworkOccurSinceMark,
 } from '../pages/Content/getAnnotatedDOM';
 import { copyToClipboard } from '../pages/Content/copyToClipboard';
 
@@ -44,6 +46,8 @@ export const rpcMethods = {
   waitForElementAppearance,
   checkNetworkIdle,
   checkWaitCondition,
+  setNetworkObservationMark,
+  getDidNetworkOccurSinceMark,
   ripple,
   copyToClipboard,
 } as const;
