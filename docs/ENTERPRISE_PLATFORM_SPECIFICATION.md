@@ -6,7 +6,7 @@
 
 **For client-side information, see:**
 - **[CLIENT_ARCHITECTURE.md](./CLIENT_ARCHITECTURE.md)** — Complete client-side architecture
-- **[THIN_CLIENT_ROADMAP.md](./THIN_CLIENT_ROADMAP.md)** — Detailed task-based implementation reference
+- **[ROADMAP.md](./ROADMAP.md)** — Detailed task-based implementation reference
 
 **This document focuses on enterprise platform specification (server-side infrastructure, multi-tenant architecture, RAG pipeline).** Client-side parts are documented in CLIENT_ARCHITECTURE.md.
 
@@ -18,7 +18,7 @@
 **Target:** Commercial B2B Enterprise Platform  
 **Changelog (1.1):** Merged DOM processing documentation (§3.5, §3.6), merged Extension Thin Client Migration (§5.7), updated to MongoDB/Mongoose stack, fixed section numbering.
 
-**Sync:** This document is the **comprehensive enterprise specification** (server-side). Client-side implementation is in `CLIENT_ARCHITECTURE.md`. Implementation roadmaps are in `THIN_SERVER_ROADMAP.md` (backend) and `THIN_CLIENT_ROADMAP.md` (extension). Keep all documents in sync.
+**Sync:** This document is the **comprehensive enterprise specification** (server-side). Client-side implementation is in `CLIENT_ARCHITECTURE.md`. Implementation roadmaps are in `THIN_SERVER_ROADMAP.md` (backend) and `ROADMAP.md` (extension). Keep all documents in sync.
 
 ---
 

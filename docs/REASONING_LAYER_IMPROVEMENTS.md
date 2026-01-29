@@ -6,7 +6,7 @@
 
 **For client-side Reasoning Layer information, see:**
 - **[CLIENT_ARCHITECTURE.md](./CLIENT_ARCHITECTURE.md)** §8 — Complete Reasoning Layer client support (Task 10 complete)
-- **[THIN_CLIENT_ROADMAP.md](./THIN_CLIENT_ROADMAP.md)** §10 — Detailed task-based implementation reference
+- **[ROADMAP.md](./ROADMAP.md)** §10 — Detailed task-based implementation reference
 
 **This document focuses on server-side Reasoning Layer architecture.** Client-side parts are documented in CLIENT_ARCHITECTURE.md.
 

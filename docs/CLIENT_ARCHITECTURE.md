@@ -6,7 +6,7 @@
 **Purpose:** Comprehensive client-side architecture documentation consolidating all implementation details, patterns, and specifications
 
 **This document consolidates all client-side information from:**
-- `THIN_CLIENT_ROADMAP.md` - Implementation details and completed tasks (Tasks 1-10)
+- `ROADMAP.md` - Implementation details and completed tasks (Tasks 1-10)
 - `REASONING_LAYER_IMPROVEMENTS.md` - Reasoning Layer client-side support (popup handling, NEEDS_USER_INPUT)
 - `MANUS_ORCHESTRATOR_ARCHITECTURE.md` - Manus Orchestrator client-side display (plan, verification, correction)
 - `ENTERPRISE_PLATFORM_SPECIFICATION.md` - Client-side migration details (Thin Client migration)

@@ -1,9 +1,10 @@
-# Thin Client Implementation: Client-Side Roadmap (Complete)
+# Implementation Roadmap (Thin Client + Production Readiness)
 
-**Document Version:** 3.1
-**Last Updated:** January 28, 2026
-**Date:** January 28, 2026  
-**Status:** Execution-Ready (Extension) + Implementation Plan (Future Enhancements)
+**Document Version:** 3.2  
+**Last Updated:** January 28, 2026  
+**Status:** Execution-Ready (Extension) + Implementation Plan (Future Enhancements) + Production Readiness (Part 3)
+
+**Merged:** Part 1–2 = Thin Client Roadmap (Tasks 1–10 + Future Enhancements). Part 3 = Production Readiness summary; full guide in [PRODUCTION_READINESS.md](./PRODUCTION_READINESS.md).
 **Changelog (3.1):** Added Task 10 (Reasoning Layer Client-Side Improvements) — Popup/dropdown handling and NEEDS_USER_INPUT response handling documented as completed. Merged client-side improvements from `REASONING_LAYER_IMPROVEMENTS.md`.
 **Changelog (3.0):** Merged `THIN_CLIENT_TO_BE_ROADMAP.md` into this document. Document now covers both current implementation (Part 1: Tasks 1-10) and future enhancements (Part 2: Debug View & Manus Orchestrator). See Part 1 for completed tasks and Part 2 for planned enhancements.
 **Changelog (2.2):** Task 9 (Documentation Consolidation) **COMPLETE** — All documentation consolidated into `CLIENT_ARCHITECTURE.md`, legacy docs deprecated, outdated references removed. See §9.2 for completion status.  
@@ -183,14 +184,14 @@ Each task covers **extension integration** only: UI, API client usage, overlay, 
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **Login UI Component** (`src/common/Login.tsx`): Email/password form implemented, calls `POST /api/v1/auth/login` via `apiClient.login()`, stores `accessToken`, `expiresAt`, `user`, `tenantId`, `tenantName` in `chrome.storage.local`, updates Zustand state for UI display, error handling with user feedback (toasts), uses Chakra UI components. **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.2
-- ✅ **API Client Module** (`src/api/client.ts`): Base URL from environment (`NEXT_PUBLIC_API_BASE` or `API_BASE`), `getToken()` reads from `chrome.storage.local`, `request(method, path, body?)` sets `Authorization: Bearer <token>`, `Content-Type: application/json`, handles 401 (clear token, show login), handles 403 (domain not allowed), handles network errors, `login()` calls `POST /api/v1/auth/login`, stores token, `getSession()` calls `GET /api/v1/auth/session`, `logout()` calls `POST /api/v1/auth/logout`, clears storage, `getStoredToken()` public method. **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1, `SERVER_SIDE_AGENT_ARCH.md` §2
-- ✅ **Session Check** (`src/common/App.tsx`): Calls `GET /api/v1/auth/session` on component mount, shows loading spinner while checking session, on 401 shows Login UI and blocks task execution, on 200 shows TaskUI and displays tenant name in header, updates Zustand state with user/tenant info. **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1
-- ✅ **Logout Functionality** (`src/common/OptionsDropdown.tsx`): Logout button in options menu, calls `POST /api/v1/auth/logout` via `apiClient.logout()`, clears `chrome.storage.local` (accessToken, expiresAt, user, tenantId, tenantName), clears Zustand auth state via `clearAuth()`, reloads page to show Login UI, error handling with user feedback. **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1
-- ✅ **State Management** (`src/state/settings.ts`, `src/state/store.ts`): Removed `openAIKey`, `openPipeKey`, `selectedModel`, added `user`, `tenantId`, `tenantName` (for UI display), added actions `setUser()`, `setTenant()`, `clearAuth()`, tokens stored in `chrome.storage.local` (not Zustand), updated persistence config to persist auth state, removed persistence of old API keys. **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.7
-- ✅ **UI Component Changes**: `SetAPIKey.tsx` **REMOVED** (replaced with `Login.tsx`), `ModelDropdown.tsx` **REMOVED** (no longer needed), `App.tsx` updated for session check and conditional rendering, `OptionsDropdown.tsx` updated for logout functionality, task execution blocked until authenticated (TaskUI only shows when `isAuthenticated === true`). **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.8
-- ✅ **Environment Configuration** (`webpack.config.js`): Added `webpack.DefinePlugin` to inject `NEXT_PUBLIC_API_BASE` and `API_BASE`, default fallback: `'https://api.example.com'`, environment variables available at build time. **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1
-- ✅ **Guards**: No calls to `/api/agent/interact` (will be implemented in Task 3), no calls to `/api/knowledge/resolve` (will be implemented in Task 2), task execution blocked until authenticated, `determineNextAction.ts` still exists but won't run (blocked by authentication check). **Reference:** `THIN_CLIENT_ROADMAP.md` §2.1
+- ✅ **Login UI Component** (`src/common/Login.tsx`): Email/password form implemented, calls `POST /api/v1/auth/login` via `apiClient.login()`, stores `accessToken`, `expiresAt`, `user`, `tenantId`, `tenantName` in `chrome.storage.local`, updates Zustand state for UI display, error handling with user feedback (toasts), uses Chakra UI components. **Reference:** `ROADMAP.md` §2.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.2
+- ✅ **API Client Module** (`src/api/client.ts`): Base URL from environment (`NEXT_PUBLIC_API_BASE` or `API_BASE`), `getToken()` reads from `chrome.storage.local`, `request(method, path, body?)` sets `Authorization: Bearer <token>`, `Content-Type: application/json`, handles 401 (clear token, show login), handles 403 (domain not allowed), handles network errors, `login()` calls `POST /api/v1/auth/login`, stores token, `getSession()` calls `GET /api/v1/auth/session`, `logout()` calls `POST /api/v1/auth/logout`, clears storage, `getStoredToken()` public method. **Reference:** `ROADMAP.md` §2.1, `SERVER_SIDE_AGENT_ARCH.md` §2
+- ✅ **Session Check** (`src/common/App.tsx`): Calls `GET /api/v1/auth/session` on component mount, shows loading spinner while checking session, on 401 shows Login UI and blocks task execution, on 200 shows TaskUI and displays tenant name in header, updates Zustand state with user/tenant info. **Reference:** `ROADMAP.md` §2.1
+- ✅ **Logout Functionality** (`src/common/OptionsDropdown.tsx`): Logout button in options menu, calls `POST /api/v1/auth/logout` via `apiClient.logout()`, clears `chrome.storage.local` (accessToken, expiresAt, user, tenantId, tenantName), clears Zustand auth state via `clearAuth()`, reloads page to show Login UI, error handling with user feedback. **Reference:** `ROADMAP.md` §2.1
+- ✅ **State Management** (`src/state/settings.ts`, `src/state/store.ts`): Removed `openAIKey`, `openPipeKey`, `selectedModel`, added `user`, `tenantId`, `tenantName` (for UI display), added actions `setUser()`, `setTenant()`, `clearAuth()`, tokens stored in `chrome.storage.local` (not Zustand), updated persistence config to persist auth state, removed persistence of old API keys. **Reference:** `ROADMAP.md` §2.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.7
+- ✅ **UI Component Changes**: `SetAPIKey.tsx` **REMOVED** (replaced with `Login.tsx`), `ModelDropdown.tsx` **REMOVED** (no longer needed), `App.tsx` updated for session check and conditional rendering, `OptionsDropdown.tsx` updated for logout functionality, task execution blocked until authenticated (TaskUI only shows when `isAuthenticated === true`). **Reference:** `ROADMAP.md` §2.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.8
+- ✅ **Environment Configuration** (`webpack.config.js`): Added `webpack.DefinePlugin` to inject `NEXT_PUBLIC_API_BASE` and `API_BASE`, default fallback: `'https://api.example.com'`, environment variables available at build time. **Reference:** `ROADMAP.md` §2.1
+- ✅ **Guards**: No calls to `/api/agent/interact` (will be implemented in Task 3), no calls to `/api/knowledge/resolve` (will be implemented in Task 2), task execution blocked until authenticated, `determineNextAction.ts` still exists but won't run (blocked by authentication check). **Reference:** `ROADMAP.md` §2.1
 
 **All Task 1 requirements verified and implemented.**
 
@@ -246,7 +247,7 @@ Each task covers **extension integration** only: UI, API client usage, overlay, 
 - ✅ `src/common/TaskUI.tsx` — Updated to include knowledge overlay and trigger mechanism
 
 **References:**
-- **Implementation Guide:** `THIN_CLIENT_ROADMAP.md` §3.1 (Task 2: Runtime Knowledge Resolution)
+- **Implementation Guide:** `ROADMAP.md` §3.1 (Task 2: Runtime Knowledge Resolution)
 - **API Specification:** `SERVER_SIDE_AGENT_ARCH.md` §5 (GET /api/knowledge/resolve)
 - **Server Endpoints:** `THIN_SERVER_ROADMAP.md` §3 (Task 2: Runtime Knowledge Resolution — Server)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.5 (Knowledge Resolve Integration)
@@ -266,12 +267,12 @@ Each task covers **extension integration** only: UI, API client usage, overlay, 
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **Knowledge Resolve API Client Method** (`src/api/client.ts`): `knowledgeResolve(url, query?)` method implemented, calls `GET /api/knowledge/resolve?url=...&query=...` with Bearer token, returns `ResolveKnowledgeResponse` with proper TypeScript types, handles 4xx/5xx errors appropriately, exports types: `ResolveKnowledgeResponse`, `KnowledgeChunk`, `Citation`. **Reference:** `THIN_CLIENT_ROADMAP.md` §3.1, `SERVER_SIDE_AGENT_ARCH.md` §5
-- ✅ **Trigger Mechanism** (`src/common/TaskUI.tsx`): Gets active tab URL on component mount, listens for tab updates via `chrome.tabs.onUpdated` (while popup is open), provides "Resolve" button for manual trigger, optional query input field for knowledge search, automatically triggers knowledge resolve when URL changes, properly cleans up tab listener on unmount. **Reference:** `THIN_CLIENT_ROADMAP.md` §3.1
-- ✅ **Knowledge Overlay Component** (`src/common/KnowledgeOverlay.tsx`): Displays `context` chunks in accordion format for better readability, displays `citations` with document titles, sections, and page numbers, shows "No knowledge available for this page" when `context` is empty, shows "No knowledge available for this website" when `hasOrgKnowledge === false`, displays `hasOrgKnowledge` badge (Organization Knowledge vs Public Knowledge), shows domain information, loading state with spinner, error handling for all error types (403 DOMAIN_NOT_ALLOWED, 401 UNAUTHORIZED, network errors), uses Chakra UI components (mandatory). **Reference:** `THIN_CLIENT_ROADMAP.md` §3.1, `SERVER_SIDE_AGENT_ARCH.md` §5
-- ✅ **Error Handling**: 403 `DOMAIN_NOT_ALLOWED` shows "This domain is not in your organization's allowed list", 401 `UNAUTHORIZED` shows "Please log in to view knowledge for this page", empty context shows appropriate "No knowledge" messages, network errors show descriptive error messages, all errors displayed with user-friendly feedback. **Reference:** `THIN_CLIENT_ROADMAP.md` §3.1
-- ✅ **Integration with TaskUI**: KnowledgeOverlay integrated into TaskUI component, knowledge section displayed above task execution section, Resolve button and query input in knowledge section, overlay shows/hides based on `showKnowledge` state, proper layout with VStack and spacing. **Reference:** `THIN_CLIENT_ROADMAP.md` §3.1
-- ✅ **Guards**: No calls to `/api/agent/interact` (will be implemented in Task 3), run-task button exists but uses old `determineNextAction` (will be refactored in Task 3), task execution remains disabled until Task 3, only knowledge resolve and overlay are active. **Reference:** `THIN_CLIENT_ROADMAP.md` §3.1
+- ✅ **Knowledge Resolve API Client Method** (`src/api/client.ts`): `knowledgeResolve(url, query?)` method implemented, calls `GET /api/knowledge/resolve?url=...&query=...` with Bearer token, returns `ResolveKnowledgeResponse` with proper TypeScript types, handles 4xx/5xx errors appropriately, exports types: `ResolveKnowledgeResponse`, `KnowledgeChunk`, `Citation`. **Reference:** `ROADMAP.md` §3.1, `SERVER_SIDE_AGENT_ARCH.md` §5
+- ✅ **Trigger Mechanism** (`src/common/TaskUI.tsx`): Gets active tab URL on component mount, listens for tab updates via `chrome.tabs.onUpdated` (while popup is open), provides "Resolve" button for manual trigger, optional query input field for knowledge search, automatically triggers knowledge resolve when URL changes, properly cleans up tab listener on unmount. **Reference:** `ROADMAP.md` §3.1
+- ✅ **Knowledge Overlay Component** (`src/common/KnowledgeOverlay.tsx`): Displays `context` chunks in accordion format for better readability, displays `citations` with document titles, sections, and page numbers, shows "No knowledge available for this page" when `context` is empty, shows "No knowledge available for this website" when `hasOrgKnowledge === false`, displays `hasOrgKnowledge` badge (Organization Knowledge vs Public Knowledge), shows domain information, loading state with spinner, error handling for all error types (403 DOMAIN_NOT_ALLOWED, 401 UNAUTHORIZED, network errors), uses Chakra UI components (mandatory). **Reference:** `ROADMAP.md` §3.1, `SERVER_SIDE_AGENT_ARCH.md` §5
+- ✅ **Error Handling**: 403 `DOMAIN_NOT_ALLOWED` shows "This domain is not in your organization's allowed list", 401 `UNAUTHORIZED` shows "Please log in to view knowledge for this page", empty context shows appropriate "No knowledge" messages, network errors show descriptive error messages, all errors displayed with user-friendly feedback. **Reference:** `ROADMAP.md` §3.1
+- ✅ **Integration with TaskUI**: KnowledgeOverlay integrated into TaskUI component, knowledge section displayed above task execution section, Resolve button and query input in knowledge section, overlay shows/hides based on `showKnowledge` state, proper layout with VStack and spacing. **Reference:** `ROADMAP.md` §3.1
+- ✅ **Guards**: No calls to `/api/agent/interact` (will be implemented in Task 3), run-task button exists but uses old `determineNextAction` (will be refactored in Task 3), task execution remains disabled until Task 3, only knowledge resolve and overlay are active. **Reference:** `ROADMAP.md` §3.1
 
 **API Response Handling:**
 The implementation correctly handles the `ResolveKnowledgeResponse` format from `SERVER_SIDE_AGENT_ARCH.md` §5:
@@ -412,14 +413,14 @@ interface NextActionResponse {
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **Local Inference Removed**: `determineNextAction.ts` file deleted, no OpenAI/OpenPipe usage in task execution, no API keys required for task execution. **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1
-- ✅ **Agent Interact API Client Method** (`src/api/client.ts`): `agentInteract(url, query, dom, taskId?)` method implemented, calls `POST /api/agent/interact` with Bearer token, returns `NextActionResponse` with proper TypeScript types, handles all error types. **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1, `SERVER_SIDE_AGENT_ARCH.md` §4.2
-- ✅ **Parse Action Helper** (`src/helpers/parseAction.ts`): Simplified action parser created, extracts action name and arguments from action string, maps to `ActionPayload` for execution, handles finish/fail actions, validates action format. **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1
-- ✅ **Run Task Refactored** (`src/state/currentTask.ts`): DOM extraction preserved, calls `agentInteract` instead of local LLM, stores `taskId` from response, executes actions (click/setValue) via `callDOMAction`, updates display-only history each step, loops until finish/fail or max steps (50), handles all error types with appropriate feedback. **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1, `SERVER_SIDE_AGENT_ARCH.md` §4.2
-- ✅ **State Management Updated**: `history` replaced with `displayHistory: DisplayHistoryEntry[]`, added `taskId: string | null`, display-only history structure (`thought`, `action`, `usage?`, `parsedAction`). **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.7
-- ✅ **TaskHistory Component Updated** (`src/common/TaskHistory.tsx`): Renders `displayHistory` instead of old `history`, displays `thought`, `action`, `usage` (prompt/completion tokens), shows parsed action details, no prompt/response display (server owns inference history). **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.8
-- ✅ **Error Handling**: 401 clears token and shows login, 404 shows "Task not found", 409 shows "Task already completed/failed", 5xx shows server error message, network errors show descriptive messages, `hasOrgKnowledge: false` shows non-blocking notification (only once per task), all errors halt task execution appropriately. **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1
-- ✅ **Action Execution Preserved**: Click and setValue actions executed via existing `callDOMAction` helper, Chrome Debugger API usage preserved, action execution flow unchanged. **Reference:** `THIN_CLIENT_ROADMAP.md` §4.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.4
+- ✅ **Local Inference Removed**: `determineNextAction.ts` file deleted, no OpenAI/OpenPipe usage in task execution, no API keys required for task execution. **Reference:** `ROADMAP.md` §4.1
+- ✅ **Agent Interact API Client Method** (`src/api/client.ts`): `agentInteract(url, query, dom, taskId?)` method implemented, calls `POST /api/agent/interact` with Bearer token, returns `NextActionResponse` with proper TypeScript types, handles all error types. **Reference:** `ROADMAP.md` §4.1, `SERVER_SIDE_AGENT_ARCH.md` §4.2
+- ✅ **Parse Action Helper** (`src/helpers/parseAction.ts`): Simplified action parser created, extracts action name and arguments from action string, maps to `ActionPayload` for execution, handles finish/fail actions, validates action format. **Reference:** `ROADMAP.md` §4.1
+- ✅ **Run Task Refactored** (`src/state/currentTask.ts`): DOM extraction preserved, calls `agentInteract` instead of local LLM, stores `taskId` from response, executes actions (click/setValue) via `callDOMAction`, updates display-only history each step, loops until finish/fail or max steps (50), handles all error types with appropriate feedback. **Reference:** `ROADMAP.md` §4.1, `SERVER_SIDE_AGENT_ARCH.md` §4.2
+- ✅ **State Management Updated**: `history` replaced with `displayHistory: DisplayHistoryEntry[]`, added `taskId: string | null`, display-only history structure (`thought`, `action`, `usage?`, `parsedAction`). **Reference:** `ROADMAP.md` §4.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.7
+- ✅ **TaskHistory Component Updated** (`src/common/TaskHistory.tsx`): Renders `displayHistory` instead of old `history`, displays `thought`, `action`, `usage` (prompt/completion tokens), shows parsed action details, no prompt/response display (server owns inference history). **Reference:** `ROADMAP.md` §4.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.8
+- ✅ **Error Handling**: 401 clears token and shows login, 404 shows "Task not found", 409 shows "Task already completed/failed", 5xx shows server error message, network errors show descriptive messages, `hasOrgKnowledge: false` shows non-blocking notification (only once per task), all errors halt task execution appropriately. **Reference:** `ROADMAP.md` §4.1
+- ✅ **Action Execution Preserved**: Click and setValue actions executed via existing `callDOMAction` helper, Chrome Debugger API usage preserved, action execution flow unchanged. **Reference:** `ROADMAP.md` §4.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3.4
 
 **API Request/Response Handling:**
 The implementation correctly handles the `AgentInteractRequest` and `NextActionResponse` format from `SERVER_SIDE_AGENT_ARCH.md` §4.2:
@@ -441,7 +442,7 @@ The implementation correctly handles the `AgentInteractRequest` and `NextActionR
 - ❌ `src/helpers/determineNextAction.ts` — **REMOVED** (local LLM inference no longer needed)
 
 **References:**
-- **Implementation Guide:** `THIN_CLIENT_ROADMAP.md` §4.1 (Task 3: Server-Side Action Loop)
+- **Implementation Guide:** `ROADMAP.md` §4.1 (Task 3: Server-Side Action Loop)
 - **API Specification:** `SERVER_SIDE_AGENT_ARCH.md` §4.2 (POST /api/agent/interact)
 - **Server Endpoints:** `THIN_SERVER_ROADMAP.md` §4 (Task 3: Server-Side Action Loop — Server)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §5.7.3 (Refactoring Steps)
@@ -523,7 +524,7 @@ The implementation correctly handles the `AgentInteractRequest` and `NextActionR
 - ✅ `src/common/TaskUI.tsx` — Updated to display accessibility tree when available
 
 **References:**
-- **Implementation Guide:** `THIN_CLIENT_ROADMAP.md` §5.1 (Task 4: Basic Accessibility Tree Extraction)
+- **Implementation Guide:** `ROADMAP.md` §5.1 (Task 4: Basic Accessibility Tree Extraction)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan)
 - **Chrome DevTools Protocol:** Accessibility.getFullAXTree API (https://chromedevtools.github.io/devtools-protocol/tot/Accessibility/#method-getFullAXTree)
 - **Chrome DevTools Protocol Types:** AXNode type definition (https://chromedevtools.github.io/devtools-protocol/tot/Accessibility/#type-AXNode)
@@ -543,13 +544,13 @@ The implementation correctly handles the `AgentInteractRequest` and `NextActionR
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **TypeScript Interfaces** (`src/types/accessibility.ts`): `AXNode` interface defined with all Chrome DevTools Protocol properties (nodeId, ignored, role, chromeRole, name, description, value, properties, parentId, childIds, backendDOMNodeId), `AccessibilityTree` interface defined with nodes array and optional rootNodeId. **Reference:** `THIN_CLIENT_ROADMAP.md` §5.1, Chrome DevTools Protocol - Accessibility.getFullAXTree
-- ✅ **Accessibility Tree Extraction** (`src/helpers/accessibilityTree.ts`): `getAccessibilityTree(tabId)` implemented, checks if debugger is attached and attaches if needed, enables Accessibility domain via Chrome DevTools Protocol, calls `Accessibility.getFullAXTree`, returns structured `AccessibilityTree` with nodes and rootNodeId, `isAccessibilityAvailable(tabId)` helper checks if accessibility API is available, proper error handling with descriptive messages. **Reference:** `THIN_CLIENT_ROADMAP.md` §5.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **DOM Integration** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` updated to accept optional `tabId` parameter, tries accessibility tree extraction first (if `tabId` provided), falls back to DOM approach if accessibility extraction fails, returns `SimplifiedDomResult` with `dom`, `accessibilityTree`, and `usedAccessibility` flag, DOM processing preserved as fallback, no regression in existing functionality. **Reference:** `THIN_CLIENT_ROADMAP.md` §5.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **State Management** (`src/state/currentTask.ts`): `accessibilityTree: AccessibilityTree | null` added to `CurrentTaskSlice`, accessibility tree stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `THIN_CLIENT_ROADMAP.md` §5.1
-- ✅ **UI Component** (`src/common/AccessibilityTreeView.tsx`): Component displays accessibility tree in expandable tree view, shows node roles, names, descriptions, values, displays ignored nodes with different styling, shows node count and copy functionality, handles empty tree gracefully, uses Chakra UI components (Accordion, Badge, Box, VStack, HStack), recursive tree rendering with proper indentation. **Reference:** `THIN_CLIENT_ROADMAP.md` §5.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **UI Integration** (`src/common/TaskUI.tsx`): AccessibilityTreeView component imported and integrated, displays accessibility tree when available in state, positioned between knowledge overlay and task execution section, conditionally rendered based on `state.accessibilityTree`. **Reference:** `THIN_CLIENT_ROADMAP.md` §5.1
-- ✅ **Error Handling**: Accessibility extraction errors caught and logged as warnings, automatic fallback to DOM approach ensures no disruption, error messages are descriptive and helpful for debugging, DOM processing always works as fallback, no regression in existing functionality. **Reference:** `THIN_CLIENT_ROADMAP.md` §5.1
+- ✅ **TypeScript Interfaces** (`src/types/accessibility.ts`): `AXNode` interface defined with all Chrome DevTools Protocol properties (nodeId, ignored, role, chromeRole, name, description, value, properties, parentId, childIds, backendDOMNodeId), `AccessibilityTree` interface defined with nodes array and optional rootNodeId. **Reference:** `ROADMAP.md` §5.1, Chrome DevTools Protocol - Accessibility.getFullAXTree
+- ✅ **Accessibility Tree Extraction** (`src/helpers/accessibilityTree.ts`): `getAccessibilityTree(tabId)` implemented, checks if debugger is attached and attaches if needed, enables Accessibility domain via Chrome DevTools Protocol, calls `Accessibility.getFullAXTree`, returns structured `AccessibilityTree` with nodes and rootNodeId, `isAccessibilityAvailable(tabId)` helper checks if accessibility API is available, proper error handling with descriptive messages. **Reference:** `ROADMAP.md` §5.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **DOM Integration** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` updated to accept optional `tabId` parameter, tries accessibility tree extraction first (if `tabId` provided), falls back to DOM approach if accessibility extraction fails, returns `SimplifiedDomResult` with `dom`, `accessibilityTree`, and `usedAccessibility` flag, DOM processing preserved as fallback, no regression in existing functionality. **Reference:** `ROADMAP.md` §5.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **State Management** (`src/state/currentTask.ts`): `accessibilityTree: AccessibilityTree | null` added to `CurrentTaskSlice`, accessibility tree stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `ROADMAP.md` §5.1
+- ✅ **UI Component** (`src/common/AccessibilityTreeView.tsx`): Component displays accessibility tree in expandable tree view, shows node roles, names, descriptions, values, displays ignored nodes with different styling, shows node count and copy functionality, handles empty tree gracefully, uses Chakra UI components (Accordion, Badge, Box, VStack, HStack), recursive tree rendering with proper indentation. **Reference:** `ROADMAP.md` §5.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **UI Integration** (`src/common/TaskUI.tsx`): AccessibilityTreeView component imported and integrated, displays accessibility tree when available in state, positioned between knowledge overlay and task execution section, conditionally rendered based on `state.accessibilityTree`. **Reference:** `ROADMAP.md` §5.1
+- ✅ **Error Handling**: Accessibility extraction errors caught and logged as warnings, automatic fallback to DOM approach ensures no disruption, error messages are descriptive and helpful for debugging, DOM processing always works as fallback, no regression in existing functionality. **Reference:** `ROADMAP.md` §5.1
 
 **Chrome DevTools Protocol Integration:**
 The implementation correctly uses Chrome DevTools Protocol Accessibility domain:
@@ -559,7 +560,7 @@ The implementation correctly uses Chrome DevTools Protocol Accessibility domain:
 - **Response Handling**: Parses response to extract nodes array and identifies root node
 - **Error Recovery**: Handles protocol errors gracefully with fallback to DOM
 
-**Reference:** Chrome DevTools Protocol - Accessibility.getFullAXTree API, `THIN_CLIENT_ROADMAP.md` §5.1
+**Reference:** Chrome DevTools Protocol - Accessibility.getFullAXTree API, `ROADMAP.md` §5.1
 
 **All Task 4 requirements verified and implemented.**
 
@@ -639,7 +640,7 @@ The implementation correctly uses Chrome DevTools Protocol Accessibility domain:
 - ✅ `src/common/TaskUI.tsx` — Added info badge showing accessibility element count
 
 **References:**
-- **Implementation Guide:** `THIN_CLIENT_ROADMAP.md` §6.1 (Task 5: Accessibility Node Filtering)
+- **Implementation Guide:** `ROADMAP.md` §6.1 (Task 5: Accessibility Node Filtering)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 2)
 
 **Exit criterion:** Task 5 complete when all above are verified. Proceed to Task 6 only after sign-off.
@@ -657,13 +658,13 @@ The implementation correctly uses Chrome DevTools Protocol Accessibility domain:
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **Filtering Logic** (`src/helpers/accessibilityFilter.ts`): `filterInteractiveAXNodes()` implemented with comprehensive interactive role list (button, link, textbox, checkbox, radio, combobox, menuitem, tab, etc.), filters out ignored nodes, checks for interactive properties (value, checked, expanded, selected), returns filtered array of interactive accessibility nodes. **Reference:** `THIN_CLIENT_ROADMAP.md` §6.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **Data Transformation** (`src/helpers/accessibilityFilter.ts`): `convertAXNodeToSimplifiedElement()` converts `AXNode` to `SimplifiedAXElement`, extracts role, name, description, value, extracts attributes from properties, creates compatible representation for DOM processing, `convertAXNodesToSimplifiedElements()` converts array of nodes. **Reference:** `THIN_CLIENT_ROADMAP.md` §6.1
-- ✅ **DOM Integration** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` filters accessibility tree using `filterInteractiveAXNodes()`, converts filtered nodes using `convertAXNodesToSimplifiedElements()`, creates `elementMapping` Map from `axNodeId` to element index, calls `enhanceDomWithAccessibilityElements()` to merge accessibility data into DOM, returns `SimplifiedDomResult` with `accessibilityElements` and `elementMapping`. **Reference:** `THIN_CLIENT_ROADMAP.md` §6.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **DOM Enhancement** (`src/helpers/simplifyDom.ts`): `enhanceDomWithAccessibilityElements()` adds `data-ax-node-id`, `data-ax-source`, `data-ax-index` attributes to matching DOM elements, adds accessibility attributes (aria-label, title, value) if not already present, marks elements as accessibility-derived for LLM visibility. **Reference:** `THIN_CLIENT_ROADMAP.md` §6.1
-- ✅ **Element Mapping** (`src/helpers/simplifyDom.ts`): `elementMapping` Map created from `axNodeId` to element index, stored in `SimplifiedDomResult` for future action targeting, ready for Task 6 (Accessibility-DOM Element Mapping). **Reference:** `THIN_CLIENT_ROADMAP.md` §6.1
-- ✅ **State Management** (`src/state/currentTask.ts`): `accessibilityElements: SimplifiedAXElement[] | null` added to `CurrentTaskSlice`, accessibility elements stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `THIN_CLIENT_ROADMAP.md` §6.1
-- ✅ **UI Indicators** (`src/common/TaskUI.tsx`): Info badge displays count of accessibility-derived elements when available, shows message about token reduction benefit, conditionally rendered based on `state.accessibilityElements`. **Reference:** `THIN_CLIENT_ROADMAP.md` §6.1
+- ✅ **Filtering Logic** (`src/helpers/accessibilityFilter.ts`): `filterInteractiveAXNodes()` implemented with comprehensive interactive role list (button, link, textbox, checkbox, radio, combobox, menuitem, tab, etc.), filters out ignored nodes, checks for interactive properties (value, checked, expanded, selected), returns filtered array of interactive accessibility nodes. **Reference:** `ROADMAP.md` §6.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **Data Transformation** (`src/helpers/accessibilityFilter.ts`): `convertAXNodeToSimplifiedElement()` converts `AXNode` to `SimplifiedAXElement`, extracts role, name, description, value, extracts attributes from properties, creates compatible representation for DOM processing, `convertAXNodesToSimplifiedElements()` converts array of nodes. **Reference:** `ROADMAP.md` §6.1
+- ✅ **DOM Integration** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` filters accessibility tree using `filterInteractiveAXNodes()`, converts filtered nodes using `convertAXNodesToSimplifiedElements()`, creates `elementMapping` Map from `axNodeId` to element index, calls `enhanceDomWithAccessibilityElements()` to merge accessibility data into DOM, returns `SimplifiedDomResult` with `accessibilityElements` and `elementMapping`. **Reference:** `ROADMAP.md` §6.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **DOM Enhancement** (`src/helpers/simplifyDom.ts`): `enhanceDomWithAccessibilityElements()` adds `data-ax-node-id`, `data-ax-source`, `data-ax-index` attributes to matching DOM elements, adds accessibility attributes (aria-label, title, value) if not already present, marks elements as accessibility-derived for LLM visibility. **Reference:** `ROADMAP.md` §6.1
+- ✅ **Element Mapping** (`src/helpers/simplifyDom.ts`): `elementMapping` Map created from `axNodeId` to element index, stored in `SimplifiedDomResult` for future action targeting, ready for Task 6 (Accessibility-DOM Element Mapping). **Reference:** `ROADMAP.md` §6.1
+- ✅ **State Management** (`src/state/currentTask.ts`): `accessibilityElements: SimplifiedAXElement[] | null` added to `CurrentTaskSlice`, accessibility elements stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `ROADMAP.md` §6.1
+- ✅ **UI Indicators** (`src/common/TaskUI.tsx`): Info badge displays count of accessibility-derived elements when available, shows message about token reduction benefit, conditionally rendered based on `state.accessibilityElements`. **Reference:** `ROADMAP.md` §6.1
 
 **Accessibility Filtering Process:**
 The implementation correctly filters and integrates accessibility nodes:
@@ -680,7 +681,7 @@ The implementation correctly filters and integrates accessibility nodes:
 - Combined approach (accessibility + DOM) provides best of both worlds
 - Token count reduction expected to be 10-20% compared to pure DOM approach (requires measurement on live sites)
 
-**Reference:** `THIN_CLIENT_ROADMAP.md` §6.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 2)
+**Reference:** `ROADMAP.md` §6.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 2)
 
 **All Task 5 requirements verified and implemented.**
 
@@ -758,7 +759,7 @@ The implementation correctly filters and integrates accessibility nodes:
 - ✅ `src/state/currentTask.ts` — Added `accessibilityMapping` to state and creates mapping from DOM results
 
 **References:**
-- **Implementation Guide:** `THIN_CLIENT_ROADMAP.md` §7.1 (Task 6: Accessibility-DOM Element Mapping)
+- **Implementation Guide:** `ROADMAP.md` §7.1 (Task 6: Accessibility-DOM Element Mapping)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 3)
 
 **Exit criterion:** Task 6 complete when all above are verified. Proceed to Task 7 only after sign-off.
@@ -776,11 +777,11 @@ The implementation correctly filters and integrates accessibility nodes:
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **Mapping Algorithm** (`src/helpers/accessibilityMapping.ts`): `createAccessibilityMapping()` creates bidirectional maps (`axNodeIdToElementIndex`, `elementIndexToAXNodeId`, `axNodeIdToBackendDOMNodeId`, `backendDOMNodeIdToAXNodeId`), `mapAXNodeToDOMNodeId()` uses `backendDOMNodeId` for reliable mapping, `mapDOMNodeIdToAXNode()` provides reverse lookup, helper functions (`getElementIndexFromAXNodeId`, `getAXNodeIdFromElementIndex`) for easy access. **Reference:** `THIN_CLIENT_ROADMAP.md` §7.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **Action Targeting Update** (`src/helpers/domActions.ts`): `getObjectId()` updated to try accessibility mapping first, gets `axNodeId` from element index using mapping, uses `backendDOMNodeId` to get object ID directly via `DOM.resolveNode`, falls back to DOM-based approach if mapping fails or unavailable, console logs indicate which method is used. **Reference:** `THIN_CLIENT_ROADMAP.md` §7.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **Element ID System** (`src/helpers/simplifyDom.ts`): `data-ax-id` attribute added to simplified DOM when accessibility mapping available, `data-id` preserved for backward compatibility, `data-ax-node-id`, `data-ax-source`, `data-ax-index` attributes included in allowed attributes list. **Reference:** `THIN_CLIENT_ROADMAP.md` §7.1
-- ✅ **State Management** (`src/state/currentTask.ts`): `accessibilityMapping: AccessibilityMapping | null` added to `CurrentTaskSlice`, mapping created from `accessibilityElements` and `elementMapping` in `getSimplifiedDom()`, stored in state for use during action execution, cleared when not available. **Reference:** `THIN_CLIENT_ROADMAP.md` §7.1
-- ✅ **Fallback Logic**: DOM-based targeting always works as fallback, accessibility mapping is optional enhancement, errors in mapping lookup are caught and logged, no disruption to action execution when mapping fails. **Reference:** `THIN_CLIENT_ROADMAP.md` §7.1
+- ✅ **Mapping Algorithm** (`src/helpers/accessibilityMapping.ts`): `createAccessibilityMapping()` creates bidirectional maps (`axNodeIdToElementIndex`, `elementIndexToAXNodeId`, `axNodeIdToBackendDOMNodeId`, `backendDOMNodeIdToAXNodeId`), `mapAXNodeToDOMNodeId()` uses `backendDOMNodeId` for reliable mapping, `mapDOMNodeIdToAXNode()` provides reverse lookup, helper functions (`getElementIndexFromAXNodeId`, `getAXNodeIdFromElementIndex`) for easy access. **Reference:** `ROADMAP.md` §7.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **Action Targeting Update** (`src/helpers/domActions.ts`): `getObjectId()` updated to try accessibility mapping first, gets `axNodeId` from element index using mapping, uses `backendDOMNodeId` to get object ID directly via `DOM.resolveNode`, falls back to DOM-based approach if mapping fails or unavailable, console logs indicate which method is used. **Reference:** `ROADMAP.md` §7.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **Element ID System** (`src/helpers/simplifyDom.ts`): `data-ax-id` attribute added to simplified DOM when accessibility mapping available, `data-id` preserved for backward compatibility, `data-ax-node-id`, `data-ax-source`, `data-ax-index` attributes included in allowed attributes list. **Reference:** `ROADMAP.md` §7.1
+- ✅ **State Management** (`src/state/currentTask.ts`): `accessibilityMapping: AccessibilityMapping | null` added to `CurrentTaskSlice`, mapping created from `accessibilityElements` and `elementMapping` in `getSimplifiedDom()`, stored in state for use during action execution, cleared when not available. **Reference:** `ROADMAP.md` §7.1
+- ✅ **Fallback Logic**: DOM-based targeting always works as fallback, accessibility mapping is optional enhancement, errors in mapping lookup are caught and logged, no disruption to action execution when mapping fails. **Reference:** `ROADMAP.md` §7.1
 
 **Mapping Process:**
 The implementation correctly creates and uses bidirectional mapping:
@@ -796,7 +797,7 @@ The implementation correctly creates and uses bidirectional mapping:
 - Expected accuracy > 90% when accessibility tree is available
 - Fallback ensures 100% reliability (DOM-based approach always works)
 
-**Reference:** `THIN_CLIENT_ROADMAP.md` §7.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 3)
+**Reference:** `ROADMAP.md` §7.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 3)
 
 **All Task 6 requirements verified and implemented.**
 
@@ -880,7 +881,7 @@ The implementation correctly creates and uses bidirectional mapping:
 - ✅ `src/common/TaskUI.tsx` — Updated to display hybrid elements view
 
 **References:**
-- **Implementation Guide:** `THIN_CLIENT_ROADMAP.md` §8.1 (Task 7: Hybrid Element Representation)
+- **Implementation Guide:** `ROADMAP.md` §8.1 (Task 7: Hybrid Element Representation)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 4)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.3 (Recommended Approach: Accessibility Tree + Current Approach)
 
@@ -899,13 +900,13 @@ The implementation correctly creates and uses bidirectional mapping:
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **HybridElement Type** (`src/types/hybridElement.ts`): `HybridElement` interface defined with `id`, `axNode`, `axElement`, `domElement`, combined properties (`role`, `name`, `description`, `value`), `interactive` flag, `attributes` record, `source` indicator, `backendDOMNodeId` for mapping. **Reference:** `THIN_CLIENT_ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **Merging Logic** (`src/helpers/hybridElement.ts`): `createHybridElement()` merges accessibility and DOM data, prefers accessibility when `preferAccessibility: true`, supplements with DOM when `supplementWithDOM: true`, combines attributes from both sources, sets `source` indicator (hybrid/accessibility/dom). **Reference:** `THIN_CLIENT_ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **Element Creation** (`src/helpers/hybridElement.ts`): `createHybridElements()` creates array of hybrid elements, matches accessibility elements with DOM elements by index or attributes, uses element mapping when available, applies options consistently. **Reference:** `THIN_CLIENT_ROADMAP.md` §8.1
-- ✅ **Simplified DOM Generation** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` creates hybrid elements when accessibility elements available, `enhanceDomWithHybridElements()` integrates hybrid data into simplified DOM, marks elements with `data-hybrid` and `data-source` attributes, updates DOM attributes with hybrid data. **Reference:** `THIN_CLIENT_ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **State Management** (`src/state/currentTask.ts`): `hybridElements: HybridElement[] | null` added to `CurrentTaskSlice`, hybrid elements stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `THIN_CLIENT_ROADMAP.md` §8.1
-- ✅ **UI Display** (`src/common/HybridElementView.tsx`): Component displays hybrid elements in expandable accordion, shows source indicators (hybrid/accessibility/dom) with color-coded badges, displays combined properties (role, name, description, value), shows attributes and node IDs, provides summary statistics (total, hybrid count, accessibility-only count). **Reference:** `THIN_CLIENT_ROADMAP.md` §8.1
-- ✅ **UI Integration** (`src/common/TaskUI.tsx`): `hybridElements` added to state selector, `HybridElementView` component integrated and conditionally rendered, displays when hybrid elements available. **Reference:** `THIN_CLIENT_ROADMAP.md` §8.1
+- ✅ **HybridElement Type** (`src/types/hybridElement.ts`): `HybridElement` interface defined with `id`, `axNode`, `axElement`, `domElement`, combined properties (`role`, `name`, `description`, `value`), `interactive` flag, `attributes` record, `source` indicator, `backendDOMNodeId` for mapping. **Reference:** `ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **Merging Logic** (`src/helpers/hybridElement.ts`): `createHybridElement()` merges accessibility and DOM data, prefers accessibility when `preferAccessibility: true`, supplements with DOM when `supplementWithDOM: true`, combines attributes from both sources, sets `source` indicator (hybrid/accessibility/dom). **Reference:** `ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **Element Creation** (`src/helpers/hybridElement.ts`): `createHybridElements()` creates array of hybrid elements, matches accessibility elements with DOM elements by index or attributes, uses element mapping when available, applies options consistently. **Reference:** `ROADMAP.md` §8.1
+- ✅ **Simplified DOM Generation** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` creates hybrid elements when accessibility elements available, `enhanceDomWithHybridElements()` integrates hybrid data into simplified DOM, marks elements with `data-hybrid` and `data-source` attributes, updates DOM attributes with hybrid data. **Reference:** `ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **State Management** (`src/state/currentTask.ts`): `hybridElements: HybridElement[] | null` added to `CurrentTaskSlice`, hybrid elements stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `ROADMAP.md` §8.1
+- ✅ **UI Display** (`src/common/HybridElementView.tsx`): Component displays hybrid elements in expandable accordion, shows source indicators (hybrid/accessibility/dom) with color-coded badges, displays combined properties (role, name, description, value), shows attributes and node IDs, provides summary statistics (total, hybrid count, accessibility-only count). **Reference:** `ROADMAP.md` §8.1
+- ✅ **UI Integration** (`src/common/TaskUI.tsx`): `hybridElements` added to state selector, `HybridElementView` component integrated and conditionally rendered, displays when hybrid elements available. **Reference:** `ROADMAP.md` §8.1
 
 **Hybrid Element Process:**
 The implementation correctly creates and uses hybrid elements:
@@ -923,7 +924,7 @@ The implementation correctly creates and uses hybrid elements:
 - Expected token reduction 20-30% vs. baseline (requires measurement on live sites)
 - Unified representation reduces redundancy between accessibility and DOM data
 
-**Reference:** `THIN_CLIENT_ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 4), `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.3 (Recommended Approach: Accessibility Tree + Current Approach)
+**Reference:** `ROADMAP.md` §8.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 4), `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.3 (Recommended Approach: Accessibility Tree + Current Approach)
 
 **All Task 7 requirements verified and implemented.**
 
@@ -1007,7 +1008,7 @@ The implementation correctly creates and uses hybrid elements:
 - ✅ `src/common/TaskUI.tsx` — Updated to display coverage metrics view
 
 **References:**
-- **Implementation Guide:** `THIN_CLIENT_ROADMAP.md` §9.1 (Task 8: Accessibility-First Element Selection)
+- **Implementation Guide:** `ROADMAP.md` §9.1 (Task 8: Accessibility-First Element Selection)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 5)
 - **Enterprise Specification:** `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.3 (Recommended Approach)
 
@@ -1026,13 +1027,13 @@ The implementation correctly creates and uses hybrid elements:
 - ✅ **Documentation:** All files include JSDoc comments with references
 
 **Detailed Verification Checklist:**
-- ✅ **Coverage Analysis** (`src/helpers/accessibilityFirst.ts`): `analyzeAccessibilityCoverage()` calculates coverage percentage, counts overlap (elements in both), counts DOM-only elements, counts accessibility-only elements, calculates total interactive elements, returns `CoverageMetrics` with all metrics. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **Selection Strategy** (`src/helpers/accessibilityFirst.ts`): `selectElementsAccessibilityFirst()` starts with all accessibility elements (primary source), matches accessibility elements with DOM elements by index or attributes, creates hybrid elements for matched pairs, adds DOM-only elements when not in accessibility tree, returns array of hybrid elements with accessibility-first selection. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **DOM Supplementation** (`src/helpers/accessibilityFirst.ts`): DOM-only elements added when not found in accessibility tree, elements tracked to avoid duplicates, DOM-only elements converted to hybrid elements with `source: 'dom'`, ensures all interactive elements are included. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **Simplified DOM Generation** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` uses `selectElementsAccessibilityFirst()` instead of `createHybridElements()`, calls `analyzeAccessibilityCoverage()` to calculate metrics, returns `coverageMetrics` in `SimplifiedDomResult`, logs coverage information for debugging. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
-- ✅ **State Management** (`src/state/currentTask.ts`): `coverageMetrics: CoverageMetrics | null` added to `CurrentTaskSlice`, coverage metrics stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **UI Metrics Display** (`src/common/CoverageMetricsView.tsx`): Component displays coverage percentage with color-coded badge (green/yellow/orange/red), shows progress bar for visual representation, displays statistics (total interactive, accessibility nodes, overlap, DOM-only, accessibility-only), provides summary message based on coverage level, includes copy button for metrics data. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **UI Integration** (`src/common/TaskUI.tsx`): `coverageMetrics` added to state selector, `CoverageMetricsView` component integrated and conditionally rendered, displays when coverage metrics available, positioned before hybrid elements view. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
+- ✅ **Coverage Analysis** (`src/helpers/accessibilityFirst.ts`): `analyzeAccessibilityCoverage()` calculates coverage percentage, counts overlap (elements in both), counts DOM-only elements, counts accessibility-only elements, calculates total interactive elements, returns `CoverageMetrics` with all metrics. **Reference:** `ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **Selection Strategy** (`src/helpers/accessibilityFirst.ts`): `selectElementsAccessibilityFirst()` starts with all accessibility elements (primary source), matches accessibility elements with DOM elements by index or attributes, creates hybrid elements for matched pairs, adds DOM-only elements when not in accessibility tree, returns array of hybrid elements with accessibility-first selection. **Reference:** `ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **DOM Supplementation** (`src/helpers/accessibilityFirst.ts`): DOM-only elements added when not found in accessibility tree, elements tracked to avoid duplicates, DOM-only elements converted to hybrid elements with `source: 'dom'`, ensures all interactive elements are included. **Reference:** `ROADMAP.md` §9.1
+- ✅ **Simplified DOM Generation** (`src/helpers/simplifyDom.ts`): `getSimplifiedDom()` uses `selectElementsAccessibilityFirst()` instead of `createHybridElements()`, calls `analyzeAccessibilityCoverage()` to calculate metrics, returns `coverageMetrics` in `SimplifiedDomResult`, logs coverage information for debugging. **Reference:** `ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5
+- ✅ **State Management** (`src/state/currentTask.ts`): `coverageMetrics: CoverageMetrics | null` added to `CurrentTaskSlice`, coverage metrics stored in state when available from `getSimplifiedDom()`, cleared when not available, accessible to UI components via Zustand store. **Reference:** `ROADMAP.md` §9.1
+- ✅ **UI Metrics Display** (`src/common/CoverageMetricsView.tsx`): Component displays coverage percentage with color-coded badge (green/yellow/orange/red), shows progress bar for visual representation, displays statistics (total interactive, accessibility nodes, overlap, DOM-only, accessibility-only), provides summary message based on coverage level, includes copy button for metrics data. **Reference:** `ROADMAP.md` §9.1
+- ✅ **UI Integration** (`src/common/TaskUI.tsx`): `coverageMetrics` added to state selector, `CoverageMetricsView` component integrated and conditionally rendered, displays when coverage metrics available, positioned before hybrid elements view. **Reference:** `ROADMAP.md` §9.1
 
 **Accessibility-First Selection Process:**
 The implementation correctly prioritizes accessibility tree and supplements with DOM:
@@ -1050,7 +1051,7 @@ The implementation correctly prioritizes accessibility tree and supplements with
 - Expected token reduction 25-35% vs. baseline (requires measurement on live sites)
 - Coverage metrics help identify sites with good accessibility (higher coverage = better token reduction)
 
-**Reference:** `THIN_CLIENT_ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 5), `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.3 (Recommended Approach)
+**Reference:** `ROADMAP.md` §9.1, `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.5 (Implementation Plan, Task 5), `ENTERPRISE_PLATFORM_SPECIFICATION.md` §3.6.3 (Recommended Approach)
 
 **All Task 8 requirements verified and implemented.**
 
@@ -1148,7 +1149,7 @@ The implementation correctly prioritizes accessibility tree and supplements with
 
 **References:**
 - **Comprehensive Documentation:** `COMPREHENSIVE_ARCHITECTURE.md`
-- **Implementation Roadmap:** `THIN_CLIENT_ROADMAP.md` (Tasks 1-8 complete)
+- **Implementation Roadmap:** `ROADMAP.md` (Tasks 1-8 complete)
 
 **Exit criterion:** Task 9 complete when all above are verified. Documentation consolidation complete.
 
@@ -1164,11 +1165,11 @@ The implementation correctly prioritizes accessibility tree and supplements with
 - ✅ **Deprecation:** Legacy documents properly marked with deprecation notices
 
 **Detailed Verification Checklist:**
-- ✅ **Comprehensive Document** (`docs/CLIENT_ARCHITECTURE.md`): Document created with 11 main sections covering all client-side architecture, components, data flow, action system, Thin Client implementation, DOM processing, Reasoning Layer support, Debug View, Manus Orchestrator support, quick reference, and implementation status. All client-side information from legacy docs consolidated. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **INDEX.md Update** (`docs/INDEX.md`): Updated to point to comprehensive document as primary documentation, legacy docs marked as deprecated, all file references updated to match current implementation, development workflow updated. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **Legacy Document Removal**: ARCHITECTURE.md, COMPONENT_ARCHITECTURE.md, DATA_FLOW.md, ACTION_SYSTEM.md removed after consolidation into comprehensive document. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **Outdated Reference Removal**: References to SetAPIKey component removed (replaced by Login), references to ModelDropdown component removed (server-side), references to determineNextAction.ts removed (server-side), state persistence references updated (no OpenAI API key), LLM integration references updated (backend API). **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
-- ✅ **Missing Documentation Added**: Accessibility tree integration (Tasks 4-8) documented in CLIENT_ARCHITECTURE.md §7, hybrid element representation (Task 7) documented in CLIENT_ARCHITECTURE.md §7, coverage metrics (Task 8) documented in CLIENT_ARCHITECTURE.md §7, accessibility-first selection strategy (Task 8) documented in CLIENT_ARCHITECTURE.md §7. **Reference:** `THIN_CLIENT_ROADMAP.md` §9.1
+- ✅ **Comprehensive Document** (`docs/CLIENT_ARCHITECTURE.md`): Document created with 11 main sections covering all client-side architecture, components, data flow, action system, Thin Client implementation, DOM processing, Reasoning Layer support, Debug View, Manus Orchestrator support, quick reference, and implementation status. All client-side information from legacy docs consolidated. **Reference:** `ROADMAP.md` §9.1
+- ✅ **INDEX.md Update** (`docs/INDEX.md`): Updated to point to comprehensive document as primary documentation, legacy docs marked as deprecated, all file references updated to match current implementation, development workflow updated. **Reference:** `ROADMAP.md` §9.1
+- ✅ **Legacy Document Removal**: ARCHITECTURE.md, COMPONENT_ARCHITECTURE.md, DATA_FLOW.md, ACTION_SYSTEM.md removed after consolidation into comprehensive document. **Reference:** `ROADMAP.md` §9.1
+- ✅ **Outdated Reference Removal**: References to SetAPIKey component removed (replaced by Login), references to ModelDropdown component removed (server-side), references to determineNextAction.ts removed (server-side), state persistence references updated (no OpenAI API key), LLM integration references updated (backend API). **Reference:** `ROADMAP.md` §9.1
+- ✅ **Missing Documentation Added**: Accessibility tree integration (Tasks 4-8) documented in CLIENT_ARCHITECTURE.md §7, hybrid element representation (Task 7) documented in CLIENT_ARCHITECTURE.md §7, coverage metrics (Task 8) documented in CLIENT_ARCHITECTURE.md §7, accessibility-first selection strategy (Task 8) documented in CLIENT_ARCHITECTURE.md §7. **Reference:** `ROADMAP.md` §9.1
 
 **Documentation Consolidation Process:**
 The consolidation correctly merges all client-side architecture documentation:
@@ -1185,7 +1186,7 @@ The consolidation correctly merges all client-side architecture documentation:
 - All outdated references removed
 - Quick reference and implementation status included
 
-**Reference:** `THIN_CLIENT_ROADMAP.md` §9.1, `CLIENT_ARCHITECTURE.md`
+**Reference:** `ROADMAP.md` §9.1, `CLIENT_ARCHITECTURE.md`
 
 **All Task 9 requirements verified and implemented.**
 
@@ -4255,14 +4256,14 @@ Handles new orchestrator response format. Stores status and progress. Enables st
 |----------|---------|--------------|
 | **`CLIENT_ARCHITECTURE.md`** | Complete client-side architecture | §9 (Debug View Architecture), §10 (Manus Orchestrator Client Support), §2 (System Architecture), §4 (Data Flow), §6 (Thin Client Implementation) |
 | **`MANUS_ORCHESTRATOR_ARCHITECTURE.md`** | Manus orchestrator architecture specification (server-side) | §6 (State Management), §7 (API Protocol), §8 (Verification), §9 (Self-Correction) |
-| **`THIN_CLIENT_ROADMAP.md`** | Current client-side implementation roadmap | §2 (Task 1: Authentication), §3 (Task 2: Knowledge Resolution), §4 (Task 3: Action Loop) |
+| **`ROADMAP.md`** | Current client-side implementation roadmap | §2 (Task 1: Authentication), §3 (Task 2: Knowledge Resolution), §4 (Task 3: Action Loop) |
 
 ### Implementation Patterns to Follow
 
 **State Management:**
 - Use Zustand with Immer middleware (see `CLIENT_ARCHITECTURE.md` §2.3)
 - Split selectors to prevent infinite loops (see `.cursorrules` §11)
-- Use `persist` middleware for critical state (see `THIN_CLIENT_ROADMAP.md` §2.1)
+- Use `persist` middleware for critical state (see `ROADMAP.md` §2.1)
 
 **UI Components:**
 - Use Chakra UI for all components (see `.cursorrules` §2)
@@ -4322,3 +4323,18 @@ Handles new orchestrator response format. Stores status and progress. Enables st
 1. Review and approve implementation plan
 2. Begin Task 1 (Architectural Separation)
 3. Coordinate with server-side implementation in `THIN_SERVER_TO_BE_ROADMAP.md`
+
+---
+
+# Part 3: Production Readiness
+
+**Full guide:** [PRODUCTION_READINESS.md](./PRODUCTION_READINESS.md) — Production-grade improvements, edge case handling, and DOM processing.
+
+**Summary:**
+- **Virtual Element Handling** — Text node menu items (e.g. "New/Search"); virtual element creation and click handling in `getAnnotatedDOM.ts`.
+- **6 Hidden Failure Modes** — React inputs (synthetic events), Shadow DOM, hover-only elements, click interception, iframes, stale elements.
+- **4 Missing Layers** — Synthetic events, visual lies (overlays), dynamic stability (network idle, DOM settled), iframe support.
+- **5 Advanced Edge Cases** — Stale element race, new tab disconnect, native dialogs, hydration gap, bot detection.
+- **Final 5 Blind Spots** — Visual verification, file download, human-in-the-loop (2FA/captcha), advanced scroll targeting, wait for condition.
+- **DOM Processing** — Pipeline, interactive detection, snapshot system, hybrid elements.
+- **Implementation Checklist** — Completed items and TODO with priority order; testing recommendations.

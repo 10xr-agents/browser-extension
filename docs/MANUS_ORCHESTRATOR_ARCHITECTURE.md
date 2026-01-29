@@ -6,7 +6,7 @@
 
 **For client-side Manus Orchestrator information, see:**
 - **[CLIENT_ARCHITECTURE.md](./CLIENT_ARCHITECTURE.md)** §10 — Complete Manus Orchestrator client support (Tasks 6-10 complete)
-- **[THIN_CLIENT_ROADMAP.md](./THIN_CLIENT_ROADMAP.md)** Part 2, Tasks 6-10 — Detailed task-based implementation reference
+- **[ROADMAP.md](./ROADMAP.md)** Part 2, Tasks 6-10 — Detailed task-based implementation reference
 
 **This document focuses on server-side Manus Orchestrator architecture and design decisions.** Client-side parts are documented in CLIENT_ARCHITECTURE.md.
 
@@ -737,7 +737,7 @@ Improves UX but doesn't affect reliability. Can be added after core functionalit
 - Old clients continue working unchanged
 - New clients can use new features
 
-**Reference:** Current API contract in `SERVER_SIDE_AGENT_ARCH.md` §4.2. Response format follows same pattern as `hasOrgKnowledge` field (optional enhancement). Client-side integration in `THIN_CLIENT_ROADMAP.md` §4.1 (Task 3: Server-Side Action Loop).
+**Reference:** Current API contract in `SERVER_SIDE_AGENT_ARCH.md` §4.2. Response format follows same pattern as `hasOrgKnowledge` field (optional enhancement). Client-side integration in `ROADMAP.md` §4.1 (Task 3: Server-Side Action Loop).
 
 **Why This Approach:**
 Zero-downtime migration. Gradual rollout possible. No breaking changes. Matches existing enhancement pattern (e.g., `hasOrgKnowledge` field).
@@ -880,7 +880,7 @@ The existing Thin Client architecture is **90% ready** for Manus. The transforma
 | **`THIN_SERVER_ROADMAP.md`** | Server implementation roadmap and patterns | §1.4 (Database Stack), §2.4 (Better Auth & Next.js), §4.1 (Task models), §4.2 (API patterns) |
 | **`CLIENT_ARCHITECTURE.md`** | Client-side architecture | §6 (Thin Client Implementation), §5 (Action System), §7 (DOM Processing Pipeline) |
 | **`ENTERPRISE_PLATFORM_SPECIFICATION.md`** | Enterprise platform context | §1 (Multi-Tenant Architecture), §2 (RAG Pipeline), §3 (Contextual Overlay) |
-| **`THIN_CLIENT_ROADMAP.md`** | Client-side implementation roadmap | §4.1 (Task 3: Server-Side Action Loop) for client integration patterns |
+| **`ROADMAP.md`** | Client-side implementation roadmap | §4.1 (Task 3: Server-Side Action Loop) for client integration patterns |
 
 ### 17.2 Implementation Patterns to Follow
 

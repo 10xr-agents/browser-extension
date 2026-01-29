@@ -13,7 +13,7 @@
 
 **Changelog (2.1):** ✅ **IMPLEMENTED** React Input Events (Section 2.1) and Shadow DOM Support (Section 2.2) - Critical resilience and visibility fixes now complete. Updated priority order to reflect completed implementations. Architecture status upgraded: DOM Visibility ⭐⭐⭐⭐⭐, Resilience ⭐⭐⭐⭐.
 
-**Changelog (2.0):** Added Section 5 (Final 5 Blind Spots) covering Visual Verification, File Download Handling, Human-in-the-Loop, Advanced Scroll Targeting, and Wait for Condition. Updated Implementation Checklist with priority-ordered roadmap following `THIN_CLIENT_ROADMAP.md` format. Added Architecture Status Summary.
+**Changelog (2.0):** Added Section 5 (Final 5 Blind Spots) covering Visual Verification, File Download Handling, Human-in-the-Loop, Advanced Scroll Targeting, and Wait for Condition. Updated Implementation Checklist with priority-ordered roadmap following `ROADMAP.md` format. Added Architecture Status Summary.
 
 **This document covers:**
 - Virtual element handling for text node menu items (recent fix)
