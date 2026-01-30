@@ -1,10 +1,11 @@
 /**
  * Chat Message Types for Persistent Conversation Threads
- * 
+ *
  * Replaces displayHistory with a proper chat message structure that supports
  * persistence, error tracking, and separation of user-facing messages from technical logs.
- * 
+ *
  * Reference: Client-side fixes for "lying agent" and chat persistence
+ * Reference: SPECS_AND_CONTRACTS.md §3 (Chat UI Contract)
  */
 
 import { ParsedAction } from '../helpers/parseAction';
@@ -19,6 +20,29 @@ export type ChatMessageRole = 'user' | 'assistant' | 'system';
  * Message status
  */
 export type MessageStatus = 'sending' | 'sent' | 'error' | 'success' | 'failure' | 'pending';
+
+/**
+ * Task-level status for UI (TaskHeader, badges).
+ * Derived from currentTask.status; optional on API.
+ * TODO: Request from Backend if not already sent in interact response.
+ */
+export type TaskStatusDisplay = 'running' | 'completed' | 'failed' | 'stopped';
+
+/**
+ * Plan structure for Live Plan widget.
+ * TODO: Request from Backend if not already sent in POST /api/agent/interact response.
+ */
+export type PlanDisplay = {
+  steps: Array<{ id?: string; description: string; status?: 'pending' | 'active' | 'completed' | 'failed' }>;
+  currentStepIndex: number;
+};
+
+/**
+ * Loading state when agent is thinking (before next message).
+ * Client derives from: taskStatus === 'running' && last message is assistant && waiting for next.
+ * TODO: Request from Backend as optional isThinking if server can signal earlier.
+ */
+export type IsThinking = boolean;
 
 /**
  * Action step (technical execution log)

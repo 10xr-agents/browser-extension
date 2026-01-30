@@ -102,18 +102,52 @@ export async function getSimplifiedDom(tabId?: number): Promise<SimplifiedDomRes
 
   // Fallback to DOM approach (always used, or as fallback)
   // Use more retries for DOM extraction as content script may need time to load
+  // CRITICAL FIX: Retry on null responses (page may be loading after navigation)
   let fullDom: string | null = null;
-  try {
-    // Type assertion needed because callRPC can return multiple types depending on method
-    fullDom = await callRPC('getAnnotatedDOM', [], 5) as string; // Increased retries for initial DOM load
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('Failed to get annotated DOM:', errorMessage);
-    // Return null to let caller handle the error
-    return null;
+  const MAX_DOM_RETRIES = 5;
+  const DOM_RETRY_DELAY = 1000; // 1 second between retries
+  
+  for (let attempt = 0; attempt < MAX_DOM_RETRIES; attempt++) {
+    try {
+      // Type assertion needed because callRPC can return multiple types depending on method
+      // CRITICAL FIX: Pass tabId to callRPC to ensure we target the correct tab
+      // Without this, switching tabs causes "Content script is not loaded" errors
+      fullDom = await callRPC('getAnnotatedDOM', [], 5, tabId) as string; // 5 retries for content script connection
+      
+      // If we got a valid DOM, break out of the retry loop
+      if (fullDom) {
+        if (attempt > 0) {
+          console.log(`[getSimplifiedDom] DOM extraction succeeded on attempt ${attempt + 1}`);
+        }
+        break;
+      }
+      
+      // DOM was null - page may still be loading after navigation
+      console.debug(`[getSimplifiedDom] DOM was null on attempt ${attempt + 1}/${MAX_DOM_RETRIES}, retrying...`);
+      
+      if (attempt < MAX_DOM_RETRIES - 1) {
+        // Wait before retrying (exponential backoff: 1s, 2s, 4s, 8s)
+        const delay = DOM_RETRY_DELAY * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, Math.min(delay, 5000)));
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[getSimplifiedDom] Failed to get annotated DOM (attempt ${attempt + 1}):`, errorMessage);
+      
+      // If this is the last attempt, return null
+      if (attempt === MAX_DOM_RETRIES - 1) {
+        return null;
+      }
+      
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, DOM_RETRY_DELAY));
+    }
   }
   
-  if (!fullDom) return null;
+  if (!fullDom) {
+    console.error('[getSimplifiedDom] DOM was null after all retries - page may still be loading');
+    return null;
+  }
 
   const dom = new DOMParser().parseFromString(fullDom, 'text/html');
 

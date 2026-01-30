@@ -1,9 +1,14 @@
 # Spadeworks Copilot AI - Production Readiness Guide
 
-**Document Version:** 2.4  
-**Last Updated:** January 28, 2026  
+**Document Version:** 2.5  
+**Last Updated:** January 29, 2026  
 **Status:** Production-Grade Improvements & DOM Processing  
 **Purpose:** Comprehensive guide to production-ready improvements, edge case handling, and robust DOM processing
+
+**Changelog (2.5):**
+- ✅ **FIXED** Service Worker registration error (Status 15) - Removed `pusher-js` from background context (uses `window` which doesn't exist in Service Workers). Pusher now runs in Side Panel context only.
+- ✅ **IMPROVED** Adaptive DOM size limits - Default 50k chars, auto-extends to 200k for complex enterprise pages (Salesforce, HubSpot). Ensures interactive elements aren't truncated.
+- ✅ **FIXED** Cross-domain navigation breaking tasks - Session no longer switches when task is running. Navigation actions now properly wait for page load and content script initialization.
 
 **Changelog (2.4):** ✅ **IMPLEMENTED** All 6 remaining DOM-related enhancements: Hover Action (2.3), Iframe Support (2.5), New Tab Handling (4.2), Native Dialog Override (4.3), Advanced Scroll Targeting (5.4), and Wait for Condition (5.5). All non-visual DOM improvements now complete.
 

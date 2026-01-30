@@ -1,11 +1,12 @@
 /**
  * App Component for Thin Client Architecture
  * 
- * Handles session check on startup and conditional rendering:
- * - Shows Login when unauthenticated
- * - Shows TaskUI when authenticated
- * - Blocks task execution until authenticated
+ * ARCHITECTURE (Phase 2 - Background-Centric):
+ * - TaskProvider wraps authenticated content
+ * - Task state flows from background TaskOrchestrator via chrome.storage
+ * - UI components are pure renderers that send commands to background
  * 
+ * Reference: ARCHITECTURE_REVIEW.md §3.2 (Option B: Background-Centric Architecture)
  * Reference: THIN_CLIENT_ROADMAP.md §2.1 (Task 1: Authentication & API Client)
  */
 
@@ -20,6 +21,7 @@ import {
 import React, { useEffect, useState } from 'react';
 import { apiClient } from '../api/client';
 import { useAppState } from '../state/store';
+import { TaskProvider } from '../state/TaskProvider';
 import Login from './Login';
 import TaskUI from './TaskUI';
 import SystemView from './SystemView';
@@ -66,6 +68,8 @@ const App = () => {
   const currentDomain = useAppState((state) => state.sessions.currentDomain);
   // Use user directly from store - this will trigger re-render when login updates it
   const user = useAppState((state) => state.settings.user);
+  // CRITICAL: Get task status to prevent session switching during active task
+  const taskStatus = useAppState((state) => state.currentTask.status);
   
 
   // Check knowledge availability for current page
@@ -188,11 +192,21 @@ const App = () => {
   }, [setUser, setTenant, setTheme, clearAuth]); // initializeDomainAwareSessions and switchToUrlSession are stable
   
   // Handle URL changes - switch sessions when domain changes
+  // CRITICAL FIX: Do NOT switch sessions when a task is actively running
+  // This prevents breaking multi-step tasks that navigate across domains (e.g., "Go to Google and search")
   useEffect(() => {
     if (!user) return;
     
     const handleUrlChange = async (url: string) => {
       if (url.startsWith('http://') || url.startsWith('https://')) {
+        // CRITICAL: Check if a task is currently running
+        // If so, skip session switching to preserve task context
+        const currentStatus = useAppState.getState().currentTask.status;
+        if (currentStatus === 'running') {
+          console.debug('[App] Skipping session switch - task is running. URL:', url);
+          return; // Don't switch sessions during active task
+        }
+        
         try {
           await switchToUrlSession(url);
         } catch (error) {
@@ -284,21 +298,26 @@ const App = () => {
             <ErrorBoundary>
               {/* Route-based rendering */}
               {user ? (
-                currentRoute === '/settings' ? (
-                  <SettingsView onNavigate={setCurrentRoute} />
-                ) : (
-                  // Conditional rendering based on debug toggle
-                  isDebugViewOpen ? (
-                    <SystemView onBackToChat={() => setIsDebugViewOpen(false)} />
+                /* TaskProvider wraps all authenticated content
+                 * This provides task state from background TaskOrchestrator
+                 * Reference: ARCHITECTURE_REVIEW.md §3.2 */
+                <TaskProvider>
+                  {currentRoute === '/settings' ? (
+                    <SettingsView onNavigate={setCurrentRoute} />
                   ) : (
-                    <TaskUI 
-                      hasOrgKnowledge={hasOrgKnowledge}
-                      isDebugViewOpen={isDebugViewOpen}
-                      setIsDebugViewOpen={setIsDebugViewOpen}
-                      onNavigate={setCurrentRoute}
-                    />
-                  )
-                )
+                    // Conditional rendering based on debug toggle
+                    isDebugViewOpen ? (
+                      <SystemView onBackToChat={() => setIsDebugViewOpen(false)} />
+                    ) : (
+                      <TaskUI 
+                        hasOrgKnowledge={hasOrgKnowledge}
+                        isDebugViewOpen={isDebugViewOpen}
+                        setIsDebugViewOpen={setIsDebugViewOpen}
+                        onNavigate={setCurrentRoute}
+                      />
+                    )
+                  )}
+                </TaskProvider>
               ) : (
                 <Login />
               )}

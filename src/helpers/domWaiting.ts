@@ -80,10 +80,12 @@ export interface DropdownItem {
 /**
  * Get a snapshot of current interactive elements
  * Used for tracking what changed after an action
+ * @param tabId - Optional tab ID to target (uses active tab if not provided)
  */
-export async function getInteractiveElementSnapshot(): Promise<Map<string, ElementInfo>> {
+export async function getInteractiveElementSnapshot(tabId?: number): Promise<Map<string, ElementInfo>> {
   try {
-    const snapshot = await callRPC('getInteractiveElementSnapshot', [], 3);
+    // CRITICAL FIX: Pass tabId to ensure we target the correct tab when switching tabs
+    const snapshot = await callRPC('getInteractiveElementSnapshot', [], 3, tabId);
     if (!snapshot || !Array.isArray(snapshot)) {
       return new Map();
     }
@@ -250,9 +252,12 @@ export function detectDropdownMenu(addedElements: ElementInfo[]): {
  * Uses polling to detect when mutations stop occurring AND network requests complete
  * 
  * Reference: PRODUCTION_READINESS.md §3.3 (The "Dynamic Stability" Check)
+ * @param config - Wait configuration
+ * @param tabId - Optional tab ID to target (uses active tab if not provided)
  */
 export async function waitForDOMStabilization(
-  config: DOMWaitConfig = {}
+  config: DOMWaitConfig = {},
+  tabId?: number
 ): Promise<{ stabilizationTime: number; timedOut: boolean }> {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   
@@ -267,7 +272,8 @@ export async function waitForDOMStabilization(
     try {
       // Use RPC to check network activity in content script context
       // Performance API is only available in content script, not background
-      const networkStatus = await callRPC('checkNetworkIdle', [], 1);
+      // CRITICAL FIX: Pass tabId to ensure we target the correct tab
+      const networkStatus = await callRPC('checkNetworkIdle', [], 1, tabId);
       if (typeof networkStatus === 'boolean') {
         return networkStatus;
       }
@@ -284,7 +290,8 @@ export async function waitForDOMStabilization(
   await sleep(cfg.minWait);
   
   while (Date.now() - startTime < cfg.maxWait) {
-    const currentSnapshot = await getInteractiveElementSnapshot();
+    // CRITICAL FIX: Pass tabId to ensure we target the correct tab when switching tabs
+    const currentSnapshot = await getInteractiveElementSnapshot(tabId);
     const networkIdle = await checkNetworkIdle();
     
     if (previousSnapshot) {
@@ -320,22 +327,28 @@ export async function waitForDOMStabilization(
 /**
  * Wait for DOM changes and return a report of what changed
  * This is the main function to call after executing an action
+ * @param beforeSnapshot - Snapshot of elements before the action
+ * @param config - Wait configuration
+ * @param tabId - Optional tab ID to target (uses active tab if not provided)
  */
 export async function waitForDOMChangesAfterAction(
   beforeSnapshot: Map<string, ElementInfo>,
-  config: DOMWaitConfig = {}
+  config: DOMWaitConfig = {},
+  tabId?: number
 ): Promise<DOMChangeReport> {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   
   // Wait for DOM to stabilize
-  const { stabilizationTime, timedOut } = await waitForDOMStabilization(cfg);
+  // CRITICAL FIX: Pass tabId to ensure we target the correct tab when switching tabs
+  const { stabilizationTime, timedOut } = await waitForDOMStabilization(cfg, tabId);
   
   if (timedOut) {
     console.warn('DOM stabilization timed out after', cfg.maxWait, 'ms');
   }
   
   // Get the final snapshot
-  const afterSnapshot = await getInteractiveElementSnapshot();
+  // CRITICAL FIX: Pass tabId to ensure we target the correct tab
+  const afterSnapshot = await getInteractiveElementSnapshot(tabId);
   
   // Compare snapshots
   const { added, removed } = compareDOMSnapshots(beforeSnapshot, afterSnapshot);

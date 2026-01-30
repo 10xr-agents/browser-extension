@@ -13,11 +13,12 @@ import {
   Text,
   Flex,
   HStack,
+  Button,
   useColorModeValue,
 } from '@chakra-ui/react';
 import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import { BsStopFill } from 'react-icons/bs';
-import { FiSend } from 'react-icons/fi';
+import { FiSend, FiChevronDown } from 'react-icons/fi';
 import { Icon, IconButton } from '@chakra-ui/react';
 import { useAppState } from '../state/store';
 import TaskHistory from './TaskHistory';
@@ -27,6 +28,10 @@ import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
 import ErrorBoundary from './ErrorBoundary';
 import ChatHistoryDrawer from './ChatHistoryDrawer';
 import DomainStatus from './components/DomainStatus';
+import TaskStatusIndicator from './components/TaskStatusIndicator';
+import TaskHeader from './components/TaskHeader';
+import PlanWidget from './components/PlanWidget';
+import TaskCompletedCard from './components/TaskCompletedCard';
 import { TypingIndicator } from './TypingIndicator';
 import { messageSyncManager } from '../services/messageSyncService';
 
@@ -104,24 +109,54 @@ const TaskUI: React.FC<TaskUIProps> = ({
            (lastMessage.status === 'pending' || lastMessage.meta?.reasoning?.source === 'ASK_USER');
   });
 
-  // Scroll container ref for auto-scrolling to bottom on new messages
+  // Scroll container ref and stick-to-bottom: only auto-scroll if user was at bottom
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const userWasAtBottomRef = useRef(true);
+  const [showNewMessagesButton, setShowNewMessagesButton] = useState(false);
+  const prevContentLengthRef = useRef(0);
 
-  // Auto-scroll to bottom when messages change (Cursor-like behavior)
+  const scrollToBottom = useCallback(() => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+      userWasAtBottomRef.current = true;
+      setShowNewMessagesButton(false);
+    }
+  }, []);
+
   useEffect(() => {
-    // Safety check: Ensure messages and taskHistory are arrays before accessing .length
     const messagesArray = Array.isArray(messages) ? messages : [];
     const taskHistoryArray = Array.isArray(taskHistory) ? taskHistory : [];
+    const contentLength = messagesArray.length + taskHistoryArray.length;
+    if (contentLength === 0) return;
 
-    if (scrollContainerRef.current && (messagesArray.length > 0 || taskHistoryArray.length > 0)) {
-      // Small delay to ensure DOM has updated
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    const wasAtBottom = userWasAtBottomRef.current;
+    const prevLength = prevContentLengthRef.current;
+    prevContentLengthRef.current = contentLength;
+
+    if (contentLength > prevLength) {
       setTimeout(() => {
-        if (scrollContainerRef.current) {
+        if (!scrollContainerRef.current) return;
+        if (wasAtBottom) {
           scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+          setShowNewMessagesButton(false);
+        } else {
+          setShowNewMessagesButton(true);
         }
       }, 100);
     }
-  }, [messages, taskHistory]); // Scroll when messages or history changes
+  }, [messages, taskHistory]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const threshold = 80;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
+    userWasAtBottomRef.current = atBottom;
+    if (atBottom) setShowNewMessagesButton(false);
+  }, []);
 
   // Load messages on mount if sessionId exists
   // Uses loading state to prevent infinite retry loops
@@ -286,19 +321,29 @@ const TaskUI: React.FC<TaskUIProps> = ({
         onClose={() => setHistoryOpen(false)}
       />
 
-      {/* Zone B: Scrollable Document Stream */}
-      <Box 
+      {/* Zone B: Scrollable Document Stream (stick-to-bottom; "New messages" when scrolled up) */}
+      <Box
         ref={scrollContainerRef}
-        flex="1" 
-        overflowY="auto" 
-        overflowX="hidden" 
-        minW="0" 
-        px={4} 
-        py={4} 
+        flex="1"
+        overflowY="auto"
+        overflowX="hidden"
+        minW="0"
+        px={4}
+        py={4}
         bg={contentBg}
-        pb="100px" // Add padding bottom to account for floating input
+        pb="100px"
+        onScroll={handleScroll}
+        position="relative"
       >
         <VStack spacing={4} align="stretch" minW="0">
+          {/* Task Header - Status badge (RUNNING / COMPLETED / FAILED) */}
+          <ErrorBoundary>
+            <TaskHeader />
+          </ErrorBoundary>
+          {/* Live Plan - Stepper or Planning skeleton */}
+          <ErrorBoundary>
+            <PlanWidget />
+          </ErrorBoundary>
           {/* System Notice - Slim, inline style */}
           {hasOrgKnowledge === false && (
             <Box
@@ -344,7 +389,27 @@ const TaskUI: React.FC<TaskUIProps> = ({
               <TaskHistory />
             </Box>
           </ErrorBoundary>
+          {/* Task Completed summary card */}
+          <ErrorBoundary>
+            <TaskCompletedCard />
+          </ErrorBoundary>
         </VStack>
+
+        {/* "New messages" button when user has scrolled up */}
+        {showNewMessagesButton && (
+          <Box position="absolute" bottom={24} left="50%" transform="translateX(-50%)" zIndex={15}>
+            <Button
+              size="sm"
+              leftIcon={<Icon as={FiChevronDown} />}
+              onClick={scrollToBottom}
+              colorScheme="blue"
+              shadow="md"
+              aria-label="Scroll to new messages"
+            >
+              New messages
+            </Button>
+          </Box>
+        )}
       </Box>
 
       {/* Zone C: Floating Command Bar */}
@@ -371,6 +436,10 @@ const TaskUI: React.FC<TaskUIProps> = ({
           }}
         >
           <Flex align="flex-end" px={4} py={3} gap={2} minW="0">
+            {/* Task status: running / done / failed (icon + optional motion) */}
+            <ErrorBoundary>
+              <TaskStatusIndicator />
+            </ErrorBoundary>
             {/* Text Input - Takes up most space */}
             <Box flex="1" minW="0">
               <AutosizeTextarea

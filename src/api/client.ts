@@ -754,10 +754,30 @@ class ApiClient {
     domChanges?: DOMChangeInfo,
     clientObservations?: ClientObservations
   ): Promise<NextActionResponse> {
+    // Adaptive DOM size limits:
+    // - Default: 50k chars (sufficient for most pages)
+    // - Extended: 200k chars (for complex enterprise apps like Salesforce, HubSpot)
+    // - Logic: If DOM exceeds 50k, extend to 200k to avoid cutting off interactive elements
+    const DEFAULT_DOM_LIMIT = 50000;
+    const EXTENDED_DOM_LIMIT = 200000;
+    
+    let domLimit = DEFAULT_DOM_LIMIT;
+    if (dom.length > DEFAULT_DOM_LIMIT) {
+      // Complex page detected - use extended limit to capture all interactive elements
+      // This ensures a "Save" button at character 65,000 on Salesforce won't be lost
+      domLimit = EXTENDED_DOM_LIMIT;
+      console.log(`[ApiClient] DOM exceeds 50k (${dom.length} chars), using extended 200k limit`);
+    }
+    
+    const truncatedDom = dom.substring(0, domLimit);
+    if (dom.length > domLimit) {
+      console.warn(`[ApiClient] DOM truncated from ${dom.length} to ${domLimit} chars (extended limit)`);
+    }
+    
     const body: AgentInteractRequest = {
       url,
       query,
-      dom: dom.substring(0, 50000), // Truncate large DOM for logging
+      dom: truncatedDom,
       taskId: taskId || undefined,
       sessionId: sessionId || undefined,
       lastActionStatus,
@@ -842,39 +862,9 @@ class ApiClient {
     }>('GET', path);
   }
 
-  /**
-   * Get active task for a session (recovery fallback when chrome.storage fails).
-   * Returns 200 with taskId when an active task exists for the session and URL; 404 when none.
-   * Reference: INTERACT_FLOW_WALKTHROUGH.md § Client Contract: taskId Persistence
-   */
-  async getActiveTask(
-    sessionId: string,
-    currentTabUrl: string
-  ): Promise<{
-    taskId: string;
-    query: string;
-    status: string;
-    currentStepIndex: number;
-    createdAt: string;
-    updatedAt: string;
-  } | null> {
-    try {
-      const params = new URLSearchParams({ url: currentTabUrl });
-      const path = `/api/session/${encodeURIComponent(sessionId)}/task/active?${params.toString()}`;
-      const result = await this.request<{
-        taskId: string;
-        query: string;
-        status: string;
-        currentStepIndex: number;
-        createdAt: string;
-        updatedAt: string;
-      }>('GET', path);
-      return result;
-    } catch (error: unknown) {
-      if (error instanceof NotFoundError) return null;
-      throw error;
-    }
-  }
+  // NOTE: Removed getActiveTask() method - no longer needed
+  // We now rely solely on chrome.storage.local for task persistence (Issue #3 fix)
+  // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
 
   /**
    * Get latest session

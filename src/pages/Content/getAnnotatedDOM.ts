@@ -1,5 +1,103 @@
 import { SPADEWORKS_ELEMENT_SELECTOR } from '../../constants';
 
+/**
+ * CRITICAL FIX: Payload Explosion (Issue #2)
+ * Strip heavy/irrelevant elements from the DOM before serialization.
+ * This dramatically reduces payload size (often 80-90% reduction).
+ * 
+ * Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #2 (Payload Explosion)
+ */
+
+/**
+ * Tags to remove from the DOM before serialization.
+ * These elements are heavy and not needed for LLM-based browser automation.
+ */
+const HEAVY_ELEMENT_SELECTORS = [
+  'script',           // JavaScript code - not needed for automation
+  'style',            // CSS rules - not needed for element identification
+  'svg',              // Vector graphics - often huge inline SVGs
+  'noscript',         // Fallback content - never relevant
+  'template',         // Unused template content
+  'link[rel="stylesheet"]', // External CSS references
+  'meta',             // Page metadata - not needed
+  // Note: We keep <iframe> in the DOM but can't access cross-origin content
+];
+
+/**
+ * Strip heavy elements from the cloned DOM before serialization.
+ * Removes script, style, svg, noscript, template, link[rel="stylesheet"], meta.
+ * Also removes HTML comments.
+ * 
+ * @param clone - The cloned DOM element to strip
+ */
+function stripHeavyElements(clone: HTMLElement | null | undefined): void {
+  // CRITICAL FIX: Guard against null/undefined clone
+  // This can happen during navigation when the DOM is in a transitional state
+  if (!clone || typeof clone.querySelectorAll !== 'function') {
+    console.warn('[stripHeavyElements] clone is null/undefined or not an HTMLElement, skipping');
+    return;
+  }
+  
+  try {
+    // 1. Remove all heavy elements
+    const elementsToRemove = clone.querySelectorAll(HEAVY_ELEMENT_SELECTORS.join(','));
+    elementsToRemove.forEach((el) => {
+      try {
+        el.remove();
+      } catch (error) {
+        // Element may have already been removed (nested), ignore
+      }
+    });
+
+    // 2. Remove HTML comments using TreeWalker (more efficient than NodeIterator)
+    const commentWalker = document.createTreeWalker(
+      clone,
+      NodeFilter.SHOW_COMMENT,
+      null
+    );
+    
+    const commentsToRemove: Comment[] = [];
+    let currentComment: Comment | null;
+    while ((currentComment = commentWalker.nextNode() as Comment | null)) {
+      commentsToRemove.push(currentComment);
+    }
+    
+    commentsToRemove.forEach((comment) => {
+      try {
+        comment.parentNode?.removeChild(comment);
+      } catch (error) {
+        // Comment may have already been removed, ignore
+      }
+    });
+
+    // 3. Remove data attributes that are not needed for automation
+    // Keep only essential attributes: data-id, data-interactive, data-visible, data-frame-id
+    const allElements = clone.querySelectorAll('*');
+    allElements.forEach((el) => {
+      const element = el as HTMLElement;
+      // Get all data-* attributes
+      const attributesToRemove: string[] = [];
+      for (const attr of Array.from(element.attributes)) {
+        if (
+          attr.name.startsWith('data-') &&
+          !['data-id', 'data-interactive', 'data-visible', 'data-frame-id'].includes(attr.name)
+        ) {
+          attributesToRemove.push(attr.name);
+        }
+      }
+      // Remove non-essential data attributes
+      attributesToRemove.forEach((attrName) => {
+        element.removeAttribute(attrName);
+      });
+    });
+
+    console.debug('[stripHeavyElements] Removed heavy elements and comments');
+  } catch (error) {
+    console.warn('[stripHeavyElements] Error stripping elements:', error);
+    // Continue even if stripping fails - better to send a larger payload than fail completely
+  }
+}
+
 function isInteractive(
   element: HTMLElement,
   style: CSSStyleDeclaration
@@ -144,12 +242,72 @@ function traverseDOM(node: Node, pageElements: HTMLElement[], frameId?: string):
 /**
  * getAnnotatedDom returns the pageElements array and a cloned DOM
  * with data-pe-idx attributes added to each element in the copy.
+ * 
+ * CRITICAL FIX: Payload Explosion (Issue #2)
+ * Before serialization, we strip heavy elements (script, style, svg, etc.)
+ * to dramatically reduce payload size.
+ * 
+ * Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #2 (Payload Explosion)
  */
 export default function getAnnotatedDOM() {
-  currentElements = [];
-  const frameId = getFrameId();
-  const result = traverseDOM(document.documentElement, currentElements, frameId);
-  return (result.clonedDOM as HTMLElement).outerHTML;
+  // CRITICAL FIX: Guard against page not ready during/after navigation
+  // After an action causes navigation, the content script may be called
+  // before the new page's DOM is ready. Return null to signal retry.
+  
+  try {
+    // Check 1: document must exist and be accessible
+    if (!document || typeof document.documentElement === 'undefined') {
+      console.warn('[getAnnotatedDOM] document is not accessible - page may be loading');
+      return null;
+    }
+    
+    // Check 2: document.documentElement must exist
+    if (!document.documentElement) {
+      console.warn('[getAnnotatedDOM] document.documentElement is null - page may be loading');
+      return null;
+    }
+    
+    // Check 3: document.readyState should be 'interactive' or 'complete'
+    // 'loading' means the document is still being parsed
+    if (document.readyState === 'loading') {
+      console.warn('[getAnnotatedDOM] document.readyState is "loading" - page not ready yet');
+      return null;
+    }
+    
+    // Check 4: document.documentElement should have basic HTML structure
+    if (!document.documentElement.tagName || document.documentElement.tagName.toLowerCase() !== 'html') {
+      console.warn('[getAnnotatedDOM] document.documentElement is not HTML element - page may be in invalid state');
+      return null;
+    }
+    
+    currentElements = [];
+    const frameId = getFrameId();
+    const result = traverseDOM(document.documentElement, currentElements, frameId);
+    
+    // CRITICAL FIX: Guard against null clonedDOM (defensive)
+    if (!result || !result.clonedDOM) {
+      console.warn('[getAnnotatedDOM] traverseDOM returned null result or clonedDOM');
+      return null;
+    }
+    
+    // CRITICAL FIX: Verify clonedDOM is actually an HTMLElement with necessary methods
+    const clonedElement = result.clonedDOM as HTMLElement;
+    if (!clonedElement || typeof clonedElement.outerHTML !== 'string') {
+      console.warn('[getAnnotatedDOM] clonedDOM does not have outerHTML - invalid element type');
+      return null;
+    }
+    
+    // CRITICAL FIX: Strip heavy elements before serialization
+    // This can reduce payload size by 80-90% on complex pages
+    stripHeavyElements(clonedElement);
+    
+    return clonedElement.outerHTML;
+  } catch (error) {
+    // Catch any unexpected errors during DOM extraction
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('[getAnnotatedDOM] Unexpected error during DOM extraction:', errorMessage);
+    return null;
+  }
 }
 
 // idempotent function to get a unique id for an element

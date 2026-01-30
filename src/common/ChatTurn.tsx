@@ -1,18 +1,12 @@
 /**
- * ChatTurn Component (Cursor/Manus Style)
- * 
- * Minimal turn-based layout - no bubbles, no heavy borders.
- * Clean document stream with typography hierarchy.
- * 
- * Structure:
- * - User message: Large, semi-bold text (the "header")
- * - AI response: Clean readable text with timeline for execution
- * - Separated by subtle hairline dividers
- * 
- * Reference: Cursor/Manus minimalist design aesthetic
+ * ChatTurn Component - Message bubble architecture
+ *
+ * - User messages: Right-aligned, blue/primary bubble.
+ * - Agent messages: Left-aligned, gray/muted with structured sections:
+ *   Thought (collapsible/italic), Action (code-like/badge), Observation (success/fail).
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Text,
@@ -20,8 +14,10 @@ import {
   HStack,
   useColorModeValue,
   Icon,
+  Collapse,
+  Badge,
 } from '@chakra-ui/react';
-import { FiUser, FiCpu, FiLoader } from 'react-icons/fi';
+import { FiLoader, FiChevronDown, FiChevronRight } from 'react-icons/fi';
 // Import type with alias to avoid naming conflict with component
 import type { ChatTurn as ChatTurnType } from '../helpers/groupHistoryIntoTurns';
 import ActionCard from './ActionCard';
@@ -41,14 +37,20 @@ interface ChatTurnProps {
 const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, isProcessing = false }) => {
   // Color definitions - ALL at component top level (before any conditional returns)
   const dividerColor = useColorModeValue('gray.100', 'gray.800');
-  const userTextColor = useColorModeValue('gray.900', 'gray.100');
+  const userBubbleBg = useColorModeValue('blue.500', 'blue.600');
+  const userBubbleText = useColorModeValue('white', 'white');
+  const agentBubbleBg = useColorModeValue('gray.100', 'gray.700');
+  const agentBubbleBorder = useColorModeValue('gray.200', 'gray.600');
   const aiTextColor = useColorModeValue('gray.700', 'gray.300');
+  const thoughtLabelColor = useColorModeValue('gray.500', 'gray.400');
   const mutedColor = useColorModeValue('gray.500', 'gray.500');
-  const iconColor = useColorModeValue('gray.400', 'gray.600');
   const errorTextColor = useColorModeValue('red.600', 'red.400');
   const successTextColor = useColorModeValue('green.600', 'green.400');
   const activeBorderColor = useColorModeValue('blue.400', 'blue.500');
   const processingColor = useColorModeValue('blue.500', 'blue.400');
+  const actionBadgeBg = useColorModeValue('gray.200', 'gray.600');
+  const actionBadgeText = useColorModeValue('gray.800', 'gray.100');
+  const errorBorderColor = useColorModeValue('red.400', 'red.500');
 
   // CRITICAL SAFETY CHECKS
   if (!turn) {
@@ -106,7 +108,6 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
       borderBottomColor={dividerColor}
       position="relative"
     >
-      {/* Active indicator - subtle left border */}
       {isActive && (
         <Box
           position="absolute"
@@ -119,110 +120,155 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
         />
       )}
 
-      <VStack align="stretch" spacing={4}>
-        {/* User Message (The Header) */}
-        <HStack align="flex-start" spacing={3}>
-          {/* User Icon */}
-          <Box pt={0.5}>
-            <Icon as={FiUser} boxSize={4} color={iconColor} />
-          </Box>
-          
-          {/* User Text - Large, Semi-bold */}
-          <Text
-            fontSize="md"
-            fontWeight="600"
-            color={userTextColor}
-            lineHeight="1.5"
-            flex="1"
+      <VStack align="stretch" spacing={3}>
+        {/* User message: right-aligned, blue/primary bubble */}
+        <Box display="flex" justifyContent="flex-end" w="100%">
+          <Box
+            maxW="85%"
+            px={4}
+            py={2}
+            borderRadius="lg"
+            bg={userBubbleBg}
+            color={userBubbleText}
           >
-            {userContent}
-          </Text>
-        </HStack>
+            <Text fontSize="sm" lineHeight="1.5">
+              {userContent}
+            </Text>
+          </Box>
+        </Box>
 
-        {/* AI Response Section */}
+        {/* Agent messages: left-aligned, gray bubble with Thought / Action / Observation */}
         {aiMessages.length > 0 && (
-          <VStack align="stretch" spacing={3} pl={7}>
+          <VStack align="stretch" spacing={3}>
             {aiMessages.map((aiMessage, aiIndex) => {
               if (!aiMessage || typeof aiMessage !== 'object') return null;
               if (!aiMessage.id) return null;
-              
-              const aiMessageKey = typeof aiMessage.id === 'string' 
-                ? aiMessage.id 
-                : `ai-message-${aiIndex}-${Date.now()}`;
-              
+
+              const aiMessageKey =
+                typeof aiMessage.id === 'string'
+                  ? aiMessage.id
+                  : `ai-message-${aiIndex}-${Date.now()}`;
+
               const displayEntry = convertToDisplayEntry(aiMessage);
               const isError = aiMessage.status === 'failure' || aiMessage.status === 'error';
               const isSuccess = aiMessage.status === 'success';
-              const isUserInputRequest = aiMessage.userQuestion && 
+              const isUserInputRequest =
+                aiMessage.userQuestion &&
                 (aiMessage.status === 'pending' || aiMessage.meta?.reasoning?.source === 'ASK_USER');
 
               return (
-                <Box key={aiMessageKey}>
-                  {/* Reasoning Badge (minimal, inline) */}
-                  {aiMessage.meta?.reasoning && (
-                    <Box mb={2}>
-                      <ReasoningBadge
-                        source={aiMessage.meta.reasoning.source}
-                        confidence={aiMessage.meta.reasoning.confidence}
-                        reasoning={aiMessage.meta.reasoning.reasoning}
-                        evidence={aiMessage.meta.reasoning.evidence}
-                        searchIteration={aiMessage.meta.reasoning.searchIteration}
+                <Box key={aiMessageKey} w="100%">
+                  <Box
+                    bg={agentBubbleBg}
+                    borderWidth="1px"
+                    borderColor={isError ? errorBorderColor : agentBubbleBorder}
+                    borderRadius="lg"
+                    px={3}
+                    py={3}
+                    w="100%"
+                  >
+                    {aiMessage.meta?.reasoning && (
+                      <Box mb={2}>
+                        <ReasoningBadge
+                          source={aiMessage.meta.reasoning.source}
+                          confidence={aiMessage.meta.reasoning.confidence}
+                          reasoning={aiMessage.meta.reasoning.reasoning}
+                          evidence={aiMessage.meta.reasoning.evidence}
+                          searchIteration={aiMessage.meta.reasoning.searchIteration}
+                        />
+                      </Box>
+                    )}
+
+                    {aiMessage.meta?.reasoning?.evidence && (
+                      <Box mb={2}>
+                        <EvidenceIndicator
+                          evidence={aiMessage.meta.reasoning.evidence}
+                          compact={true}
+                        />
+                      </Box>
+                    )}
+
+                    {isUserInputRequest && aiMessage.userQuestion && (
+                      <Box mb={3}>
+                        <UserInputPrompt
+                          question={
+                            typeof aiMessage.userQuestion === 'string'
+                              ? aiMessage.userQuestion
+                              : String(aiMessage.userQuestion || '')
+                          }
+                          missingInformation={
+                            Array.isArray(aiMessage.missingInformation)
+                              ? aiMessage.missingInformation
+                              : []
+                          }
+                          reasoning={aiMessage.meta?.reasoning?.reasoning}
+                        />
+                      </Box>
+                    )}
+
+                    {/* Thought: collapsible, default collapsed; whitespace-preserving */}
+                    {aiMessage.content && !isUserInputRequest && (
+                      <AgentThoughtSection
+                        content={
+                          typeof aiMessage.content === 'string'
+                            ? aiMessage.content
+                            : String(aiMessage.content || '')
+                        }
+                        color={isError ? errorTextColor : isSuccess ? successTextColor : aiTextColor}
+                        labelColor={thoughtLabelColor}
                       />
-                    </Box>
-                  )}
+                    )}
 
-                  {/* Evidence Indicator */}
-                  {aiMessage.meta?.reasoning?.evidence && (
-                    <Box mb={2}>
-                      <EvidenceIndicator 
-                        evidence={aiMessage.meta.reasoning.evidence} 
-                        compact={true}
-                      />
-                    </Box>
-                  )}
+                    {/* Action: code-like / badge */}
+                    {displayEntry && (
+                      <Box mt={2}>
+                        <Text fontSize="xs" color={thoughtLabelColor} mb={1}>
+                          Action
+                        </Text>
+                        <Badge
+                          bg={actionBadgeBg}
+                          color={actionBadgeText}
+                          fontFamily="mono"
+                          fontSize="xs"
+                          px={2}
+                          py={1}
+                          borderRadius="md"
+                        >
+                          {typeof displayEntry.action === 'string'
+                            ? displayEntry.action
+                            : String(displayEntry.action || '')}
+                        </Badge>
+                        <Box mt={2}>
+                          <ActionCard entry={displayEntry} compact />
+                        </Box>
+                      </Box>
+                    )}
 
-                  {/* User Input Prompt */}
-                  {isUserInputRequest && aiMessage.userQuestion && (
-                    <Box mb={3}>
-                      <UserInputPrompt
-                        question={typeof aiMessage.userQuestion === 'string' 
-                          ? aiMessage.userQuestion 
-                          : String(aiMessage.userQuestion || '')}
-                        missingInformation={Array.isArray(aiMessage.missingInformation) 
-                          ? aiMessage.missingInformation 
-                          : []}
-                        reasoning={aiMessage.meta?.reasoning?.reasoning}
-                      />
-                    </Box>
-                  )}
+                    {/* Observation / Result */}
+                    {(isSuccess || isError) && (
+                      <Box mt={2}>
+                        <Text
+                          fontSize="xs"
+                          color={isError ? errorTextColor : successTextColor}
+                          fontWeight="medium"
+                        >
+                          {isSuccess ? '✅ Success' : '❌ Failed'}
+                        </Text>
+                      </Box>
+                    )}
+                  </Box>
 
-                  {/* AI Thought/Content - Clean typography */}
-                  {aiMessage.content && !isUserInputRequest && (
-                    <Text
-                      fontSize="sm"
-                      lineHeight="1.7"
-                      color={isError ? errorTextColor : isSuccess ? successTextColor : aiTextColor}
-                      mb={displayEntry || (aiMessage.meta?.steps && aiMessage.meta.steps.length > 0) ? 3 : 0}
-                    >
-                      {typeof aiMessage.content === 'string' 
-                        ? aiMessage.content 
-                        : String(aiMessage.content || '')}
-                    </Text>
-                  )}
-
-                  {/* Action Card (inline, minimal) */}
-                  {displayEntry && (
-                    <Box mb={(aiMessage.meta?.steps && aiMessage.meta.steps.length > 0) ? 3 : 0}>
-                      <ActionCard entry={displayEntry} compact />
-                    </Box>
-                  )}
-
-                  {/* Execution Details (timeline style) */}
                   {aiMessage.meta?.steps && aiMessage.meta.steps.length > 0 && (
-                    <ExecutionDetails
-                      steps={aiMessage.meta.steps}
-                      messageId={typeof aiMessage.id === 'string' ? aiMessage.id : String(aiMessage.id || aiMessageKey)}
-                    />
+                    <Box mt={2} pl={2}>
+                      <ExecutionDetails
+                        steps={aiMessage.meta.steps}
+                        messageId={
+                          typeof aiMessage.id === 'string'
+                            ? aiMessage.id
+                            : String(aiMessage.id || aiMessageKey)
+                        }
+                      />
+                    </Box>
                   )}
                 </Box>
               );
@@ -230,29 +276,103 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
           </VStack>
         )}
 
-        {/* Processing indicator */}
+        {/* Processing indicator (aria-busy for screen readers per Chrome a11y) */}
         {isActive && isProcessing && aiMessages.length === 0 && (
-          <HStack spacing={2} pl={7}>
-            <Icon
-              as={FiLoader}
-              boxSize={3.5}
-              color={processingColor}
-              sx={{
-                animation: 'spin 1s linear infinite',
-                '@keyframes spin': {
-                  '0%': { transform: 'rotate(0deg)' },
-                  '100%': { transform: 'rotate(360deg)' },
-                },
-              }}
-            />
-            <Text fontSize="sm" color={mutedColor}>
-              Thinking...
-            </Text>
-          </HStack>
+          <Box
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            aria-label="Agent is thinking"
+            display="flex"
+            justifyContent="flex-start"
+            bg={agentBubbleBg}
+            borderWidth="1px"
+            borderColor={agentBubbleBorder}
+            borderRadius="lg"
+            px={3}
+            py={2}
+          >
+            <HStack spacing={2}>
+              <Icon
+                as={FiLoader}
+                boxSize={3.5}
+                color={processingColor}
+                aria-hidden
+                sx={{
+                  animation: 'spin 1s linear infinite',
+                  '@keyframes spin': {
+                    '0%': { transform: 'rotate(0deg)' },
+                    '100%': { transform: 'rotate(360deg)' },
+                  },
+                }}
+              />
+              <Text fontSize="sm" color={mutedColor}>
+                Thinking...
+              </Text>
+            </HStack>
+          </Box>
         )}
       </VStack>
     </Box>
   );
 };
+
+/** Collapsible "View Reasoning" section; default collapsed to keep chat clean (keyboard + a11y) */
+function AgentThoughtSection({
+  content,
+  color,
+  labelColor,
+}: {
+  content: string;
+  color: string;
+  labelColor: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const displayContent = content.trim() ? content : '—';
+  const toggle = () => setOpen((o) => !o);
+  return (
+    <Box mb={2}>
+      <HStack
+        as="button"
+        type="button"
+        spacing={1}
+        cursor="pointer"
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggle();
+          }
+        }}
+        userSelect="none"
+        aria-expanded={open}
+        aria-label={open ? 'Collapse reasoning' : 'View reasoning'}
+        textAlign="left"
+        bg="transparent"
+        border="none"
+        p={0}
+        _focusVisible={{ boxShadow: 'outline' }}
+      >
+        <Icon as={open ? FiChevronDown : FiChevronRight} boxSize={3} color={labelColor} aria-hidden />
+        <Text fontSize="xs" color={labelColor} fontStyle="italic">
+          {open ? 'Thinking…' : 'View Reasoning'}
+        </Text>
+      </HStack>
+      <Collapse in={open}>
+        <Text
+          fontSize="sm"
+          lineHeight="1.6"
+          color={color}
+          fontStyle="italic"
+          pl={4}
+          pt={1}
+          whiteSpace="pre-wrap"
+        >
+          {displayContent}
+        </Text>
+      </Collapse>
+    </Box>
+  );
+}
 
 export default ChatTurnComponent;

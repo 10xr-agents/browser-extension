@@ -99,37 +99,116 @@ async function getCenterCoordinates(objectId: string) {
 // NAVIGATION & BROWSER CONTROL
 // ============================================================================
 
+/**
+ * Wait for tab to complete loading after navigation
+ * CRITICAL: Content script dies on navigation, need to wait for new page to be ready
+ */
+async function waitForTabComplete(tabId: number, timeoutMs: number = 15000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      console.warn('[Navigation] Timeout waiting for tab to complete loading');
+      resolve(false);
+    }, timeoutMs);
+    
+    const listener = (
+      updatedTabId: number,
+      changeInfo: chrome.tabs.TabChangeInfo
+    ) => {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(true);
+      }
+    };
+    
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
 export async function executeNavigate(args: { url: string; newTab?: boolean }) {
   const tabId = useAppState.getState().currentTask.tabId;
   
   if (args.newTab) {
-    await chrome.tabs.create({ url: args.url, active: true });
+    const newTab = await chrome.tabs.create({ url: args.url, active: true });
+    // Wait for new tab to complete loading
+    if (newTab.id) {
+      await waitForTabComplete(newTab.id, 15000);
+    }
+    await sleep(500); // Small buffer for content script initialization
   } else {
+    // CRITICAL FIX: Use proper wait for navigation completion
+    // The content script on the current page will die the moment navigation starts
+    // We need to wait for the new page to fully load before continuing
+    
+    // Mark that we're navigating (for session state preservation)
+    await chrome.storage.local.set({ 
+      isNavigating: true, 
+      navigatingTabId: tabId,
+      navigateStartTime: Date.now() 
+    });
+    
+    // Trigger navigation
     await chrome.tabs.update(tabId, { url: args.url });
-    await sleep(2000); // Wait for navigation
+    
+    // Wait for tab to complete loading
+    const completed = await waitForTabComplete(tabId, 15000);
+    
+    // Clear navigation flag
+    await chrome.storage.local.set({ isNavigating: false });
+    
+    if (!completed) {
+      console.warn('[Navigation] Tab did not complete loading within timeout');
+    }
+    
+    // Additional wait for content script to initialize after page load
+    // The content script runs at document_idle, so we need a small buffer
+    await sleep(1000);
   }
 }
 
 export async function executeGoBack() {
+  const tabId = useAppState.getState().currentTask.tabId;
+  
   // Enable Page domain if needed
   try {
     await sendCommand('Page.enable');
   } catch {
     // Already enabled or not critical
   }
+  
+  // Mark navigation state
+  await chrome.storage.local.set({ isNavigating: true, navigatingTabId: tabId });
+  
   await sendCommand('Page.goBack');
-  await sleep(2000);
+  
+  // Wait for page to complete loading
+  await waitForTabComplete(tabId, 15000);
+  await chrome.storage.local.set({ isNavigating: false });
+  
+  await sleep(1000); // Buffer for content script
 }
 
 export async function executeGoForward() {
+  const tabId = useAppState.getState().currentTask.tabId;
+  
   // Enable Page domain if needed
   try {
     await sendCommand('Page.enable');
   } catch {
     // Already enabled or not critical
   }
+  
+  // Mark navigation state
+  await chrome.storage.local.set({ isNavigating: true, navigatingTabId: tabId });
+  
   await sendCommand('Page.goForward');
-  await sleep(2000);
+  
+  // Wait for page to complete loading
+  await waitForTabComplete(tabId, 15000);
+  await chrome.storage.local.set({ isNavigating: false });
+  
+  await sleep(1000); // Buffer for content script
 }
 
 export async function executeWait(args: { seconds?: number }) {

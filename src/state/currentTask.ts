@@ -34,8 +34,17 @@ import {
   type DOMChangeReport,
   type ElementInfo,
 } from '../helpers/domWaiting';
-import { persistTaskState, getTaskIdForTab } from '../helpers/taskPersistence';
+import { 
+  persistTaskState, 
+  getTaskIdForTab, 
+  persistActiveTaskState, 
+  clearActiveTaskState,
+  updateActiveTaskTimestamp,
+  type ActiveTaskState,
+} from '../helpers/taskPersistence';
 import { callRPC } from '../helpers/pageRPC';
+import { startKeepAlive, stopKeepAlive } from '../helpers/serviceWorkerKeepAlive';
+import { validatePayloadSize, PayloadTooLargeError, PAYLOAD_TOO_LARGE_MESSAGE } from '../helpers/payloadValidation';
 
 /**
  * Generate a UUID v4
@@ -249,23 +258,32 @@ function setupNewTabListeners() {
       }
       
       // Handle tab switch
+      // PHASE 1 FIX: When user manually switches tabs during a running task, PAUSE the task
+      // instead of auto-following. This prevents DOM mismatch errors and confusion.
+      // Auto-follow only happens for NEW tabs opened by agent actions (handled above).
+      // Reference: ARCHITECTURE_REVIEW.md §4.3 (Handle Tab Switch in Side Panel)
       if (changes.tabSwitched && changes.tabSwitched.newValue) {
         const switchInfo = changes.tabSwitched.newValue;
         
         if (currentTask.tabId !== switchInfo.tabId) {
-          console.log('Tab switched during task execution:', {
-            oldTabId: currentTask.tabId,
+          console.log('[TabSwitch] User switched away from automation tab:', {
+            originalTabId: currentTask.tabId,
             newTabId: switchInfo.tabId,
           });
           
-          // Update active tab ID using useAppState.setState with Immer
+          // PHASE 1 FIX: Pause the task instead of auto-following
+          // The user intentionally switched tabs, so we should pause and let them decide
           useAppState.setState((draft: any) => {
-            draft.currentTask.tabId = switchInfo.tabId;
+            // Don't update tabId - keep it pointing to original automation tab
+            // If user wants to continue on new tab, they should start a new task
+            draft.currentTask.status = 'interrupted';
           });
           
-          // Add system message
+          // Add system message explaining the pause
           useAppState.getState().currentTask.actions.addAssistantMessage(
-            `[System] User switched to tab ${switchInfo.tabId}. Agent focus updated.`,
+            `[System] Task paused - you switched away from the automation tab. ` +
+            `The task was running on tab ${currentTask.tabId}. ` +
+            `To continue, switch back to that tab and run a new command, or start fresh on this tab.`,
             'system',
             { name: 'system', args: {} }
           );
@@ -386,6 +404,9 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
       // Don't start if no instructions (unless we're resuming from user input with new instructions)
       if (!safeInstructions && !isWaitingForInput) return;
 
+      // Track if this is a truly new task (not resuming from user input or navigation)
+      let isNewTask = false;
+      
       // If resuming from user input, don't clear messages/history
       // Just update instructions and continue
       if (isWaitingForInput) {
@@ -402,7 +423,11 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         
         // Add user's response as a new user message
         get().currentTask.actions.addUserMessage(safeInstructions);
+        // NOT a new task - we're resuming after user answered a question
+        isNewTask = false;
       } else {
+        // This IS a new task
+        isNewTask = true;
         // New task - preserve existing sessionId to continue the same chat context
         // Only clear task-specific state, not sessionId (sessionId is only cleared via startNewChat)
         const existingSessionId = get().currentTask.sessionId;
@@ -463,6 +488,9 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         // Add user message to chat
         get().currentTask.actions.addUserMessage(safeInstructions);
       }
+
+      // Clear input immediately after message is dispatched (fix: input not flushing after send)
+      get().ui.actions.setInstructions('');
       
       // Generate session title from first few words of instructions
       const sessionTitle = safeInstructions.length > 50 
@@ -470,9 +498,23 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         : safeInstructions;
 
       try {
+        // Get ALL tabs in the current window to debug tab selection
+        const allTabs = await chrome.tabs.query({ currentWindow: true });
+        console.log('[CurrentTask] All tabs in window:', allTabs.map(t => ({
+          id: t.id,
+          active: t.active,
+          url: t.url?.substring(0, 50) + '...',
+        })));
+        
         const activeTab = (
           await chrome.tabs.query({ active: true, currentWindow: true })
         )[0];
+
+        console.log('[CurrentTask] Selected active tab:', {
+          id: activeTab?.id,
+          url: activeTab?.url,
+          active: activeTab?.active,
+        });
 
         if (!activeTab.id) throw new Error('No active tab found');
         if (!activeTab.url) throw new Error('No active tab URL found');
@@ -485,15 +527,47 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           throw new Error('Current page is not a valid web page');
         }
 
+        console.log(`[CurrentTask] Starting task on tab ${tabId}: ${url}`);
+
         set((state) => {
           state.currentTask.tabId = tabId;
           state.currentTask.url = url;
         });
 
+        // CRITICAL FIX: Clear old taskId from storage when starting a NEW task
+        // This prevents recovering a stale taskId from a previous failed/completed task
+        // We clear both the tab-specific storage AND the active task state
+        // BUT: Only do this for truly new tasks, not when resuming from user input
+        if (isNewTask) {
+          try {
+            await chrome.storage.local.remove([`task_${tabId}`, 'active_task_state']);
+            console.debug('[CurrentTask] Cleared old taskId from storage for new task');
+          } catch (clearError) {
+            console.warn('[CurrentTask] Failed to clear old taskId from storage:', clearError);
+          }
+        }
+
         await attachDebugger(tabId);
         await disableIncompatibleExtensions();
 
+        // CRITICAL FIX: Persist active task state for navigation survival (Issue #3)
+        // This allows the task to resume after page navigations
+        // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
+        const taskId = get().currentTask.taskId;
+        const sessionId = get().currentTask.sessionId;
+        await persistActiveTaskState({
+          taskId: taskId || `pending_${Date.now()}`, // Use pending ID if no taskId yet
+          sessionId: sessionId,
+          tabId,
+          status: 'running',
+          currentUrl: url,
+          lastActionTimestamp: Date.now(),
+          instructions: safeInstructions,
+        });
+
         let hasOrgKnowledgeShown = false; // Track if we've shown the dialog
+        let consecutiveDomFailures = 0; // Track consecutive DOM extraction failures
+        const MAX_DOM_FAILURES = 10; // Maximum consecutive failures before giving up
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
@@ -501,15 +575,61 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
 
           setActionStatus('pulling-dom');
           let domResult: SimplifiedDomResult | null = null;
-          try {
-            domResult = await getSimplifiedDom(tabId);
+          
+          // CRITICAL FIX: Retry DOM extraction with proper wait for content script
+          // After navigation, the content script needs time to initialize on the new page
+          let domRetryCount = 0;
+          const MAX_DOM_RETRIES = 8;
+          const DOM_RETRY_DELAY = 1500; // 1.5 seconds between retries
+          
+          while (domRetryCount < MAX_DOM_RETRIES) {
+            try {
+              domResult = await getSimplifiedDom(tabId);
+              
+              if (domResult) {
+                // Success! Reset failure counter
+                consecutiveDomFailures = 0;
+                break;
+              }
+              
+              // DOM was null - page may be loading
+              domRetryCount++;
+              if (domRetryCount < MAX_DOM_RETRIES) {
+                console.log(`[CurrentTask] DOM extraction returned null (attempt ${domRetryCount}/${MAX_DOM_RETRIES}), waiting...`);
+                await sleep(DOM_RETRY_DELAY);
+              }
+            } catch (error: unknown) {
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              domRetryCount++;
+              
+              // Check if this is a content script communication error (common after navigation)
+              const isContentScriptError = errorMessage.includes('Receiving end does not exist') ||
+                errorMessage.includes('Could not establish connection') ||
+                errorMessage.includes('querySelectorAll') ||
+                errorMessage.includes('Cannot read properties of null');
+              
+              if (isContentScriptError && domRetryCount < MAX_DOM_RETRIES) {
+                console.log(`[CurrentTask] Content script not ready (attempt ${domRetryCount}/${MAX_DOM_RETRIES}): ${errorMessage}`);
+                console.log('[CurrentTask] Waiting for content script to initialize...');
+                await sleep(DOM_RETRY_DELAY);
+              } else if (domRetryCount >= MAX_DOM_RETRIES) {
+                console.error('[CurrentTask] DOM extraction failed after all retries:', errorMessage);
+                throw error; // Let outer catch handle it
+              } else {
+                throw error; // Non-retryable error
+              }
+            }
+          }
 
-            // Guard: content script may not be loaded (getSimplifiedDom returns null)
-            if (!domResult) {
+          // Guard: content script may not be loaded (getSimplifiedDom returns null after all retries)
+          if (!domResult) {
+            consecutiveDomFailures++;
+            
+            if (consecutiveDomFailures >= MAX_DOM_FAILURES) {
               set((state) => {
                 state.currentTask.displayHistory.push({
                   thought:
-                    'Error: Could not extract page content. The content script may not be loaded. Try refreshing the page or closing Chrome DevTools if it\'s open.',
+                    'Error: Could not extract page content after multiple attempts. The content script may not be loaded. Try refreshing the page or closing Chrome DevTools if it\'s open.',
                   action: '',
                   parsedAction: {
                     error: 'Could not extract page content. Content script may not be loaded.',
@@ -519,12 +639,20 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               });
               break;
             }
+            
+            // Wait and try again on next iteration
+            console.log(`[CurrentTask] DOM extraction failed, will retry (failure ${consecutiveDomFailures}/${MAX_DOM_FAILURES})...`);
+            await sleep(2000);
+            continue;
+          }
 
+          try {
             // CRITICAL FIX: Merge virtual elements (text node menu items) into hybridElements
             // BEFORE sending DOM to server, so LLM can see and click them
             if (domResult.hybridElements) {
               try {
-                const snapshot = await getInteractiveElementSnapshot();
+                // Pass tabId to ensure we target the correct tab
+                const snapshot = await getInteractiveElementSnapshot(tabId);
                 const virtualElementsMap = new Map<number, { x: number; y: number }>();
                 let nextVirtualIndex = domResult.hybridElements.length;
                 
@@ -642,7 +770,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             // Virtual elements are detected client-side from text nodes in ul[name="menuEntries"]
             // They need to be added to hybridElements so the LLM can see and click them
             try {
-              const snapshot = await getInteractiveElementSnapshot();
+              // Pass tabId to ensure we target the correct tab
+              const snapshot = await getInteractiveElementSnapshot(tabId);
               const virtualElementsMap = new Map<number, { x: number; y: number }>();
               let nextVirtualIndex = hybridElements.length;
               
@@ -726,6 +855,37 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           setActionStatus('transforming-dom');
           const currentDom = templatize(html);
 
+          // CRITICAL FIX: Validate payload size before sending to backend
+          // Prevents 413 Payload Too Large errors and reduces API costs
+          // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #2 (Payload Explosion)
+          try {
+            validatePayloadSize(currentDom);
+          } catch (payloadError) {
+            if (payloadError instanceof PayloadTooLargeError) {
+              console.error('[CurrentTask] DOM payload too large:', {
+                actualSize: payloadError.actualSize,
+                maxSize: payloadError.maxSize,
+              });
+              
+              // Add error to history
+              set((state) => {
+                state.currentTask.displayHistory.push({
+                  thought: `Error: ${PAYLOAD_TOO_LARGE_MESSAGE}`,
+                  action: '',
+                  parsedAction: {
+                    error: PAYLOAD_TOO_LARGE_MESSAGE,
+                  },
+                });
+                state.currentTask.status = 'error';
+              });
+              
+              // Show user-friendly error
+              onError(PAYLOAD_TOO_LARGE_MESSAGE);
+              break;
+            }
+            throw payloadError; // Re-throw unexpected errors
+          }
+
           if (wasStopped()) break;
           setActionStatus('performing-query');
 
@@ -772,21 +932,9 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               console.warn('Failed to capture current URL before interact:', urlError);
             }
 
-            // Recovery fallback: if still no taskId but we have sessionId, try GET /api/session/{sessionId}/task/active
-            if (!currentTaskId && currentSessionId && currentUrl) {
-              try {
-                const active = await apiClient.getActiveTask(currentSessionId, currentUrl);
-                if (active?.taskId) {
-                  currentTaskId = active.taskId;
-                  set((state) => {
-                    state.currentTask.taskId = currentTaskId!;
-                  });
-                  console.debug('[CurrentTask] Recovered taskId from API:', currentTaskId.slice(0, 8) + '...');
-                }
-              } catch {
-                // Ignore; proceed without taskId (server will start new task)
-              }
-            }
+            // NOTE: Removed API fallback for taskId recovery (GET /api/session/{sessionId}/task/active)
+            // We now rely solely on chrome.storage.local for task persistence (Issue #3 fix)
+            // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
 
             // Get debug actions for logging
             const addNetworkLog = get().debug?.actions.addNetworkLog;
@@ -816,30 +964,42 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 }
               : undefined;
 
+            // CRITICAL FIX: Start keep-alive heartbeat before LLM API call
+            // This prevents Chrome from killing the Service Worker during long-running requests
+            // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #1 (Service Worker Death)
+            await startKeepAlive();
+
             // Call agentInteract API with logging, error, DOM change, and client observations
             // IMPORTANT: Use currentUrl (just captured above), not the stale 'url' from task start
-            const response = await apiClient.agentInteract(
-              currentUrl,
-              safeInstructions,
-              currentDom,
-              currentTaskId,
-              currentSessionId,
-              lastActionStatus,
-              lastActionError,
-              lastActionResultPayload,
-              addNetworkLog ? (log) => {
-                addNetworkLog({
-                  method: log.method,
-                  endpoint: log.endpoint,
-                  request: log.request,
-                  response: log.response,
-                  duration: log.duration,
-                  error: log.error,
-                });
-              } : undefined,
-              lastDOMChanges || undefined,
-              clientObservations
-            );
+            let response: Awaited<ReturnType<typeof apiClient.agentInteract>>;
+            try {
+              response = await apiClient.agentInteract(
+                currentUrl,
+                safeInstructions,
+                currentDom,
+                currentTaskId,
+                currentSessionId,
+                lastActionStatus,
+                lastActionError,
+                lastActionResultPayload,
+                addNetworkLog ? (log) => {
+                  addNetworkLog({
+                    method: log.method,
+                    endpoint: log.endpoint,
+                    request: log.request,
+                    response: log.response,
+                    duration: log.duration,
+                    error: log.error,
+                  });
+                } : undefined,
+                lastDOMChanges || undefined,
+                clientObservations
+              );
+            } finally {
+              // CRITICAL: Stop keep-alive as soon as API response is received
+              // This is in the finally block to ensure cleanup even on errors
+              await stopKeepAlive();
+            }
 
             // Normalize response: support top-level or wrapped { data: { ... } } (backend contract)
             const res = response && typeof response === 'object' && 'data' in response && response.data && typeof response.data === 'object'
@@ -1237,7 +1397,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             // Capture DOM snapshot BEFORE executing action (for change tracking)
             let beforeSnapshot: Map<string, ElementInfo> = new Map();
             try {
-              beforeSnapshot = await getInteractiveElementSnapshot();
+              // Pass tabId to ensure we target the correct tab
+              beforeSnapshot = await getInteractiveElementSnapshot(tabId);
             } catch (snapshotError: unknown) {
               console.warn('Failed to capture DOM snapshot before action:', snapshotError);
             }
@@ -1306,88 +1467,23 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 console.warn('Failed to store last action time:', error);
               }
               
-              // Wait for DOM stability before next capture (prevents "snapshot race" — INTERACT_FLOW_WALKTHROUGH § Stability Wait)
-              // minWait 500ms, DOM settled 300ms, network idle; dropdown clicks use longer waits
-              try {
-                const waitConfig = isDropdownClick
-                  ? {
-                      minWait: 1000, // Wait at least 1 second for dropdown to open
-                      maxWait: 8000, // Max 8 seconds for menu items to appear
-                      stabilityThreshold: 500, // DOM stable for 500ms (longer for dropdowns)
-                    }
-                  : {
-                      minWait: 500,
-                      maxWait: 5000, // Max 5 seconds for dropdown/menu detection
-                      stabilityThreshold: 300, // DOM stable for 300ms
-                    };
+              // CRITICAL FIX: Update active task timestamp (Issue #3)
+              // This prevents the task from being considered stale during long operations
+              // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
+              await updateActiveTaskTimestamp();
+              
+              // CRITICAL FIX: Detect navigation actions BEFORE trying to access content script
+              // Navigation actions (navigate, goBack, goForward, search) kill the content script
+              // on the old page, so waitForDOMChangesAfterAction will fail
+              const navigationActions = ['navigate', 'goBack', 'goForward', 'search'];
+              const isNavigationAction = navigationActions.includes(actionName);
+              
+              if (isNavigationAction) {
+                // For navigation actions, the content script died - DON'T try to get DOM changes
+                // Instead, wait for the new page to load and content script to initialize
+                console.log('[CurrentTask] Navigation action detected, waiting for new page...');
                 
-                console.log('Waiting for DOM changes after action', {
-                  action: actionString,
-                  isDropdownClick,
-                  waitConfig,
-                  beforeSnapshotSize: beforeSnapshot.size,
-                });
-                
-                domChangeReport = await waitForDOMChangesAfterAction(beforeSnapshot, waitConfig);
-                
-                console.log('DOM changes detected', {
-                  addedCount: domChangeReport.addedElements.length,
-                  removedCount: domChangeReport.removedElements.length,
-                  dropdownDetected: domChangeReport.dropdownDetected,
-                  dropdownItemsCount: domChangeReport.dropdownItems?.length || 0,
-                  stabilizationTime: domChangeReport.stabilizationTime,
-                  addedElements: domChangeReport.addedElements.slice(0, 5).map(el => ({
-                    tagName: el.tagName,
-                    role: el.role,
-                    text: el.text?.substring(0, 30),
-                    id: el.id,
-                    interactive: el.interactive,
-                  })),
-                });
-                
-                // Log DOM changes for debugging
-                if (domChangeReport.mutationCount > 0) {
-                  console.log(formatDOMChangeReport(domChangeReport));
-                }
-                
-                // If dropdown detected, add context to execution result
-                if (domChangeReport.dropdownDetected && domChangeReport.dropdownItems) {
-                  const dropdownContext = `Dropdown menu appeared with ${domChangeReport.dropdownItems.length} options: ${
-                    domChangeReport.dropdownItems.slice(0, 5).map(i => i.text).filter(Boolean).join(', ')
-                  }${domChangeReport.dropdownItems.length > 5 ? '...' : ''}`;
-                  
-                  console.log('Dropdown menu detected after click:', {
-                    itemCount: domChangeReport.dropdownItems.length,
-                    items: domChangeReport.dropdownItems.map(i => ({
-                      text: i.text,
-                      role: i.role,
-                      id: i.id,
-                      interactive: i.interactive,
-                    })),
-                    stabilizationTime: domChangeReport.stabilizationTime,
-                  });
-                  
-                  // Enhance execution result with dropdown context
-                  if (executionResult) {
-                    executionResult.actualState = executionResult.actualState 
-                      ? `${executionResult.actualState}. ${dropdownContext}`
-                      : dropdownContext;
-                  }
-                  
-                  // If dropdown was detected but no menu items found, log warning
-                  if (domChangeReport.dropdownItems.length === 0) {
-                    console.warn('Dropdown detected but no menu items found - menu items may not be interactive yet');
-                  }
-                } else if (isDropdownClick && !domChangeReport.dropdownDetected) {
-                  // If we clicked a dropdown but didn't detect it, log warning
-                  console.warn('Clicked dropdown button but dropdown not detected - menu may not have appeared', {
-                    elementId: actionArgs && 'elementId' in actionArgs ? actionArgs.elementId : 'unknown',
-                    addedElements: domChangeReport.addedElements.length,
-                    removedElements: domChangeReport.removedElements.length,
-                  });
-                }
-                
-                // Capture URL AFTER action execution (for detecting navigation)
+                // Capture URL AFTER navigation
                 let afterUrl: string = beforeUrl;
                 try {
                   const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1395,51 +1491,210 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     afterUrl = currentTab.url;
                   }
                 } catch (urlError: unknown) {
-                  console.warn('Failed to capture URL after action:', urlError);
+                  console.warn('Failed to capture URL after navigation:', urlError);
                 }
                 
                 const urlChanged = beforeUrl !== afterUrl;
-                if (urlChanged) {
-                  console.log('URL changed after action:', {
-                    action: actionString,
-                    beforeUrl,
-                    afterUrl,
-                  });
-                }
-
-                // Did any network request occur during/after action? (for clientObservations.didNetworkOccur)
-                let didNetworkOccur = false;
-                try {
-                  didNetworkOccur = (await callRPC('getDidNetworkOccurSinceMark', [], 1, tabId)) ?? false;
-                } catch {
-                  // Non-fatal
+                console.log('[CurrentTask] Navigation result:', { beforeUrl, afterUrl, urlChanged });
+                
+                // Wait for new page's content script to be ready
+                console.log('[CurrentTask] Waiting for new page content script...');
+                await sleep(2000); // Initial wait for page to start loading
+                
+                // Try to ping the content script to verify it's ready
+                let contentScriptReady = false;
+                for (let attempt = 0; attempt < 8; attempt++) {
+                  try {
+                    // Try to call a simple RPC to verify content script is responsive
+                    await callRPC('checkNetworkIdle', [], 1, tabId);
+                    contentScriptReady = true;
+                    console.log(`[CurrentTask] Content script ready after ${attempt + 1} attempt(s)`);
+                    break;
+                  } catch (pingError) {
+                    console.debug(`[CurrentTask] Content script not ready (attempt ${attempt + 1}/8), waiting...`);
+                    await sleep(1500); // Wait 1.5 seconds before retry
+                  }
                 }
                 
-                // Store DOM changes in state for next API call (including URL change info for verification)
+                if (!contentScriptReady) {
+                  console.warn('[CurrentTask] Content script still not ready after navigation - will retry in DOM extraction');
+                }
+                
+                // Store minimal DOM changes for navigation (no actual DOM diff available)
                 set((state) => {
                   state.currentTask.lastDOMChanges = {
-                    addedCount: domChangeReport!.addedElements.length,
-                    removedCount: domChangeReport!.removedElements.length,
-                    dropdownDetected: domChangeReport!.dropdownDetected,
-                    dropdownOptions: domChangeReport!.dropdownItems?.map(i => i.text).filter(Boolean) as string[] | undefined,
-                    stabilizationTime: domChangeReport!.stabilizationTime,
-                    // Include URL change info for server-side verification
+                    addedCount: 0,
+                    removedCount: 0,
+                    dropdownDetected: false,
+                    stabilizationTime: 0,
                     previousUrl: beforeUrl,
                     urlChanged,
-                    didNetworkOccur,
+                    didNetworkOccur: true, // Navigation always involves network
                   };
-                  // Update stored URL if it changed
                   if (urlChanged) {
                     state.currentTask.url = afterUrl;
                   }
                 });
-              } catch (domWaitError: unknown) {
-                console.warn('DOM change tracking failed, falling back to fixed wait:', domWaitError);
-                await sleep(2000); // Fallback to fixed wait
-                // Clear DOM changes on failure
-                set((state) => {
-                  state.currentTask.lastDOMChanges = null;
-                });
+              } else {
+                // For non-navigation actions, use normal DOM change tracking
+                // Wait for DOM stability before next capture (prevents "snapshot race" — INTERACT_FLOW_WALKTHROUGH § Stability Wait)
+                // minWait 500ms, DOM settled 300ms, network idle; dropdown clicks use longer waits
+                try {
+                  const waitConfig = isDropdownClick
+                    ? {
+                        minWait: 1000, // Wait at least 1 second for dropdown to open
+                        maxWait: 8000, // Max 8 seconds for menu items to appear
+                        stabilityThreshold: 500, // DOM stable for 500ms (longer for dropdowns)
+                      }
+                    : {
+                        minWait: 500,
+                        maxWait: 5000, // Max 5 seconds for dropdown/menu detection
+                        stabilityThreshold: 300, // DOM stable for 300ms
+                      };
+                  
+                  console.log('Waiting for DOM changes after action', {
+                    action: actionString,
+                    isDropdownClick,
+                    waitConfig,
+                    beforeSnapshotSize: beforeSnapshot.size,
+                  });
+                  
+                  // Pass tabId to ensure we target the correct tab
+                  domChangeReport = await waitForDOMChangesAfterAction(beforeSnapshot, waitConfig, tabId);
+                  
+                  console.log('DOM changes detected', {
+                    addedCount: domChangeReport.addedElements.length,
+                    removedCount: domChangeReport.removedElements.length,
+                    dropdownDetected: domChangeReport.dropdownDetected,
+                    dropdownItemsCount: domChangeReport.dropdownItems?.length || 0,
+                    stabilizationTime: domChangeReport.stabilizationTime,
+                    addedElements: domChangeReport.addedElements.slice(0, 5).map(el => ({
+                      tagName: el.tagName,
+                      role: el.role,
+                      text: el.text?.substring(0, 30),
+                      id: el.id,
+                      interactive: el.interactive,
+                    })),
+                  });
+                  
+                  // Log DOM changes for debugging
+                  if (domChangeReport.mutationCount > 0) {
+                    console.log(formatDOMChangeReport(domChangeReport));
+                  }
+                  
+                  // If dropdown detected, add context to execution result
+                  if (domChangeReport.dropdownDetected && domChangeReport.dropdownItems) {
+                    const dropdownContext = `Dropdown menu appeared with ${domChangeReport.dropdownItems.length} options: ${
+                      domChangeReport.dropdownItems.slice(0, 5).map(i => i.text).filter(Boolean).join(', ')
+                    }${domChangeReport.dropdownItems.length > 5 ? '...' : ''}`;
+                    
+                    console.log('Dropdown menu detected after click:', {
+                      itemCount: domChangeReport.dropdownItems.length,
+                      items: domChangeReport.dropdownItems.map(i => ({
+                        text: i.text,
+                        role: i.role,
+                        id: i.id,
+                        interactive: i.interactive,
+                      })),
+                      stabilizationTime: domChangeReport.stabilizationTime,
+                    });
+                    
+                    // Enhance execution result with dropdown context
+                    if (executionResult) {
+                      executionResult.actualState = executionResult.actualState 
+                        ? `${executionResult.actualState}. ${dropdownContext}`
+                        : dropdownContext;
+                    }
+                    
+                    // If dropdown was detected but no menu items found, log warning
+                    if (domChangeReport.dropdownItems.length === 0) {
+                      console.warn('Dropdown detected but no menu items found - menu items may not be interactive yet');
+                    }
+                  } else if (isDropdownClick && !domChangeReport.dropdownDetected) {
+                    // If we clicked a dropdown but didn't detect it, log warning
+                    console.warn('Clicked dropdown button but dropdown not detected - menu may not have appeared', {
+                      elementId: actionArgs && 'elementId' in actionArgs ? actionArgs.elementId : 'unknown',
+                      addedElements: domChangeReport.addedElements.length,
+                      removedElements: domChangeReport.removedElements.length,
+                    });
+                  }
+                  
+                  // Capture URL AFTER action execution (for detecting navigation caused by click)
+                  let afterUrl: string = beforeUrl;
+                  try {
+                    const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                    if (currentTab?.url) {
+                      afterUrl = currentTab.url;
+                    }
+                  } catch (urlError: unknown) {
+                    console.warn('Failed to capture URL after action:', urlError);
+                  }
+                  
+                  const urlChanged = beforeUrl !== afterUrl;
+                  if (urlChanged) {
+                    console.log('URL changed after action (navigation detected):', {
+                      action: actionString,
+                      beforeUrl,
+                      afterUrl,
+                    });
+                    
+                    // Wait for new page's content script to be ready after click-triggered navigation
+                    console.log('[CurrentTask] Waiting for new page content script after click-triggered navigation...');
+                    await sleep(2000);
+                    
+                    // Try to ping the content script
+                    let contentScriptReady = false;
+                    for (let attempt = 0; attempt < 5; attempt++) {
+                      try {
+                        await callRPC('checkNetworkIdle', [], 1, tabId);
+                        contentScriptReady = true;
+                        console.log(`[CurrentTask] Content script ready after ${attempt + 1} attempt(s)`);
+                        break;
+                      } catch (pingError) {
+                        console.debug(`[CurrentTask] Content script not ready (attempt ${attempt + 1}/5), waiting...`);
+                        await sleep(1000);
+                      }
+                    }
+                    
+                    if (!contentScriptReady) {
+                      console.warn('[CurrentTask] Content script still not ready after click-triggered navigation');
+                    }
+                  }
+
+                  // Did any network request occur during/after action? (for clientObservations.didNetworkOccur)
+                  let didNetworkOccur = false;
+                  try {
+                    didNetworkOccur = (await callRPC('getDidNetworkOccurSinceMark', [], 1, tabId)) ?? false;
+                  } catch {
+                    // Non-fatal
+                  }
+                  
+                  // Store DOM changes in state for next API call (including URL change info for verification)
+                  set((state) => {
+                    state.currentTask.lastDOMChanges = {
+                      addedCount: domChangeReport!.addedElements.length,
+                      removedCount: domChangeReport!.removedElements.length,
+                      dropdownDetected: domChangeReport!.dropdownDetected,
+                      dropdownOptions: domChangeReport!.dropdownItems?.map(i => i.text).filter(Boolean) as string[] | undefined,
+                      stabilizationTime: domChangeReport!.stabilizationTime,
+                      // Include URL change info for server-side verification
+                      previousUrl: beforeUrl,
+                      urlChanged,
+                      didNetworkOccur,
+                    };
+                    // Update stored URL if it changed
+                    if (urlChanged) {
+                      state.currentTask.url = afterUrl;
+                    }
+                  });
+                } catch (domWaitError: unknown) {
+                  console.warn('DOM change tracking failed, falling back to fixed wait:', domWaitError);
+                  await sleep(2000); // Fallback to fixed wait
+                  // Clear DOM changes on failure
+                  set((state) => {
+                    state.currentTask.lastDOMChanges = null;
+                  });
+                }
               }
               
               // Store execution result for next API call
@@ -1656,6 +1911,11 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         await detachDebugger(get().currentTask.tabId);
         await reenableExtensions();
         
+        // CRITICAL FIX: Clear active task state on completion (Issue #3)
+        // This prevents stale tasks from being resumed after the task ends
+        // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
+        await clearActiveTaskState();
+        
         // Save messages one final time
         await get().currentTask.actions.saveMessages();
         
@@ -1698,6 +1958,12 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
         state.currentTask.status = 'interrupted';
       });
       
+      // CRITICAL FIX: Clear active task state on interruption (Issue #3)
+      // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
+      clearActiveTaskState().catch((err) => {
+        console.warn('Failed to clear active task state on interrupt:', err);
+      });
+      
       // Save conversation to history when interrupted
       const taskState = get().currentTask;
       if (taskState.instructions && taskState.displayHistory.length > 0 && taskState.createdAt) {
@@ -1713,6 +1979,12 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
       }
     },
     startNewChat: () => {
+      // CRITICAL FIX: Clear active task state when starting new chat (Issue #3)
+      // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
+      clearActiveTaskState().catch((err) => {
+        console.warn('Failed to clear active task state on new chat:', err);
+      });
+      
       set((state) => {
         // Stop any running task
         if (state.currentTask.status === 'running') {

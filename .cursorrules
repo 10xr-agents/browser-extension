@@ -974,6 +974,65 @@ yarn build
    - **When to Include**: Only include primitive values, arrays, or objects that should trigger re-runs. Zustand selectors that return primitives are fine: `[sessionId, messages.length]`
    - **Why?** React Error #310 occurs when hooks are called with changing dependencies that cause infinite loops. Zustand actions are stable but including them tricks React into thinking dependencies changed.
 
+19. **No missing tabId in callRPC() calls (Prevents tab switching bugs)**: ALL `callRPC()` calls that target the current task's tab MUST pass `tabId` explicitly. Without it, the function queries the "active" tab which may be wrong when the user switches tabs.
+   - ❌ WRONG: `await callRPC('getAnnotatedDOM', [], 5)` - Will send message to wrong tab
+   - ❌ WRONG: `await getInteractiveElementSnapshot()` - Missing tabId
+   - ❌ WRONG: `await waitForDOMChangesAfterAction(snapshot, config)` - Missing tabId
+   - ✅ CORRECT: `await callRPC('getAnnotatedDOM', [], 5, tabId)`
+   - ✅ CORRECT: `await getInteractiveElementSnapshot(tabId)`
+   - ✅ CORRECT: `await waitForDOMChangesAfterAction(snapshot, config, tabId)`
+   - **Why?** When users switch tabs and start a new task, the extension must target the correct tab. Without explicit `tabId`, Chrome extension APIs may target the previously active tab.
+   - **Reference:** `docs/CLIENT_ARCHITECTURE.md` §12.4 (Tab Switching Breaks Content Script Communication)
+
+20. **No missing keep-alive for long-running operations (Prevents Service Worker death)**: ANY operation that might take longer than 25 seconds MUST be wrapped with `startKeepAlive()` / `stopKeepAlive()`. Chrome's Manifest V3 terminates Service Workers after 30 seconds of inactivity.
+   - ❌ WRONG: `const response = await apiClient.agentInteract(...)` - No keep-alive
+   - ✅ CORRECT:
+     ```typescript
+     startKeepAlive();
+     try {
+       const response = await apiClient.agentInteract(...);
+     } finally {
+       stopKeepAlive();
+     }
+     ```
+   - **Why?** LLM API calls often take 30-60 seconds. Without keep-alive, the Service Worker dies and the response is lost.
+   - **Reference:** `docs/CLIENT_ARCHITECTURE.md` §12.1 (Service Worker Death)
+
+21. **No stale taskId on new tasks (Prevents task confusion)**: When starting a NEW task (not resuming), ALWAYS clear old taskId from `chrome.storage` before proceeding. Otherwise, the extension sends a stale taskId and the server returns "Task already failed".
+   - ❌ WRONG: Start new task without clearing storage
+   - ✅ CORRECT:
+     ```typescript
+     if (isNewTask) {
+       await chrome.storage.local.remove([`task_${tabId}`, 'active_task_state']);
+     }
+     ```
+   - **Why?** Chrome storage persists across page navigations. Old task state must be cleared to prevent confusion.
+   - **Reference:** `docs/CLIENT_ARCHITECTURE.md` §12.7 (Stale taskId After Task Failure)
+
+22. **No DOM access without null guards (Prevents navigation crashes)**: In content scripts, ALWAYS check for `document.documentElement` and `document.readyState` before accessing the DOM. After navigation, the DOM may not be ready yet.
+   - ❌ WRONG: `const clone = document.documentElement.cloneNode(true)` - May crash if null
+   - ✅ CORRECT:
+     ```typescript
+     if (!document.documentElement || document.readyState === 'loading') {
+       return null; // Signal to caller to retry
+     }
+     const clone = document.documentElement.cloneNode(true);
+     ```
+   - **Why?** After navigation, content scripts may execute before the DOM is ready, causing "Cannot read properties of null" errors.
+   - **Reference:** `docs/CLIENT_ARCHITECTURE.md` §12.5 (Navigation Timing)
+
+23. **No missing host_permissions in manifest (Prevents script injection failures)**: For `chrome.scripting.executeScript()` to work in Manifest V3, the manifest MUST include `host_permissions`. Without it, programmatic content script injection fails silently.
+   - ❌ WRONG: Manifest with only `permissions: ["scripting"]`
+   - ✅ CORRECT:
+     ```json
+     {
+       "permissions": ["scripting", ...],
+       "host_permissions": ["http://*/*", "https://*/*"]
+     }
+     ```
+   - **Why?** MV3 requires explicit host permissions for script injection. Content script auto-injection uses `content_scripts.matches`, but programmatic injection needs `host_permissions`.
+   - **Reference:** `docs/CLIENT_ARCHITECTURE.md` §12.6 (Programmatic Script Injection)
+
 ---
 
 ## 11. Implementation Checklist
@@ -985,6 +1044,10 @@ yarn build
 - [ ] Correct file location (pages/ vs common/ vs helpers/)
 - [ ] Proper Chrome API usage with error handling
 - [ ] Content script vs background vs UI page context understood
+- [ ] **tabId passed to all callRPC() calls** - prevents tab switching bugs
+- [ ] **Keep-alive wrapper for long operations** - prevents Service Worker death
+- [ ] **DOM null guards in content scripts** - prevents navigation crashes
+- [ ] **Storage cleared on new task** - prevents stale taskId issues
 
 **TypeScript:**
 - [ ] All functions have explicit types

@@ -123,6 +123,8 @@ When `fallback`, `wsFallbackReason` explains (e.g. "Pusher not configured", "Pus
 | **new_message** | Payload `message` mapped to `ChatMessage`; emit `newMessage`; Message Sync Manager merges into store (dedup, sort by sequenceNumber). |
 | **interact_response** | Message Sync Manager calls `loadMessages(sessionId)` to refresh from REST. |
 
+**Chat UI upgrade (user vs agent bubbles):** For the Side Panel chat to show user messages right (blue) and agent messages left (gray), the **new_message** payload must include **message.role: 'user' \| 'assistant' \| 'system'**. If the server omits `role`, the client defaults to `'assistant'`. Prefer sending the same message shape as GET /api/session/[sessionId]/messages (messageId, role, content, timestamp, status, sequenceNumber, actionPayload, etc.). See **SPECS_AND_CONTRACTS.md §3 (Backend Requirements)** and **§3.5 (WebSocket / push)**.
+
 ### 4.3 Env / Build
 
 - Webpack injects `WEBPACK_PUSHER_KEY`, `WEBPACK_PUSHER_WS_HOST`, `WEBPACK_PUSHER_WS_PORT` (and `WEBPACK_API_BASE` for auth endpoint). Set in `.env.local` and rebuild; reload extension after build.
@@ -144,7 +146,18 @@ When `fallback`, `wsFallbackReason` explains (e.g. "Pusher not configured", "Pus
 | **Env (server)** | Sockudo: `SOCKUDO_APP_ID`, `SOCKUDO_APP_KEY`, `SOCKUDO_APP_SECRET`, `SOCKUDO_HOST`, `SOCKUDO_PORT` (3005). Main server uses same key/secret to sign channel auth. |
 | **Env (client)** | `WEBPACK_PUSHER_KEY`, `WEBPACK_PUSHER_WS_HOST`, `WEBPACK_PUSHER_WS_PORT` (3005), `WEBPACK_API_BASE` (main server). |
 
-### 5.2 Why POST /api/pusher/auth and 403
+### 5.2 new_message payload shape (Chat UI upgrade)
+
+When the backend triggers **new_message** on `private-session-<sessionId>`, the payload should include a **message** object with at least:
+
+- **messageId** (string)
+- **role** (string): `'user' | 'assistant' | 'system'` — **required** for correct bubble alignment (user right/blue, agent left/gray). If omitted, client defaults to `'assistant'`.
+- **content** (string)
+- **timestamp** (ISO string or number)
+
+Optional but recommended (same as GET session messages): `status`, `sequenceNumber`, `actionPayload`, `error`, `meta`. This keeps push and REST in sync and avoids missing fields when the client merges without refetching.
+
+### 5.3 Why POST /api/pusher/auth and 403
 
 Sockudo requires channel auth for private channels. When the client subscribes to `private-session-<sessionId>`, pusher-js calls **POST /api/pusher/auth** on the main server with `socket_id`, `channel_name`, and Bearer token. Main server must validate the user and session and return signed auth. **403** = server rejected auth (e.g. invalid token or user not allowed for that session). See **§6** and **docs/PUSHER_AUTH_403_FIX.md** for fixes.
 

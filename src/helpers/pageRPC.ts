@@ -13,30 +13,121 @@ import ripple from '../pages/Content/ripple';
 import { sleep } from './utils';
 
 /**
- * Programmatically inject content script if it's not already loaded
- * This is a fallback for cases where the content script wasn't auto-injected
- * (e.g., after extension reload, page loaded before extension was ready)
+ * PHASE 1 FIX: Ping content script to check if it's ready
+ * This is called BEFORE attempting injection to avoid unnecessary injection attempts.
+ * 
+ * Reference: ARCHITECTURE_REVIEW.md §4.2 (Verify Content Script Before Every RPC)
  */
-async function ensureContentScriptInjected(tabId: number): Promise<boolean> {
+async function pingContentScript(tabId: number): Promise<boolean> {
   try {
-    // Try to inject the content script
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'ping' });
+    return response?.pong === true;
+  } catch {
+    // Content script not loaded or not responding
+    return false;
+  }
+}
+
+/**
+ * PHASE 1 FIX: Ensure content script is ready with ping-first approach
+ * 
+ * This function:
+ * 1. Checks if tab exists and has valid URL
+ * 2. Pings content script to see if it's already loaded
+ * 3. Only injects if ping fails
+ * 4. Verifies injection succeeded by pinging again
+ * 
+ * Reference: ARCHITECTURE_REVIEW.md §4.2 (Verify Content Script Before Every RPC)
+ */
+async function ensureContentScriptReady(tabId: number): Promise<boolean> {
+  console.log(`[ensureContentScriptReady] Checking content script readiness on tab ${tabId}`);
+  
+  // Step 1: Check if tab exists and is valid
+  let tab: chrome.tabs.Tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (tabError) {
+    console.error(`[ensureContentScriptReady] Tab ${tabId} does not exist:`, tabError);
+    return false;
+  }
+  
+  // Wait if tab is still loading
+  if (tab.status === 'loading') {
+    console.log(`[ensureContentScriptReady] Tab ${tabId} is loading, waiting...`);
+    await sleep(500);
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch {
+      return false;
+    }
+  }
+  
+  // Check if the URL is injectable
+  if (!tab.url || (!tab.url.startsWith('http://') && !tab.url.startsWith('https://'))) {
+    console.warn(`[ensureContentScriptReady] Tab ${tabId} has non-injectable URL: ${tab.url}`);
+    return false;
+  }
+  
+  // Step 2: Ping content script to see if already loaded
+  console.log(`[ensureContentScriptReady] Pinging content script on tab ${tabId}...`);
+  const isAlreadyReady = await pingContentScript(tabId);
+  if (isAlreadyReady) {
+    console.log(`[ensureContentScriptReady] Content script already loaded on tab ${tabId}`);
+    return true;
+  }
+  
+  // Step 3: Content script not loaded, inject it
+  console.log(`[ensureContentScriptReady] Content script not responding, injecting into tab ${tabId}...`);
+  try {
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ['contentScript.bundle.js'],
     });
-    
-    // Give the script a moment to initialize
-    await sleep(500);
-    return true;
+    console.log(`[ensureContentScriptReady] Successfully injected content script into tab ${tabId}`);
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    // If script is already injected, we'll get an error, but that's OK
-    // If it's a different error (e.g., no permission), log it
-    if (!errorMessage.includes('already been injected')) {
-      console.debug('Failed to inject content script:', errorMessage);
+    
+    // "Already injected" errors are actually fine - script is there
+    if (errorMessage.includes('already been injected') || 
+        errorMessage.includes('duplicate script')) {
+      console.log(`[ensureContentScriptReady] Script already injected in tab ${tabId}`);
+    } else if (errorMessage.includes('Cannot access')) {
+      console.error(`[ensureContentScriptReady] Cannot access tab ${tabId} (permissions issue):`, errorMessage);
+      return false;
+    } else {
+      console.error(`[ensureContentScriptReady] Injection failed for tab ${tabId}:`, errorMessage);
+      return false;
     }
-    return false;
   }
+  
+  // Step 4: Wait for script to initialize and verify with ping
+  await sleep(200);
+  
+  // Try pinging up to 3 times with increasing delays
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const isReady = await pingContentScript(tabId);
+    if (isReady) {
+      console.log(`[ensureContentScriptReady] Content script verified ready on tab ${tabId} (attempt ${attempt + 1})`);
+      return true;
+    }
+    
+    if (attempt < 2) {
+      const delay = 300 * (attempt + 1);
+      console.log(`[ensureContentScriptReady] Ping failed on attempt ${attempt + 1}, retrying in ${delay}ms...`);
+      await sleep(delay);
+    }
+  }
+  
+  console.error(`[ensureContentScriptReady] Content script failed to respond after injection on tab ${tabId}`);
+  return false;
+}
+
+/**
+ * Legacy function name for backward compatibility
+ * @deprecated Use ensureContentScriptReady instead
+ */
+async function ensureContentScriptInjected(tabId: number): Promise<boolean> {
+  return ensureContentScriptReady(tabId);
 }
 
 export const rpcMethods = {
@@ -98,29 +189,41 @@ export const callRPC = async <T extends MethodName>(
   let err: any;
   let contentScriptInjected = false;
   
+  console.log(`[callRPC] Calling ${type} on tab ${activeTab.id} (URL: ${activeTab.url?.substring(0, 50)}...)`);
+  
   for (let i = 0; i < maxTries; i++) {
     try {
       // Check if content script is loaded by sending a message
+      console.log(`[callRPC] Attempt ${i + 1}/${maxTries} to send message to tab ${activeTab.id}`);
       const response = await chrome.tabs.sendMessage(activeTab.id, {
         type,
         payload: payload || [],
       });
+      console.log(`[callRPC] Successfully received response from tab ${activeTab.id}`);
       return response;
     } catch (e: any) {
       const errorMessage = e?.message || String(e);
+      console.log(`[callRPC] Attempt ${i + 1}/${maxTries} failed:`, errorMessage);
       
       // Check if it's the "Receiving end does not exist" error
       if (errorMessage.includes('Receiving end does not exist') || 
           errorMessage.includes('Could not establish connection')) {
         
-        // Try to inject the content script programmatically (only once)
-        if (!contentScriptInjected && i < maxTries - 1) {
-          contentScriptInjected = true;
+        // Try to inject the content script programmatically
+        // CRITICAL FIX: Try injection on every failed attempt, not just once
+        if (i < maxTries - 1) {
+          console.log(`[callRPC] Attempting to inject content script into tab ${activeTab.id}...`);
           const injected = await ensureContentScriptInjected(activeTab.id);
+          contentScriptInjected = true;
           if (injected) {
-            // Script was injected, wait a bit and retry immediately
-            await sleep(500);
-            continue; // Retry the message immediately
+            // Script was injected, wait a bit and retry
+            console.log(`[callRPC] Injection succeeded, waiting before retry...`);
+            await sleep(1000); // Increased wait time
+            continue; // Retry the message
+          } else {
+            console.log(`[callRPC] Injection failed, will retry after delay...`);
+            await sleep(1000);
+            continue; // Still retry - page might be loading
           }
         }
         
@@ -137,10 +240,7 @@ export const callRPC = async <T extends MethodName>(
           );
         } else {
           // Retry - content script may still be loading
-          // Only log on last few attempts to reduce console noise
-          if (i >= maxTries - 2) {
-            console.debug(`Content script not ready (attempt ${i + 1}/${maxTries}), retrying...`);
-          }
+          console.log(`[callRPC] Content script not ready (attempt ${i + 1}/${maxTries}), retrying after delay...`);
           await sleep(1000);
         }
       } else {
@@ -177,17 +277,42 @@ export const watchForRPCRequests = () => {
   chrome.runtime.onMessage.addListener(
     (message, sender, sendResponse): true | undefined => {
       const type = message.type;
+      
+      // PHASE 1 FIX: Handle ping requests for health checks
+      // This allows the UI/background to verify content script is loaded before calling RPC methods
+      // Reference: ARCHITECTURE_REVIEW.md §4.4 (Add Content Script Ping Handler)
+      if (type === 'ping') {
+        sendResponse({ pong: true, timestamp: Date.now() });
+        return true;
+      }
+      
       if (isKnownMethodName(type)) {
-        // @ts-expect-error we need to type payload
-        const resp = rpcMethods[type](...message.payload);
-        if (resp instanceof Promise) {
-          resp.then((resolvedResp) => {
-            sendResponse(resolvedResp);
-          });
+        try {
+          // @ts-expect-error we need to type payload
+          const resp = rpcMethods[type](...message.payload);
+          if (resp instanceof Promise) {
+            resp
+              .then((resolvedResp) => {
+                sendResponse(resolvedResp);
+              })
+              .catch((error: unknown) => {
+                // CRITICAL FIX: Catch async errors and return null instead of crashing
+                // This allows the caller's retry logic to work properly
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                console.error(`[watchForRPCRequests] Async error in ${type}:`, errorMessage);
+                sendResponse(null); // Return null to trigger retry
+              });
 
-          return true;
-        } else {
-          sendResponse(resp);
+            return true;
+          } else {
+            sendResponse(resp);
+          }
+        } catch (error: unknown) {
+          // CRITICAL FIX: Catch sync errors and return null instead of crashing
+          // This prevents "Cannot read properties of null" from breaking the RPC channel
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.error(`[watchForRPCRequests] Sync error in ${type}:`, errorMessage);
+          sendResponse(null); // Return null to trigger retry
         }
       }
     }

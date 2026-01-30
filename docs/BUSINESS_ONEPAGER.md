@@ -628,6 +628,111 @@ Unlike enterprise-only tools, our browser extension can spread virally through i
 
 ---
 
+## Strategic Differentiation: Where We Fit
+
+### Spadeworks vs. Perplexity: Different Problems, Different Solutions
+
+A common question: "How is this different from Perplexity or ChatGPT?" The answer: **We're not competing. We're complementary.**
+
+| Dimension | **Perplexity (Research Agent)** | **Spadeworks (Operations Agent)** |
+|-----------|--------------------------------|----------------------------------|
+| **Primary Goal** | Information Retrieval | Task Execution |
+| **Mode** | **Read-Only** | **Read-Write** |
+| **Context** | Public Web | Private, Authenticated Web |
+| **Example Query** | "Find me the cheapest flight to Tokyo" | "Log into *my* expensing portal, upload this PDF, and click submit" |
+| **Limitation** | Cannot log into Salesforce, navigate internal portals, or upload files to private systems | Requires user's authenticated browser session |
+| **Output** | An answer | A completed task |
+
+**The Key Insight:**
+> *Perplexity helps you decide **what** to do. Spadeworks **does** it for you.*
+
+**Why This Matters:**
+- Perplexity is legally and technically **barred** from touching auth-walled workflows
+- Spadeworks lives *inside* your browser session—it can navigate your private admin portals, internal tools, and authenticated apps
+- This is not a feature gap—it's a **fundamental architectural difference**
+
+### The "Missing Middle" in the Automation Landscape
+
+Spadeworks fills a critical gap between rigid bots and chatty LLMs:
+
+| Solution | Strength | Weakness | **Spadeworks Position** |
+|----------|----------|----------|------------------------|
+| **Traditional RPA** (UiPath, Blue Prism) | Robust, Enterprise-ready | Expensive ($10k+), breaks on UI changes, requires engineers | **We are Agile RPA.** No setup, self-heals when UI changes. |
+| **AI Chatbots** (ChatGPT, Claude, Perplexity) | Smart, easy to converse | Can't "click" buttons. "I can't browse that for you." | **We are the Hands.** We give the AI brain the ability to act. |
+| **Vision Agents** (MultiOn, Rabbit) | Can browse anything | Slow, expensive ($$$), hallucinates coordinates | **We are the Efficient Alternative.** DOM-based = 10x faster/cheaper. |
+| **Workflow Tools** (Zapier, Make) | Easy integrations | Only works with apps that have APIs | **We are the Universal Adapter.** Works with any web UI. |
+
+**Our Landscape Position:**
+> **Spadeworks is "Democratized RPA"—automation for the rest of us.**
+
+We allow any user to spin up a mini-RPA bot for a 5-minute task without asking IT for permission, waiting for developers, or paying enterprise licensing fees.
+
+### The Deep Necessity: Why This Product *Must* Exist
+
+**The "API Gap" Problem:**
+> **APIs are missing for 80% of the web.**
+
+- *Ideally*, your CRM would talk to your Email automatically. But it doesn't.
+- *Ideally*, your Supplier Portal would sync with your ERP. But it doesn't.
+- *Ideally*, your Insurance Carrier would have an API. But it doesn't.
+
+**Spadeworks is the Universal Adapter** for systems that were never designed to talk to each other.
+
+**The Triggers That Drive Adoption:**
+
+| Trigger Type | User Moment | Willingness to Pay |
+|--------------|-------------|-------------------|
+| **The "Drudgery" Trigger** | "I have to copy-paste these 50 rows into this web form." | "I will pay $20 right now to not do this." |
+| **The "Context" Trigger** | "I'm looking at a candidate on LinkedIn. Why do I have to open another tab to check if they're in our database?" | "Show me the answer *here*, on this page." |
+| **The "Error" Trigger** | "I just spent 30 minutes filling this form and it timed out." | "Never make me do this manually again." |
+| **The "Repetition" Trigger** | "I do this exact same 15-click workflow 20 times a day." | "There has to be a better way." |
+
+### Platform Strategy: The Chrome + AI Ecosystem
+
+Spadeworks is positioned as the **"Action Layer"** for the browser + AI ecosystem:
+
+**Chrome as the Operating System:**
+- We transform Chrome from a "passive viewer" into an "active worker"
+- Aligns with the industry vision of the browser as the center of productivity
+- No installation beyond a lightweight extension
+
+**AI as the Brain (Model-Agnostic):**
+- We prove that frontier AI models aren't just chatbots—they're orchestration engines
+- Spadeworks provides the "Body" for the AI's "Brain"
+- Works with GPT-4, Claude, Gemini, and emerging models
+
+**Workspace Continuity (Example):**
+```
+Scenario: You receive an invoice in Gmail
+
+Manual Process:
+1. Open email → 2. Download PDF → 3. Open Sheets → 4. Type amount → 
+5. Open Drive → 6. Upload PDF → 7. Return to email → 8. Mark as processed
+
+Spadeworks Process:
+1. "Process this invoice"
+2. Done. (AI reads email, logs to Sheets, uploads to Drive, marks complete)
+```
+
+**Why This Works:**
+- Makes any productivity suite "Agentic" without requiring native integrations
+- Works with Google Workspace, Microsoft 365, or any combination
+- No vendor lock-in—we're the neutral orchestration layer
+
+### The Positioning Summary
+
+| Audience | The Message |
+|----------|-------------|
+| **Investors** | "We're building the operating system for enterprise web work—the infrastructure layer between AI brains and browser actions." |
+| **Enterprise Buyers** | "Reclaim 30-50% of your team's wasted time without RPA consultants, API integrations, or IT projects." |
+| **End Users** | "Stop being the middleware. Describe what you want done, and we'll do the clicking." |
+| **Hackathon Judges** | "We're the Action Layer for Chrome and AI—turning the browser into an autonomous worker." |
+
+**The One-Line Differentiator:**
+> **Perplexity is for Knowing. Spadeworks is for Doing.**
+
+---
+
 ## Business Model: Realistic Unit Economics
 
 ### The Critical Correction
