@@ -182,12 +182,6 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
             state.sessions.currentDomain = domainInfo.isValid ? domainInfo.rootDomain : null;
           });
 
-          void chrome.storage.local
-            .set({ last_session_id: session.sessionId })
-            .catch((error: unknown) => {
-              console.debug('[Sessions] Failed to persist last_session_id:', error);
-            });
-
           return session.sessionId;
         }
 
@@ -214,13 +208,6 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
           state.sessions.currentDomain = domainInfo.isValid ? domainInfo.rootDomain : null;
           state.sessions.tabSessionMap[String(tabId)] = session.sessionId;
         });
-
-        // Persist last-opened session for reliable restore on startup
-        void chrome.storage.local
-          .set({ last_session_id: session.sessionId })
-          .catch((error: unknown) => {
-            console.debug('[Sessions] Failed to persist last_session_id:', error);
-          });
 
         return session.sessionId;
       } catch (error) {
@@ -255,13 +242,6 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
           }
         });
 
-        // Persist last-opened session for reliable restore on startup
-        void chrome.storage.local
-          .set({ last_session_id: sessionId })
-          .catch((error: unknown) => {
-            console.debug('[Sessions] Failed to persist last_session_id:', error);
-          });
-        
         // Update currentTask with messages
         const { currentTask } = get();
         if (currentTask.actions.loadMessages) {
@@ -327,12 +307,7 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
             }
           }
 
-          // Persist current session as last-opened (best-effort)
-          void chrome.storage.local
-            .set({ last_session_id: sessionId })
-            .catch((error: unknown) => {
-              console.debug('[Sessions] Failed to persist last_session_id:', error);
-            });
+          // NOTE: Removed last_session_id persistence - each tab starts fresh
 
           return { sessionId, isNew: false };
         }
@@ -355,13 +330,13 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
           state.sessions.currentSessionId = session.sessionId;
           state.sessions.currentDomain = nextDomain;
           state.sessions.tabSessionMap[tabKey] = session.sessionId;
-        });
 
-        void chrome.storage.local
-          .set({ last_session_id: session.sessionId })
-          .catch((error: unknown) => {
-            console.debug('[Sessions] Failed to persist last_session_id:', error);
-          });
+          // CRITICAL: Clear currentTask state for new sessions (fresh start per tab)
+          // This ensures new tabs don't show stale messages from previous sessions
+          state.currentTask.sessionId = session.sessionId;
+          state.currentTask.messages = [];
+          state.currentTask.displayHistory = [];
+        });
 
         console.log(`[Sessions] Created new session for tab ${tabId} (domain: ${nextDomain || 'unknown'})`);
 
@@ -471,16 +446,7 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
       set((state) => {
         state.sessions.currentSessionId = sessionId;
       });
-
-      // Persist last-opened session for reliable restoration on next extension open
-      // (works even if backend is slow/unavailable).
-      if (sessionId) {
-        void chrome.storage.local
-          .set({ last_session_id: sessionId })
-          .catch((error: unknown) => {
-            console.debug('[Sessions] Failed to persist last_session_id:', error);
-          });
-      }
+      // NOTE: Removed last_session_id persistence - each tab starts fresh
     },
     
     setHistoryOpen: (open: boolean) => {
@@ -494,41 +460,36 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
      * - Initializes session service (loads caches)
      * - Recovers sessions from backend if local storage is empty (storage loss scenario)
      * - Migrates existing sessions to add domain field
-     * - Loads sessions list
+     * - Loads sessions list for ChatHistoryDrawer
      * - Cleans up stale tab mappings (tabIds don't survive browser restarts)
+     *
+     * NOTE: This does NOT auto-restore old sessions. Each new tab starts fresh.
+     * The active tab's session is created by switchToTabSession() called in App.tsx.
      */
     initializeDomainAwareSessions: async () => {
       try {
         // === STEP 0: Initialize session service (load caches) ===
         await sessionService.initializeSessionService();
 
-        // === STEP 1: Check for storage loss and recover from backend ===
-        // Get current tab URL for domain matching during recovery
-        let currentTabUrl: string | undefined;
-        try {
-          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          currentTabUrl = tab?.url;
-        } catch {
-          // Ignore tab query errors
-        }
-
-        const recoveredSessionId = await sessionService.recoverSessionsFromBackend(currentTabUrl);
-        if (recoveredSessionId) {
-          console.log('[Sessions] Recovered session from backend:', recoveredSessionId.slice(0, 8));
-          // Will be used below to set currentSessionId
-        }
+        // === STEP 1: Recover sessions from backend (storage loss scenario) ===
+        // This populates the sessions list but does NOT set currentSessionId
+        await sessionService.recoverSessionsFromBackend();
 
         // Migrate existing sessions to add domain field
         await sessionService.migrateSessionsWithDomain();
 
         // Load sessions directly using sessionService to avoid nested get() calls
+        // These are for ChatHistoryDrawer - NOT auto-selected
         const sessions = await sessionService.listSessions({
           includeArchived: false,
           limit: 50,
         });
-        
+
         set((state) => {
           state.sessions.sessions = sessions;
+          // Clear any stale currentSessionId - new tab sessions are created fresh
+          state.sessions.currentSessionId = null;
+          state.sessions.currentDomain = null;
         });
 
         // Clean up stale tabId -> sessionId mappings (best-effort).
@@ -560,108 +521,12 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
           console.debug('[Sessions] Could not clean tab session map:', tabQueryError);
         }
 
-        // CRITICAL: `sessions.currentSessionId` is persisted (localStorage) but `currentTask.sessionId/messages`
-        // are not. On a fresh open, the UI can have a current session selected but an empty chat stream
-        // until the user sends the first message. Hydrate currentTask for the selected session on startup.
-        const persistedCurrentSessionId = get().sessions.currentSessionId;
-        if (typeof persistedCurrentSessionId === 'string' && persistedCurrentSessionId.length > 0) {
-          const taskSessionId = get().currentTask.sessionId;
-          const taskMessages = Array.isArray(get().currentTask.messages) ? get().currentTask.messages : [];
-          if (taskSessionId !== persistedCurrentSessionId || taskMessages.length === 0) {
-            try {
-              const { currentTask } = get();
-              if (currentTask.actions.loadMessages) {
-                await currentTask.actions.loadMessages(persistedCurrentSessionId);
-              }
-            } catch (loadError: unknown) {
-              console.debug('[Sessions] Failed to hydrate messages for persisted currentSessionId:', loadError);
-            }
-          }
-        }
+        // NOTE: We intentionally do NOT auto-restore last_session_id or most recent session.
+        // Each tab starts fresh. Users can switch to old sessions via ChatHistoryDrawer.
 
-        // On first open, proactively restore the most recent session so the user
-        // immediately sees previous chat history (even before they send a new message).
-        // Domain-aware switching (App.tsx) may override this shortly after based on active tab URL.
-        const existingCurrentSessionId = get().sessions.currentSessionId;
-        if (!existingCurrentSessionId) {
-          // 0) If we recovered a session from backend (storage loss scenario), use it
-          if (recoveredSessionId) {
-            const recoveredSession = sessions.find((s) => s.sessionId === recoveredSessionId);
-            set((state) => {
-              state.sessions.currentSessionId = recoveredSessionId;
-              state.sessions.currentDomain = recoveredSession?.domain || null;
-            });
-
-            try {
-              const { currentTask } = get();
-              if (currentTask.actions.loadMessages) {
-                await currentTask.actions.loadMessages(recoveredSessionId);
-              }
-            } catch (loadError: unknown) {
-              console.debug('[Sessions] Failed to preload messages for recovered session:', loadError);
-            }
-
-            // Persist as last session for future opens
-            void chrome.storage.local.set({ last_session_id: recoveredSessionId }).catch(() => {});
-
-            console.log('[Sessions] Using recovered session from backend');
-            return;
-          }
-
-          // 1) Prefer a persisted last session id (works even if session list is empty/offline).
-          try {
-            const stored = await chrome.storage.local.get('last_session_id');
-            const lastSessionId = stored?.last_session_id;
-            if (typeof lastSessionId === 'string' && lastSessionId.length > 0) {
-              set((state) => {
-                state.sessions.currentSessionId = lastSessionId;
-                state.sessions.currentDomain = null;
-              });
-
-              try {
-                const { currentTask } = get();
-                if (currentTask.actions.loadMessages) {
-                  await currentTask.actions.loadMessages(lastSessionId);
-                }
-              } catch (loadError: unknown) {
-                console.debug('[Sessions] Failed to preload messages for last_session_id:', loadError);
-              }
-
-              console.log('[Sessions] Restored last session from local storage');
-              return;
-            }
-          } catch (storageError: unknown) {
-            console.debug('[Sessions] Could not read last_session_id:', storageError);
-          }
-
-          // 2) Fallback: use the most recent session from the sessions list (if any).
-          if (sessions.length > 0) {
-            const mostRecent = sessions[0];
-            const mostRecentSessionId = mostRecent?.sessionId;
-            if (typeof mostRecentSessionId === 'string' && mostRecentSessionId.length > 0) {
-              // Set current session id for UI + for runTask session continuity.
-              set((state) => {
-                state.sessions.currentSessionId = mostRecentSessionId;
-                state.sessions.currentDomain = mostRecent.domain || null;
-              });
-
-              // Hydrate chat messages into currentTask so TaskUI can render immediately.
-              // This is safe: loadMessages has its own backoff/loop protection.
-              try {
-                const { currentTask } = get();
-                if (currentTask.actions.loadMessages) {
-                  await currentTask.actions.loadMessages(mostRecentSessionId);
-                }
-              } catch (loadError: unknown) {
-                console.debug('[Sessions] Failed to preload messages for most recent session:', loadError);
-              }
-            }
-          }
-        }
-        
-        console.log('[Sessions] Domain-aware sessions initialized');
+        console.log('[Sessions] Tab-based sessions initialized (fresh start per tab)');
       } catch (error) {
-        console.error('Error initializing domain-aware sessions:', error);
+        console.error('Error initializing tab-based sessions:', error);
       }
     },
     

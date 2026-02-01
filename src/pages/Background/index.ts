@@ -22,6 +22,7 @@ import {
   type TaskCommand,
   STORAGE_KEYS,
 } from './TaskOrchestrator';
+import { waitForPageReady as cdpWaitForPageReady } from '../../helpers/cdpLifecycle';
 
 // NOTE: PusherService uses pusher-js which requires `window` (browser context).
 // Service Workers don't have `window`, so Pusher must run in the Side Panel context.
@@ -180,35 +181,26 @@ chrome.runtime.onConnect.addListener((port) => {
 const contentScriptReadiness = new Map<number, { ready: boolean; url: string; timestamp: number }>();
 
 /**
- * Check if a content script is ready on a given tab
+ * Wait for page to be ready on a given tab (CDP-first architecture)
+ *
+ * Uses Chrome DevTools Protocol to detect page readiness instead of
+ * relying on content script messaging.
+ *
  * @param tabId - The tab ID to check
- * @returns Promise that resolves when content script is ready (with timeout)
+ * @param timeoutMs - Maximum time to wait in milliseconds
+ * @returns Promise that resolves to true if page is ready, false if timeout
+ */
+export async function waitForPageReadiness(tabId: number, timeoutMs: number = 10000): Promise<boolean> {
+  console.log(`[PageReadiness] Waiting for page readiness on tab ${tabId} via CDP...`);
+  return cdpWaitForPageReady(tabId, timeoutMs);
+}
+
+/**
+ * @deprecated Use waitForPageReadiness instead - kept for backward compatibility
  */
 export async function waitForContentScriptReady(tabId: number, timeoutMs: number = 10000): Promise<boolean> {
-  const startTime = Date.now();
-  const pollInterval = 200;
-  
-  // Check if already ready
-  const state = contentScriptReadiness.get(tabId);
-  if (state?.ready) {
-    console.log(`[ContentScriptReadiness] Tab ${tabId} already ready`);
-    return true;
-  }
-  
-  console.log(`[ContentScriptReadiness] Waiting for content script on tab ${tabId}...`);
-  
-  // Wait for the content script to signal readiness
-  while (Date.now() - startTime < timeoutMs) {
-    const currentState = contentScriptReadiness.get(tabId);
-    if (currentState?.ready) {
-      console.log(`[ContentScriptReadiness] Tab ${tabId} became ready after ${Date.now() - startTime}ms`);
-      return true;
-    }
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-  }
-  
-  console.warn(`[ContentScriptReadiness] Timeout waiting for content script on tab ${tabId}`);
-  return false;
+  // CDP-first: Use page readiness instead of content script tracking
+  return waitForPageReadiness(tabId, timeoutMs);
 }
 
 /**
@@ -295,19 +287,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // ============================================================================
   
   // Check if content script is ready (synchronous check)
-  if (message.type === 'IS_CONTENT_SCRIPT_READY') {
+  // Legacy: IS_CONTENT_SCRIPT_READY - now uses CDP page readiness
+  if (message.type === 'IS_CONTENT_SCRIPT_READY' || message.type === 'IS_PAGE_READY') {
     const tabId = message.tabId as number;
+    // CDP-first: Use legacy tracking as fallback, but prefer CDP
     const ready = isContentScriptReady(tabId);
     sendResponse({ ready, tabId });
     return true;
   }
-  
-  // Wait for content script to be ready (async with timeout)
-  if (message.type === 'WAIT_FOR_CONTENT_SCRIPT') {
+
+  // Wait for page to be ready (CDP-first architecture)
+  if (message.type === 'WAIT_FOR_CONTENT_SCRIPT' || message.type === 'WAIT_FOR_PAGE_READY') {
     const tabId = message.tabId as number;
     const timeoutMs = message.timeoutMs || 10000;
-    
-    waitForContentScriptReady(tabId, timeoutMs)
+
+    waitForPageReadiness(tabId, timeoutMs)
       .then((ready) => {
         sendResponse({ ready, tabId });
       })

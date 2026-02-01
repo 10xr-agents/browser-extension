@@ -205,7 +205,7 @@ const App = () => {
         setUser(session.user);
         setTenant(session.tenantId, session.tenantName);
         
-        // Initialize sessions (tab-scoped, with domain metadata)
+        // Initialize sessions (loads session list for history, but doesn't restore old sessions)
         await initializeDomainAwareSessions();
         
         // Load theme preferences
@@ -219,14 +219,15 @@ const App = () => {
           console.debug('Could not load theme preferences:', prefError);
         }
         
-        // Auto-switch to session for current tab's domain
+        // Create fresh session for current tab (tab-based sessions)
+        // Each new tab gets its own session - no restoration of old sessions
         try {
           const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
           if (typeof tab?.id === 'number' && typeof tab?.url === 'string') {
             await switchToTabSession(tab.id, tab.url);
           }
         } catch (urlError) {
-          console.debug('Could not auto-switch session for current URL:', urlError);
+          console.debug('Could not create session for current tab:', urlError);
         }
       } catch (error) {
         // 401 or network error - not authenticated

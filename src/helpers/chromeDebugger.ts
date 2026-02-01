@@ -118,7 +118,12 @@ export async function attachDebugger(tabId: number): Promise<void> {
         try {
           await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
           await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
-          console.log(`[Debugger] Domains enabled on existing debugger for tab ${tabId}`);
+          // Additional domains for CDP-based extraction
+          await chrome.debugger.sendCommand({ tabId }, 'Accessibility.enable');
+          await chrome.debugger.sendCommand({ tabId }, 'DOMSnapshot.enable');
+          await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+          await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+          console.log(`[Debugger] All domains enabled on existing debugger for tab ${tabId}`);
           return;
         } catch (domainError) {
           console.warn(`[Debugger] Failed to enable domains on existing debugger:`, domainError);
@@ -178,17 +183,28 @@ export async function attachDebugger(tabId: number): Promise<void> {
         } else {
           console.log(`[Debugger] Attached to tab ${tabId}, enabling domains...`);
           try {
+            // Enable all required CDP domains for DOM extraction
             await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
             console.log('[Debugger] DOM enabled');
             await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
             console.log('[Debugger] Runtime enabled');
-            
+
+            // Additional domains for CDP-based extraction (no content script needed)
+            await chrome.debugger.sendCommand({ tabId }, 'Accessibility.enable');
+            console.log('[Debugger] Accessibility enabled');
+            await chrome.debugger.sendCommand({ tabId }, 'DOMSnapshot.enable');
+            console.log('[Debugger] DOMSnapshot enabled');
+            await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+            console.log('[Debugger] Page enabled');
+            await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+            console.log('[Debugger] Network enabled');
+
             // Track successful attachment
             attachedTabs.set(tabId, {
               attachedAt: Date.now(),
               detachedReason: undefined,
             });
-            
+
             resolve();
           } catch (domainError) {
             console.error('[Debugger] Failed to enable domains after attach:', domainError);

@@ -1,21 +1,12 @@
 /**
- * DOM Simplification Helper for Thin Client Architecture
- * 
- * Extracts and simplifies DOM for agent interaction.
- * Tries accessibility tree extraction first (Task 4), filters to interactive elements (Task 5),
- * creates hybrid elements combining accessibility and DOM data (Task 7),
- * uses accessibility-first selection strategy (Task 8), and integrates them into simplified DOM.
- * Falls back to DOM approach if accessibility extraction fails.
- * 
- * Reference: THIN_CLIENT_ROADMAP.md §5.1 (Task 4: Basic Accessibility Tree Extraction)
- * Reference: THIN_CLIENT_ROADMAP.md §6.1 (Task 5: Accessibility Node Filtering)
- * Reference: THIN_CLIENT_ROADMAP.md §8.1 (Task 7: Hybrid Element Representation)
- * Reference: THIN_CLIENT_ROADMAP.md §9.1 (Task 8: Accessibility-First Element Selection)
- * Reference: ENTERPRISE_PLATFORM_SPECIFICATION.md §3.6.5 (Implementation Plan, Task 5)
- * Reference: ENTERPRISE_PLATFORM_SPECIFICATION.md §3.6.3 (Recommended Approach)
+ * DOM Simplification Helper - CDP-First Architecture
+ *
+ * Pure CDP-based DOM extraction using Accessibility.getFullAXTree and DOMSnapshot.
+ * No content script dependencies - eliminates "content script not ready" race conditions.
+ *
+ * Reference: CDP_DOM_EXTRACTION_MIGRATION.md
  */
 
-import { callRPC } from './pageRPC';
 import { truthyFilter } from './utils';
 import { getAccessibilityTree, isAccessibilityAvailable } from './accessibilityTree';
 import type { AccessibilityTree } from '../types/accessibility';
@@ -24,414 +15,241 @@ import {
   convertAXNodesToSimplifiedElements,
   type SimplifiedAXElement,
 } from './accessibilityFilter';
-import { createHybridElements, hybridElementToDOM } from './hybridElement';
 import type { HybridElement } from '../types/hybridElement';
 import {
   selectElementsAccessibilityFirst,
   analyzeAccessibilityCoverage,
   type CoverageMetrics,
 } from './accessibilityFirst';
+import {
+  extractDomViaCDP,
+  type CDPExtractionResult,
+  type SemanticNodeV3,
+} from './cdpDomExtractor';
+import { waitForPageReady } from './cdpLifecycle';
 
 /**
  * Result of DOM extraction
  */
 export interface SimplifiedDomResult {
   /**
-   * Raw annotated DOM HTML returned by the content script (`getAnnotatedDOM`).
-   * IMPORTANT: This is the correct source for skeleton extraction (it preserves real element IDs).
+   * Raw annotated DOM HTML (legacy format - may be empty in CDP-first mode)
    */
   annotatedDomHtml: string;
   dom: HTMLElement;
   accessibilityTree?: AccessibilityTree;
   usedAccessibility: boolean;
-  accessibilityElements?: SimplifiedAXElement[]; // Filtered and converted accessibility elements (Task 5)
-  elementMapping?: Map<string, number>; // Map from axNodeId to DOM element index (Task 5)
-  hybridElements?: HybridElement[]; // Hybrid elements combining accessibility and DOM data (Task 7)
-  coverageMetrics?: CoverageMetrics; // Coverage metrics for accessibility-first selection (Task 8)
+  accessibilityElements?: SimplifiedAXElement[];
+  elementMapping?: Map<string, number>;
+  hybridElements?: HybridElement[];
+  coverageMetrics?: CoverageMetrics;
+  /** CDP extraction result (new primary format) */
+  cdpResult?: CDPExtractionResult;
 }
 
 /**
- * Get simplified DOM with optional accessibility tree extraction
- * 
- * Tries accessibility tree extraction first (if tabId provided), falls back to DOM approach.
- * 
- * @param tabId - Optional tab ID for accessibility tree extraction
- * @returns Promise<SimplifiedDomResult | null> - Simplified DOM with optional accessibility tree
+ * CDP-first DOM extraction result
+ * This is the new primary format used when CDP extraction succeeds
  */
-export async function getSimplifiedDom(tabId?: number): Promise<SimplifiedDomResult | null> {
-  let accessibilityTree: AccessibilityTree | undefined;
-  let usedAccessibility = false;
-
-  // Try accessibility tree extraction first if tabId is provided
-  if (tabId !== undefined) {
-    try {
-      const isAvailable = await isAccessibilityAvailable(tabId);
-      if (isAvailable) {
-        accessibilityTree = await getAccessibilityTree(tabId);
-        usedAccessibility = true;
-        console.log('Accessibility tree extracted successfully', {
-          nodeCount: accessibilityTree.nodes.length,
-          rootNodeId: accessibilityTree.rootNodeId,
-        });
-      }
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn('Accessibility tree extraction failed, falling back to DOM:', errorMessage);
-      // Continue with DOM fallback
-    }
-  }
-
-  // Process accessibility tree if available (Task 5: Filter and convert)
-  let accessibilityElements: SimplifiedAXElement[] | undefined;
-  let elementMapping: Map<string, number> | undefined;
-
-  if (accessibilityTree && accessibilityTree.nodes.length > 0) {
-    // Filter to interactive elements only
-    const filteredNodes = filterInteractiveAXNodes(accessibilityTree.nodes);
-    
-    // Convert to simplified element representation
-    accessibilityElements = convertAXNodesToSimplifiedElements(filteredNodes);
-    
-    // Create mapping from axNodeId to element index (for action targeting)
-    elementMapping = new Map<string, number>();
-    accessibilityElements.forEach((element, index) => {
-      elementMapping!.set(element.axNodeId, index);
-    });
-
-    console.log('Accessibility filtering complete', {
-      totalNodes: accessibilityTree.nodes.length,
-      interactiveNodes: filteredNodes.length,
-      simplifiedElements: accessibilityElements.length,
-    });
-  }
-
-  // Fallback to DOM approach (always used, or as fallback)
-  // Use more retries for DOM extraction as content script may need time to load
-  // CRITICAL FIX: Retry on null responses (page may be loading after navigation)
-  let fullDom: string | null = null;
-  const MAX_DOM_RETRIES = 5;
-  const DOM_RETRY_DELAY = 1000; // 1 second between retries
-  
-  for (let attempt = 0; attempt < MAX_DOM_RETRIES; attempt++) {
-    try {
-      // Type assertion needed because callRPC can return multiple types depending on method
-      // CRITICAL FIX: Pass tabId to callRPC to ensure we target the correct tab
-      // Without this, switching tabs causes "Content script is not loaded" errors
-      fullDom = await callRPC('getAnnotatedDOM', [], 5, tabId) as string; // 5 retries for content script connection
-      
-      // If we got a valid DOM, break out of the retry loop
-      if (fullDom) {
-        if (attempt > 0) {
-          console.log(`[getSimplifiedDom] DOM extraction succeeded on attempt ${attempt + 1}`);
-        }
-        break;
-      }
-      
-      // DOM was null - page may still be loading after navigation
-      console.debug(`[getSimplifiedDom] DOM was null on attempt ${attempt + 1}/${MAX_DOM_RETRIES}, retrying...`);
-      
-      if (attempt < MAX_DOM_RETRIES - 1) {
-        // Wait before retrying (exponential backoff: 1s, 2s, 4s, 8s)
-        const delay = DOM_RETRY_DELAY * Math.pow(2, attempt);
-        await new Promise(resolve => setTimeout(resolve, Math.min(delay, 5000)));
-      }
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`[getSimplifiedDom] Failed to get annotated DOM (attempt ${attempt + 1}):`, errorMessage);
-      
-      // If this is the last attempt, return null
-      if (attempt === MAX_DOM_RETRIES - 1) {
-        return null;
-      }
-      
-      // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, DOM_RETRY_DELAY));
-    }
-  }
-  
-  if (!fullDom) {
-    console.error('[getSimplifiedDom] DOM was null after all retries - page may still be loading');
-    return null;
-  }
-
-  const dom = new DOMParser().parseFromString(fullDom, 'text/html');
-
-  const interactiveElements: HTMLElement[] = [];
-
-  // Generate simplified DOM (may be enhanced with accessibility elements)
-  const simplifiedDom = generateSimplifiedDom(
-    dom.documentElement,
-    interactiveElements,
-    accessibilityElements // Pass accessibility elements for integration
-  ) as HTMLElement;
-
-  // Create hybrid elements using accessibility-first strategy (Task 8)
-  let hybridElements: HybridElement[] | undefined;
-  let coverageMetrics: CoverageMetrics | undefined;
-
-  if (accessibilityElements && accessibilityElements.length > 0) {
-    // Use accessibility-first selection strategy (Task 8)
-    hybridElements = selectElementsAccessibilityFirst(
-      accessibilityElements,
-      interactiveElements,
-      elementMapping
-    );
-
-    // Analyze coverage metrics (Task 8)
-    coverageMetrics = analyzeAccessibilityCoverage(
-      accessibilityElements,
-      interactiveElements
-    );
-
-    console.log('Accessibility-first selection complete', {
-      totalAXElements: accessibilityElements.length,
-      totalDOMElements: interactiveElements.length,
-      selectedElements: hybridElements.length,
-      coverage: `${coverageMetrics.axCoverage}%`,
-      domOnlyElements: coverageMetrics.domOnlyElements,
-      axOnlyElements: coverageMetrics.axOnlyElements,
-      overlap: coverageMetrics.overlap,
-    });
-
-    // Enhance simplified DOM with hybrid elements
-    enhanceDomWithHybridElements(
-      simplifiedDom,
-      hybridElements,
-      elementMapping!
-    );
-  } else {
-    // If no accessibility elements, use DOM-only approach
-    // Create hybrid elements from DOM only
-    hybridElements = interactiveElements.map((domElement, index) => {
-      const role = domElement.getAttribute('role') ||
-                   (domElement.tagName === 'BUTTON' ? 'button' :
-                    domElement.tagName === 'INPUT' ? 'textbox' :
-                    domElement.tagName === 'A' ? 'link' :
-                    domElement.tagName === 'SELECT' ? 'combobox' :
-                    domElement.tagName === 'TEXTAREA' ? 'textbox' : 'unknown');
-      const name = domElement.getAttribute('aria-label') ||
-                   domElement.getAttribute('name') ||
-                   domElement.getAttribute('placeholder') ||
-                   domElement.textContent?.trim() ||
-                   null;
-
-      return {
-        id: index,
-        domElement,
-        role,
-        name,
-        description: domElement.getAttribute('title') || null,
-        value: (domElement as HTMLInputElement).value || domElement.getAttribute('value') || null,
-        interactive: true,
-        attributes: {
-          role,
-          ...(name ? { 'aria-label': name } : {}),
-        },
-        source: 'dom' as const,
-      } as HybridElement;
-    });
-
-    // Coverage is 0% when no accessibility elements
-    coverageMetrics = {
-      axCoverage: 0,
-      domOnlyElements: interactiveElements.length,
-      axOnlyElements: 0,
-      overlap: 0,
-      totalInteractive: interactiveElements.length,
-      totalAXNodes: 0,
-    };
-  }
-
-  return {
-    annotatedDomHtml: fullDom,
-    dom: simplifiedDom,
-    accessibilityTree,
-    usedAccessibility,
-    accessibilityElements,
-    elementMapping,
-    hybridElements, // Return hybrid elements (Task 7)
-    coverageMetrics, // Return coverage metrics (Task 8)
+export interface CDPSimplifiedResult {
+  mode: 'cdp';
+  interactiveTree: SemanticNodeV3[];
+  viewport: { width: number; height: number };
+  pageTitle: string;
+  url: string;
+  scrollPosition: string;
+  meta: {
+    nodeCount: number;
+    extractionTimeMs: number;
+    axNodeCount: number;
+    estimatedTokens: number;
   };
 }
 
 /**
- * Enhance simplified DOM with hybrid elements (Task 7)
- * Replaces or enhances DOM elements with hybrid element representation
- * 
- * Reference: THIN_CLIENT_ROADMAP.md §8.1 (Task 7: Hybrid Element Representation)
+ * Get simplified DOM using CDP-first approach
+ *
+ * Primary: CDP extraction via Accessibility.getFullAXTree + DOMSnapshot
+ * Fallback: Legacy accessibility tree extraction (for compatibility)
+ *
+ * @param tabId - Tab ID to extract from
+ * @returns Promise<SimplifiedDomResult | null>
  */
-function enhanceDomWithHybridElements(
-  simplifiedDom: HTMLElement,
-  hybridElements: HybridElement[],
-  elementMapping: Map<string, number>
-): void {
-  // Create a map of element IDs to hybrid elements for quick lookup
-  const hybridMap = new Map<number, HybridElement>();
-  hybridElements.forEach((hybrid) => {
-    hybridMap.set(hybrid.id, hybrid);
-  });
+export async function getSimplifiedDom(tabId?: number): Promise<SimplifiedDomResult | null> {
+  if (tabId === undefined) {
+    console.error('[getSimplifiedDom] tabId is required for CDP extraction');
+    return null;
+  }
 
-  // Find all interactive elements in simplified DOM and enhance with hybrid data
-  const interactiveElements = simplifiedDom.querySelectorAll('[data-interactive="true"], [role]');
-  
-  interactiveElements.forEach((el) => {
-    if (el instanceof HTMLElement) {
-      const elementId = el.getAttribute('data-id') || el.getAttribute('id');
-      if (elementId) {
-        const id = parseInt(elementId, 10);
-        const hybrid = hybridMap.get(id);
-        
-        if (hybrid) {
-          // Mark as hybrid element
-          el.setAttribute('data-hybrid', 'true');
-          el.setAttribute('data-source', hybrid.source);
-          
-          // Add accessibility node ID if available
-          if (hybrid.axElement) {
-            el.setAttribute('data-ax-node-id', hybrid.axElement.axNodeId);
-          }
-          
-          // Update attributes with hybrid data (prefer accessibility)
-          if (hybrid.role && !el.hasAttribute('role')) {
-            el.setAttribute('role', hybrid.role);
-          }
-          if (hybrid.name && !el.hasAttribute('aria-label')) {
-            el.setAttribute('aria-label', hybrid.name);
-          }
-          if (hybrid.description && !el.hasAttribute('title')) {
-            el.setAttribute('title', hybrid.description);
-          }
-          if (hybrid.value && !el.hasAttribute('value')) {
-            el.setAttribute('value', hybrid.value);
-            if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-              el.value = hybrid.value;
-            }
-          }
-        }
-      }
+  // Wait for page to be ready before extraction
+  const isReady = await waitForPageReady(tabId, 10000);
+  if (!isReady) {
+    console.warn('[getSimplifiedDom] Page readiness timeout, proceeding anyway');
+  }
+
+  // Primary: CDP extraction
+  try {
+    const cdpResult = await extractDomViaCDP(tabId);
+
+    console.log('[getSimplifiedDom] CDP extraction successful', {
+      nodeCount: cdpResult.meta.nodeCount,
+      extractionTimeMs: cdpResult.meta.extractionTimeMs,
+      estimatedTokens: cdpResult.meta.estimatedTokens,
+    });
+
+    // Convert CDP result to hybrid elements for compatibility
+    const hybridElements: HybridElement[] = cdpResult.interactiveTree.map((node, index) => ({
+      id: index,
+      domElement: null as any, // Not available in CDP mode
+      axElement: {
+        axNodeId: node.i,
+        role: node.r,
+        name: node.n,
+        value: node.v,
+        interactive: true,
+        backendDOMNodeId: parseInt(node.i, 10),
+      } as SimplifiedAXElement,
+      role: node.r,
+      name: node.n,
+      description: null,
+      value: node.v || null,
+      interactive: true,
+      bounds: node.box ? {
+        x: node.box[0],
+        y: node.box[1],
+        width: node.box[2],
+        height: node.box[3],
+      } : undefined,
+      attributes: {
+        role: node.r,
+        'aria-label': node.n,
+      },
+      source: 'ax' as const,
+    }));
+
+    // Create minimal DOM representation for compatibility
+    const minimalDom = document.createElement('div');
+    minimalDom.innerHTML = `<body data-cdp-mode="true"></body>`;
+
+    return {
+      annotatedDomHtml: '', // Not available in CDP mode
+      dom: minimalDom,
+      usedAccessibility: true,
+      hybridElements,
+      cdpResult,
+      coverageMetrics: {
+        axCoverage: 100,
+        domOnlyElements: 0,
+        axOnlyElements: cdpResult.meta.nodeCount,
+        overlap: 0,
+        totalInteractive: cdpResult.meta.nodeCount,
+        totalAXNodes: cdpResult.meta.axNodeCount,
+      },
+    };
+  } catch (cdpError) {
+    const errorMessage = cdpError instanceof Error ? cdpError.message : String(cdpError);
+    console.warn('[getSimplifiedDom] CDP extraction failed:', errorMessage);
+    // Fall through to legacy extraction
+  }
+
+  // Fallback: Legacy accessibility tree extraction
+  let accessibilityTree: AccessibilityTree | undefined;
+  let usedAccessibility = false;
+
+  try {
+    const isAvailable = await isAccessibilityAvailable(tabId);
+    if (isAvailable) {
+      accessibilityTree = await getAccessibilityTree(tabId);
+      usedAccessibility = true;
+      console.log('[getSimplifiedDom] Legacy accessibility extraction successful', {
+        nodeCount: accessibilityTree.nodes.length,
+      });
     }
-  });
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('[getSimplifiedDom] All extraction methods failed:', errorMessage);
+    return null;
+  }
+
+  // Process accessibility tree
+  let accessibilityElements: SimplifiedAXElement[] | undefined;
+  let elementMapping: Map<string, number> | undefined;
+
+  if (accessibilityTree && accessibilityTree.nodes.length > 0) {
+    const filteredNodes = filterInteractiveAXNodes(accessibilityTree.nodes);
+    accessibilityElements = convertAXNodesToSimplifiedElements(filteredNodes);
+
+    elementMapping = new Map<string, number>();
+    accessibilityElements.forEach((element, index) => {
+      elementMapping!.set(element.axNodeId, index);
+    });
+  }
+
+  // Create hybrid elements from accessibility elements
+  const hybridElements: HybridElement[] = (accessibilityElements || []).map((axElement, index) => ({
+    id: index,
+    domElement: null as any,
+    axElement,
+    role: axElement.role,
+    name: axElement.name,
+    description: axElement.description || null,
+    value: axElement.value || null,
+    interactive: axElement.interactive,
+    attributes: {
+      role: axElement.role,
+      'aria-label': axElement.name,
+    },
+    source: 'ax' as const,
+  }));
+
+  const minimalDom = document.createElement('div');
+  minimalDom.innerHTML = '<body></body>';
+
+  return {
+    annotatedDomHtml: '',
+    dom: minimalDom,
+    accessibilityTree,
+    usedAccessibility,
+    accessibilityElements,
+    elementMapping,
+    hybridElements,
+    coverageMetrics: {
+      axCoverage: accessibilityElements ? 100 : 0,
+      domOnlyElements: 0,
+      axOnlyElements: accessibilityElements?.length || 0,
+      overlap: 0,
+      totalInteractive: accessibilityElements?.length || 0,
+      totalAXNodes: accessibilityTree?.nodes.length || 0,
+    },
+  };
 }
 
 /**
- * Enhance simplified DOM with accessibility-derived elements
- * Adds accessibility elements as data attributes and merges them into the DOM structure
- * 
- * Reference: THIN_CLIENT_ROADMAP.md §6.1 (Task 5: Accessibility Node Filtering)
+ * Get CDP extraction result directly
+ * This is the preferred method for new code
  */
-function enhanceDomWithAccessibilityElements(
-  simplifiedDom: HTMLElement,
-  accessibilityElements: SimplifiedAXElement[],
-  elementMapping: Map<string, number>
-): void {
-  // Add accessibility elements as metadata
-  // This allows the LLM to see which elements came from accessibility tree
-  accessibilityElements.forEach((axElement, index) => {
-    // Find corresponding elements in simplified DOM by matching attributes
-    const matchingElements = simplifiedDom.querySelectorAll(
-      `[role="${axElement.role}"], [aria-label="${axElement.name}"]`
-    );
-    
-    // Mark elements with accessibility data
-    matchingElements.forEach((el) => {
-      if (el instanceof HTMLElement) {
-        el.setAttribute('data-ax-node-id', axElement.axNodeId);
-        el.setAttribute('data-ax-source', 'true');
-        el.setAttribute('data-ax-index', index.toString());
-        
-        // Add accessibility attributes if not already present
-        if (axElement.name && !el.hasAttribute('aria-label')) {
-          el.setAttribute('aria-label', axElement.name);
-        }
-        if (axElement.description && !el.hasAttribute('title')) {
-          el.setAttribute('title', axElement.description);
-        }
-        if (axElement.value && !el.hasAttribute('value')) {
-          el.setAttribute('value', axElement.value);
-        }
-      }
-    });
-  });
-}
-
-function generateSimplifiedDom(
-  element: ChildNode,
-  interactiveElements: HTMLElement[],
-  accessibilityElements?: SimplifiedAXElement[]
-): ChildNode | null {
-  if (element.nodeType === Node.TEXT_NODE && element.textContent?.trim()) {
-    return document.createTextNode(element.textContent + ' ');
+export async function getCDPSimplifiedDom(tabId: number): Promise<CDPSimplifiedResult | null> {
+  // Wait for page to be ready
+  const isReady = await waitForPageReady(tabId, 10000);
+  if (!isReady) {
+    console.warn('[getCDPSimplifiedDom] Page readiness timeout, proceeding anyway');
   }
 
-  if (!(element instanceof HTMLElement || element instanceof SVGElement))
+  try {
+    const cdpResult = await extractDomViaCDP(tabId);
+
+    return {
+      mode: 'cdp',
+      interactiveTree: cdpResult.interactiveTree,
+      viewport: cdpResult.viewport,
+      pageTitle: cdpResult.pageTitle,
+      url: cdpResult.url,
+      scrollPosition: cdpResult.scrollPosition,
+      meta: cdpResult.meta,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('[getCDPSimplifiedDom] CDP extraction failed:', errorMessage);
     return null;
-
-  const isVisible = element.getAttribute('data-visible') === 'true';
-  if (!isVisible) return null;
-
-  let children = Array.from(element.childNodes)
-    .map((c) => generateSimplifiedDom(c, interactiveElements, accessibilityElements))
-    .filter(truthyFilter);
-
-  // Don't bother with text that is the direct child of the body
-  if (element.tagName === 'BODY')
-    children = children.filter((c) => c.nodeType !== Node.TEXT_NODE);
-
-  const interactive =
-    element.getAttribute('data-interactive') === 'true' ||
-    element.hasAttribute('role');
-  const hasLabel =
-    element.hasAttribute('aria-label') || element.hasAttribute('name');
-  const includeNode = interactive || hasLabel;
-
-  if (!includeNode && children.length === 0) return null;
-  if (!includeNode && children.length === 1) {
-    return children[0];
   }
-
-  const container = document.createElement(element.tagName);
-
-  const allowedAttributes = [
-    'aria-label',
-    'data-name',
-    'name',
-    'type',
-    'placeholder',
-    'value',
-    'role',
-    'title',
-    'data-ax-node-id', // Accessibility node ID (Task 6)
-    'data-ax-id', // Primary accessibility identifier (Task 6)
-    'data-ax-source', // Mark accessibility-derived elements (Task 5)
-    'data-ax-index', // Accessibility element index (Task 5)
-    // Critical for expected outcome generation: popup/dropdown indicators
-    // When hasPopup is set, clicking opens a popup instead of navigating (no URL change)
-    'aria-haspopup', // Values: 'menu', 'listbox', 'tree', 'grid', 'dialog', 'true'
-    'aria-expanded', // Values: 'true', 'false' - current expanded state
-    'data-has-popup', // Alternative/supplemental popup indicator
-  ];
-
-  for (const attr of allowedAttributes) {
-    if (element.hasAttribute(attr)) {
-      container.setAttribute(attr, element.getAttribute(attr) as string);
-    }
-  }
-  if (interactive) {
-    interactiveElements.push(element as HTMLElement);
-    const elementId = element.getAttribute('data-id') as string;
-    container.setAttribute('id', elementId);
-    
-    // If element has accessibility data, prefer accessibility node ID (Task 6)
-    const axNodeId = element.getAttribute('data-ax-node-id');
-    if (axNodeId) {
-      // Use accessibility node ID as primary identifier
-      container.setAttribute('data-ax-id', axNodeId);
-      // Keep original data-id for backward compatibility
-      container.setAttribute('data-id', elementId);
-    }
-  }
-
-  children.forEach((child) => container.appendChild(child));
-
-  return container;
 }

@@ -7,7 +7,6 @@
  * Reference: CHROME_TAB_ACTIONS.md
  */
 
-import { callRPC } from './pageRPC';
 import { callDOMAction } from './domActions';
 import { attachDebugger } from './chromeDebugger';
 import { sleep } from './utils';
@@ -60,18 +59,21 @@ async function getElementObjectId(elementId: number): Promise<string> {
     }
   }
 
-  // DOM fallback
-  const uniqueId = await callRPC('getUniqueElementSelectorId', [elementId]);
-  const document = (await sendCommand('DOM.getDocument')) as any;
-  const { nodeId } = (await sendCommand('DOM.querySelector', {
-    nodeId: document.root.nodeId,
-    selector: `[${SPADEWORKS_ELEMENT_SELECTOR}="${uniqueId}"]`,
-  })) as any;
-  if (!nodeId) {
-    throw new Error('Could not find node');
+  // CDP-first fallback: In CDP architecture, elementId IS the backendNodeId
+  // Try to resolve directly via DOM.resolveNode
+  try {
+    const result = (await sendCommand('DOM.resolveNode', {
+      backendNodeId: elementId,
+    })) as { object: { objectId: string } } | null;
+
+    if (result?.object?.objectId) {
+      return result.object.objectId;
+    }
+  } catch (cdpError) {
+    console.warn('[actionExecutors] CDP resolution failed for elementId:', elementId, cdpError);
   }
-  const result = (await sendCommand('DOM.resolveNode', { nodeId })) as any;
-  return result.object.objectId;
+
+  throw new Error(`Could not find element with ID ${elementId}`);
 }
 
 /**
@@ -245,7 +247,7 @@ export async function executeScroll(args: { down?: boolean; pages?: number; inde
       (function() {
         const element = this;
         const scrollAmount = element.clientHeight * ${pages};
-        element.scrollBy(0, ${down ? '' : '-'}${scrollAmount});
+        element.scrollBy(0, ${down ? '' : '-'}scrollAmount);
       })();
     `;
     await sendCommand('Runtime.callFunctionOn', {
@@ -256,7 +258,7 @@ export async function executeScroll(args: { down?: boolean; pages?: number; inde
     // Scroll window
     const scrollScript = `
       const scrollAmount = window.innerHeight * ${pages};
-      window.scrollBy(0, ${down ? '' : '-'}${scrollAmount});
+      window.scrollBy(0, ${down ? '' : '-'}scrollAmount);
     `;
     await sendCommand('Runtime.evaluate', { expression: scrollScript });
   }
@@ -293,7 +295,7 @@ export async function executeFindText(args: { text: string }) {
  * Reference: PRODUCTION_READINESS.md §5.4 (Advanced Scroll Targeting)
  */
 export async function executeScrollContainer(args: { elementId: number; direction?: 'up' | 'down' | 'left' | 'right' }) {
-  const { scrollContainer } = await import('./domActions');
+  // Note: scrollContainer is implemented inline below, not imported from domActions
   const objectId = await getElementObjectId(args.elementId);
   const direction = args.direction || 'down';
   
@@ -380,7 +382,8 @@ export async function executeScrollContainer(args: { elementId: number; directio
 /**
  * Wait for a specific condition to be met
  * CRITICAL FIX: Wait for Condition (Section 5.5) - Smart Patience
- * 
+ * CDP-based implementation (no content script dependency)
+ *
  * Reference: PRODUCTION_READINESS.md §5.5 ("Wait for Condition")
  */
 export async function executeWaitFor(args: { condition: string }) {
@@ -388,30 +391,97 @@ export async function executeWaitFor(args: { condition: string }) {
   if (tabId === -1) {
     throw new Error('No active tab');
   }
-  
+
   let condition: {
     type: 'text' | 'selector' | 'element_count' | 'url_change' | 'custom';
     value: string;
     timeout?: number;
     pollInterval?: number;
   };
-  
+
   try {
     condition = JSON.parse(args.condition);
   } catch (error) {
     throw new Error(`Invalid condition JSON: ${args.condition}`);
   }
-  
+
   const timeout = condition.timeout || 60000; // Default 60 seconds
   const pollInterval = condition.pollInterval || 500; // Default 500ms
   const startTime = Date.now();
-  
+  let initialUrl: string | undefined;
+
+  // Get initial URL for url_change condition
+  if (condition.type === 'url_change') {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      initialUrl = tab.url;
+    } catch {
+      // Ignore
+    }
+  }
+
   while (Date.now() - startTime < timeout) {
     try {
-      // Use RPC to check condition in content script
-      const { callRPC } = await import('./pageRPC');
-      const conditionMet = await callRPC('checkWaitCondition', [condition], 1, tabId);
-      
+      // CDP-based condition checking via Runtime.evaluate
+      let conditionMet = false;
+
+      switch (condition.type) {
+        case 'text': {
+          const result = await sendCommand('Runtime.evaluate', {
+            expression: `document.body.innerText.includes(${JSON.stringify(condition.value)})`,
+            returnByValue: true,
+          }) as { result?: { value?: boolean } };
+          conditionMet = result?.result?.value === true;
+          break;
+        }
+
+        case 'selector': {
+          const result = await sendCommand('Runtime.evaluate', {
+            expression: `!!document.querySelector(${JSON.stringify(condition.value)})`,
+            returnByValue: true,
+          }) as { result?: { value?: boolean } };
+          conditionMet = result?.result?.value === true;
+          break;
+        }
+
+        case 'element_count': {
+          // Format: "selector:count" e.g., ".item:5" means 5 or more items
+          const [selector, countStr] = condition.value.split(':');
+          const expectedCount = parseInt(countStr, 10) || 1;
+          const result = await sendCommand('Runtime.evaluate', {
+            expression: `document.querySelectorAll(${JSON.stringify(selector)}).length >= ${expectedCount}`,
+            returnByValue: true,
+          }) as { result?: { value?: boolean } };
+          conditionMet = result?.result?.value === true;
+          break;
+        }
+
+        case 'url_change': {
+          const tab = await chrome.tabs.get(tabId);
+          if (condition.value) {
+            // Check if URL contains the specified value
+            conditionMet = tab.url?.includes(condition.value) ?? false;
+          } else {
+            // Check if URL changed from initial
+            conditionMet = tab.url !== initialUrl;
+          }
+          break;
+        }
+
+        case 'custom': {
+          // Custom JavaScript expression that should return truthy/falsy
+          const result = await sendCommand('Runtime.evaluate', {
+            expression: condition.value,
+            returnByValue: true,
+          }) as { result?: { value?: unknown } };
+          conditionMet = !!result?.result?.value;
+          break;
+        }
+
+        default:
+          throw new Error(`Unknown condition type: ${condition.type}`);
+      }
+
       if (conditionMet) {
         console.log(`Wait condition met: ${condition.type} = ${condition.value}`);
         return;
@@ -420,10 +490,10 @@ export async function executeWaitFor(args: { condition: string }) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.warn('Error checking wait condition:', errorMessage);
     }
-    
+
     await sleep(pollInterval);
   }
-  
+
   throw new Error(`Timeout waiting for condition: ${condition.type} = ${condition.value} (timeout: ${timeout}ms)`);
 }
 
@@ -1510,6 +1580,7 @@ export async function executeGetMetrics() {
 
 /**
  * Wait for an element to appear on the page
+ * CDP-based implementation using Runtime.evaluate polling
  * Useful after clicking buttons that open dropdowns/menus
  */
 export async function executeWaitForElement(args: {
@@ -1518,23 +1589,80 @@ export async function executeWaitForElement(args: {
   timeout?: number;
 }) {
   const timeout = Math.min(args.timeout || 5000, 30000); // Max 30 seconds
-  
-  // Build selector from args
-  const selector: { text?: string; role?: string } = {};
-  if (args.text) selector.text = args.text;
-  if (args.role) selector.role = args.role;
-  
-  // Use RPC to run in content script context
-  const result = await callRPC('waitForElementAppearance', [selector, timeout]) as {
-    found: boolean;
-    element?: { id?: string; tagName: string; role?: string; name?: string; text?: string };
-  };
-  
-  if (!result.found) {
-    throw new Error(`Element not found within ${timeout}ms. Selector: ${JSON.stringify(selector)}`);
+  const pollInterval = 200; // Poll every 200ms
+  const startTime = Date.now();
+
+  const searchScript = `
+    (function() {
+      const text = ${JSON.stringify(args.text || null)};
+      const role = ${JSON.stringify(args.role || null)};
+
+      // Search by text content
+      if (text) {
+        const walker = document.createTreeWalker(
+          document.body,
+          NodeFilter.SHOW_ELEMENT,
+          null
+        );
+        let node;
+        while (node = walker.nextNode()) {
+          const el = node;
+          if (el.innerText && el.innerText.includes(text)) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              return {
+                found: true,
+                element: {
+                  tagName: el.tagName.toLowerCase(),
+                  role: el.getAttribute('role') || undefined,
+                  text: el.innerText.substring(0, 100)
+                }
+              };
+            }
+          }
+        }
+      }
+
+      // Search by role
+      if (role) {
+        const elements = document.querySelectorAll('[role="' + role + '"]');
+        for (const el of elements) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            return {
+              found: true,
+              element: {
+                tagName: el.tagName.toLowerCase(),
+                role: el.getAttribute('role') || role,
+                text: el.innerText?.substring(0, 100) || ''
+              }
+            };
+          }
+        }
+      }
+
+      return { found: false };
+    })()
+  `;
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      const result = await sendCommand('Runtime.evaluate', {
+        expression: searchScript,
+        returnByValue: true,
+      }) as { result?: { value?: { found: boolean; element?: any } } };
+
+      if (result?.result?.value?.found) {
+        return result.result.value.element;
+      }
+    } catch (error) {
+      console.warn('Error waiting for element:', error);
+    }
+
+    await sleep(pollInterval);
   }
-  
-  return result.element;
+
+  throw new Error(`Element not found within ${timeout}ms. Selector: ${JSON.stringify({ text: args.text, role: args.role })}`);
 }
 
 // ============================================================================

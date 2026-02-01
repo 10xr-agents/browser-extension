@@ -88,13 +88,14 @@ var options = {
     options: path.join(__dirname, 'src', 'pages', 'Options', 'index.jsx'),
     popup: path.join(__dirname, 'src', 'pages', 'Popup', 'index.jsx'),
     background: path.join(__dirname, 'src', 'pages', 'Background', 'index.ts'),
-    contentScript: path.join(__dirname, 'src', 'pages', 'Content', 'index.ts'),
-    nativeDialogOverride: path.join(__dirname, 'src', 'pages', 'Content', 'nativeDialogOverride.js'),
+    // Content scripts removed - CDP-based extraction now used
+    // contentScript: path.join(__dirname, 'src', 'pages', 'Content', 'index.ts'),
+    // nativeDialogOverride: path.join(__dirname, 'src', 'pages', 'Content', 'nativeDialogOverride.js'),
     devtools: path.join(__dirname, 'src', 'pages', 'Devtools', 'index.js'),
     panel: path.join(__dirname, 'src', 'pages', 'Panel', 'index.jsx'),
   },
   chromeExtensionBoilerplate: {
-    notHotReload: ['background', 'contentScript', 'devtools', 'nativeDialogOverride'],
+    notHotReload: ['background', 'devtools'],
   },
   output: {
     filename: '[name].bundle.js',

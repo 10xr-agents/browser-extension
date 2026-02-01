@@ -910,10 +910,11 @@ class ApiClient {
     
     // Log mode-specific info
     if (domMode === 'semantic' && hybridParams?.interactiveTree) {
+      const interactiveTreeTokens = Math.round(JSON.stringify(hybridParams.interactiveTree).length / 4);
+      const skeletonSaved = hybridParams?.skeletonDom ? Math.round(hybridParams.skeletonDom.length / 4) : 0;
       console.log(
-        `[ApiClient] Using SEMANTIC mode - ${hybridParams.interactiveTree.length} nodes (~${Math.round(
-          JSON.stringify(hybridParams.interactiveTree).length / 4
-        )} tokens)`
+        `[ApiClient] Using SEMANTIC mode - ${hybridParams.interactiveTree.length} nodes (~${interactiveTreeTokens} tokens)` +
+        (skeletonSaved > 0 ? ` | SAVED: ~${skeletonSaved} tokens by NOT sending skeletonDom (${hybridParams.skeletonDom?.length} chars)` : '')
       );
     } else if ((domMode === 'skeleton' || domMode === 'hybrid') && hybridParams?.skeletonDom) {
       // Skeleton DOM is typically 500-2000 chars, no truncation needed
@@ -941,6 +942,11 @@ class ApiClient {
       console.warn(`[ApiClient] DOM truncated from ${domString.length} to ${domLimit} chars`);
     }
     
+    // SEMANTIC MODE OPTIMIZATION: When using semantic mode, don't send skeleton/full DOM
+    // This achieves the ~95% token reduction promised by the semantic tree format.
+    // Only send skeletonDom when explicitly in skeleton or hybrid mode.
+    const shouldSendSkeletonDom = domMode === 'skeleton' || domMode === 'hybrid';
+
     const body: AgentInteractRequest = {
       url,
       query,
@@ -953,9 +959,9 @@ class ApiClient {
       lastActionResult,
       domChanges,
       clientObservations,
-      // Hybrid fields
+      // Hybrid fields - only send skeleton when NOT in semantic mode
       screenshot: hybridParams?.screenshot,
-      skeletonDom: hybridParams?.skeletonDom,
+      skeletonDom: shouldSendSkeletonDom ? hybridParams?.skeletonDom : undefined,
       domMode: hybridParams?.domMode,
       screenshotHash: hybridParams?.screenshotHash,
       // Semantic JSON Protocol fields

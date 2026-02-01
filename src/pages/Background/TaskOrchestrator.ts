@@ -15,6 +15,7 @@
 
 import type { ChatMessage, ActionStep } from '../../types/chatMessage';
 import type { ParsedAction } from '../../helpers/parseAction';
+import { getSimplifiedDom } from '../../helpers/simplifyDom';
 
 // ============================================================================
 // Storage Schema
@@ -640,27 +641,41 @@ async function runTaskLoop(tabId: number): Promise<void> {
       break;
     }
     
-    // Step 1: Extract DOM
+    // Step 1: Extract DOM (CDP-first architecture)
     await updateTaskContext({ actionStatus: 'pulling-dom' });
-    
-    const domResult = await callContentScript<string>(tabId, 'getAnnotatedDOM');
+
+    const domResult = await getSimplifiedDom(tabId);
     if (!domResult) {
-      console.error('[TaskOrchestrator] Failed to extract DOM');
+      console.error('[TaskOrchestrator] Failed to extract DOM via CDP');
       await addDisplayHistoryEntry({
-        thought: 'Error: Failed to extract page content. Content script may not be loaded.',
+        thought: 'Error: Failed to extract page content.',
         action: '',
         parsedAction: { error: 'DOM extraction failed' },
       });
       await updateTaskContext({ status: 'error' });
       break;
     }
-    
+
     // Step 2: Transform DOM
     await updateTaskContext({ actionStatus: 'transforming-dom' });
-    
-    // Import templatize dynamically (to avoid bundling issues)
-    const { default: templatize } = await import('../../helpers/shrinkHTML/templatize');
-    const templateDom = templatize(domResult);
+
+    // Use CDP result if available, otherwise fall back to annotated HTML
+    let templateDom: string;
+    if (domResult.cdpResult) {
+      // CDP-first: Use semantic tree JSON for API
+      templateDom = JSON.stringify({
+        mode: 'semantic',
+        tree: domResult.cdpResult.interactiveTree,
+        meta: domResult.cdpResult.meta,
+      });
+      console.log('[TaskOrchestrator] Using CDP semantic tree', {
+        nodeCount: domResult.cdpResult.meta.nodeCount,
+      });
+    } else {
+      // Fallback: templatize the annotated HTML
+      const { default: templatize } = await import('../../helpers/shrinkHTML/templatize');
+      templateDom = templatize(domResult.annotatedDomHtml);
+    }
     
     // Step 3: Call API
     await updateTaskContext({ actionStatus: 'performing-query' });

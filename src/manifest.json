@@ -28,20 +28,6 @@
   "icons": {
     "128": "icon-128.png"
   },
-  "content_scripts": [
-    {
-      "matches": ["http://*/*", "https://*/*", "<all_urls>"],
-      "js": ["contentScript.bundle.js"],
-      "css": ["content.styles.css"],
-      "all_frames": true
-    },
-    {
-      "matches": ["http://*/*", "https://*/*", "<all_urls>"],
-      "js": ["nativeDialogOverride.bundle.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    }
-  ],
   "devtools_page": "devtools.html",
   "web_accessible_resources": [
     {

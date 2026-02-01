@@ -11,10 +11,10 @@
 
 import { SPADEWORKS_ELEMENT_SELECTOR } from '../constants';
 import { useAppState } from '../state/store';
-import { callRPC } from './pageRPC';
 import { scrollScriptString } from './runtimeFunctionStrings';
 import { sleep } from './utils';
 import { getAXNodeIdFromElementIndex } from './accessibilityMapping';
+import { showRippleAt } from './cdpVisualFeedback';
 
 /**
  * V3 SEMANTIC MODE: Attribute name for stable element IDs
@@ -352,27 +352,46 @@ async function findGhostMatch(config: GhostMatchConfig): Promise<GhostMatchResul
 }
 
 /**
- * Get object ID for element using accessibility mapping when available, fallback to DOM-based approach
- * CRITICAL FIX: Stale Element Recovery (Section 2.6) - Handles React/Vue re-renders that destroy old elements
- * 
- * Reference: THIN_CLIENT_ROADMAP.md §7.1 (Task 6: Accessibility-DOM Element Mapping)
- * Reference: PRODUCTION_READINESS.md §2.6 (Stale Element Race Conditions)
+ * Get object ID for element using backendNodeId (CDP-first approach)
+ *
+ * CDP-FIRST RESOLUTION ORDER:
+ * 1. Direct backendNodeId resolution (from CDP extraction - most stable)
+ * 2. Accessibility mapping (backendDOMNodeId from AX tree)
+ * 3. Ghost match recovery (self-healing for stale elements)
+ *
+ * This eliminates content script dependencies for element targeting.
+ *
+ * Reference: CDP_DOM_EXTRACTION_MIGRATION.md
  */
 async function getObjectId(originalId: number): Promise<string> {
   const tabId = useAppState.getState().currentTask.tabId;
   const accessibilityMapping = useAppState.getState().currentTask.accessibilityMapping;
   const hybridElements = useAppState.getState().currentTask.hybridElements;
 
-  // V3 ADVANCED: Store recovery information for self-healing ghost match
-  // If element ID becomes stale (React re-render), we can search by text/role/coordinates
+  // CDP-FIRST: If originalId is a backendNodeId (from CDP extraction), resolve directly
+  // The 'i' field from SemanticNodeV3 contains backendNodeId as string
+  try {
+    const result = (await sendCommand('DOM.resolveNode', {
+      backendNodeId: originalId,
+    })) as { object: { objectId: string } } | null;
+
+    if (result?.object?.objectId) {
+      console.log(`[domActions] Resolved backendNodeId ${originalId} directly via CDP`);
+      return result.object.objectId;
+    }
+  } catch (error: unknown) {
+    // Not a valid backendNodeId, continue to fallbacks
+    console.debug(`[domActions] backendNodeId ${originalId} resolution failed, trying fallbacks`);
+  }
+
+  // Store recovery information for self-healing ghost match
   const element = hybridElements?.[originalId];
   const recoveryInfo = element ? {
     text: element.name || element.description || null,
     role: element.role || null,
     interactive: element.interactive || false,
   } : null;
-  
-  // V3 ADVANCED: Ghost match config for self-healing
+
   const ghostMatchConfig: GhostMatchConfig | null = element ? {
     name: element.name || element.description || null,
     role: element.role || null,
@@ -381,28 +400,25 @@ async function getObjectId(originalId: number): Promise<string> {
       element.bounds.y + element.bounds.height / 2,
     ] as [number, number] : null,
     interactive: element.interactive || false,
-    minConfidence: 0.5, // Require at least 50% confidence
+    minConfidence: 0.5,
   } : null;
 
-  // Try accessibility mapping first if available (Task 6)
+  // Try accessibility mapping if available
   if (accessibilityMapping) {
     try {
-      // Get accessibility node ID from element index
       const axNodeId = getAXNodeIdFromElementIndex(originalId, accessibilityMapping);
-      
+
       if (axNodeId) {
-        // Get backendDOMNodeId from mapping
         const backendDOMNodeId = accessibilityMapping.axNodeIdToBackendDOMNodeId.get(axNodeId);
-        
+
         if (backendDOMNodeId !== undefined) {
-          // Use backendDOMNodeId to get object ID directly
           try {
             const result = (await sendCommand('DOM.resolveNode', {
               backendNodeId: backendDOMNodeId,
             })) as { object: { objectId: string } } | null;
 
             if (result?.object?.objectId) {
-              console.log('Using accessibility mapping for element targeting', {
+              console.log('[domActions] Resolved via accessibility mapping', {
                 elementId: originalId,
                 axNodeId,
                 backendDOMNodeId,
@@ -411,158 +427,101 @@ async function getObjectId(originalId: number): Promise<string> {
             }
           } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            console.warn('Accessibility mapping failed, falling back to DOM:', errorMessage);
-            // Continue to DOM fallback
+            console.warn('[domActions] Accessibility mapping resolution failed:', errorMessage);
           }
         }
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.warn('Accessibility mapping lookup failed, falling back to DOM:', errorMessage);
-      // Continue to DOM fallback
+      console.warn('[domActions] Accessibility mapping lookup failed:', errorMessage);
     }
   }
 
-  // V3 SEMANTIC MODE: Try data-llm-id first (stable IDs from tagger.ts)
-  // This is the PRIMARY lookup method - IDs stamped by tagger persist across re-renders
-  try {
-    const document = (await sendCommand('DOM.getDocument')) as any;
-    const { nodeId } = (await sendCommand('DOM.querySelector', {
-      nodeId: document.root.nodeId,
-      selector: `[${LLM_ID_ATTR}="${originalId}"]`,
-    })) as any;
-    
-    if (nodeId) {
-      const result = (await sendCommand('DOM.resolveNode', { nodeId })) as any;
-      const objectId = result.object.objectId;
-      if (objectId) {
-        console.debug(`[domActions] Found element by data-llm-id="${originalId}"`);
-        return objectId;
-      }
+  // Ghost match recovery as last resort
+  console.warn(`[SelfHeal] Element ${originalId} not found via CDP, attempting ghost match recovery`);
+
+  if (ghostMatchConfig) {
+    const ghostResult = await findGhostMatch(ghostMatchConfig);
+    if (ghostResult) {
+      console.log('[SelfHeal] Ghost match recovery successful:', {
+        originalId,
+        newId: ghostResult.newElementId,
+        confidence: ghostResult.confidence,
+        method: ghostResult.matchMethod,
+      });
+      return ghostResult.objectId;
     }
-  } catch (error: unknown) {
-    // data-llm-id not found, continue to fallbacks
-    console.debug(`[domActions] Element with data-llm-id="${originalId}" not found, trying fallbacks`);
   }
 
-  // Try normal DOM-based resolution (legacy SPADEWORKS_ELEMENT_SELECTOR)
-  try {
-    // Fallback to DOM-based approach (existing implementation)
-    // Pass explicit tabId to callRPC
-    // Use retries here: the content script can be temporarily unavailable during navigation/hydration.
-    const uniqueId = await callRPC('getUniqueElementSelectorId', [originalId], 5, tabId);
-    // get node id
-    const document = (await sendCommand('DOM.getDocument')) as any;
-    const { nodeId } = (await sendCommand('DOM.querySelector', {
-      nodeId: document.root.nodeId,
-      selector: `[${SPADEWORKS_ELEMENT_SELECTOR}="${uniqueId}"]`,
-    })) as any;
-    if (!nodeId) {
-      throw new Error('Could not find node');
-    }
-    // get object id
-    const result = (await sendCommand('DOM.resolveNode', { nodeId })) as any;
-    const objectId = result.object.objectId;
-    if (!objectId) {
-      throw new Error('Could not find object');
-    }
-    return objectId;
-  } catch (error: unknown) {
-    // V3 ADVANCED: Self-Healing Ghost Match Recovery
-    // If normal resolution fails (element ID is stale), use advanced ghost matching
-    console.warn(`[SelfHeal] Element ${originalId} not found, attempting ghost match recovery`);
-    
-    // Try V3 ghost match first (uses coordinates + role + name)
-    if (ghostMatchConfig) {
-      const ghostResult = await findGhostMatch(ghostMatchConfig);
-      if (ghostResult) {
-        console.log('[SelfHeal] Ghost match recovery successful:', {
-          originalId,
-          newId: ghostResult.newElementId,
-          confidence: ghostResult.confidence,
-          method: ghostResult.matchMethod,
-        });
-        return ghostResult.objectId;
-      }
-    }
-    
-    // Fallback to legacy recovery (text/role search without coordinates)
-    if (recoveryInfo && recoveryInfo.text) {
-      console.log('[SelfHeal] Ghost match failed, trying legacy text search:', recoveryInfo);
-      
-      try {
-        // Search for element with matching text and role
-        const searchExpression = `
-          (function() {
-            const searchText = ${JSON.stringify(recoveryInfo.text)};
-            const searchRole = ${JSON.stringify(recoveryInfo.role || '')};
-            const isInteractive = ${recoveryInfo.interactive};
-            
-            const walker = document.createTreeWalker(
-              document.body,
-              NodeFilter.SHOW_ELEMENT,
-              null
-            );
-            
-            let node;
-            const candidates = [];
-            
-            while (node = walker.nextNode()) {
-              if (node instanceof HTMLElement) {
-                const textContent = (node.textContent || '').trim();
-                const role = node.getAttribute('role') || '';
-                const tagName = node.tagName.toLowerCase();
-                
-                // Check if text matches (exact or contains)
-                const textMatches = textContent === searchText || 
-                                   textContent.includes(searchText) ||
-                                   (node.getAttribute('aria-label') || '').includes(searchText) ||
-                                   (node.getAttribute('name') || '').includes(searchText);
-                
-                // Check if role matches (if specified)
-                const roleMatches = !searchRole || role === searchRole;
-                
-                // Check if element is interactive (if specified)
-                const interactiveMatches = !isInteractive || 
-                  tagName === 'button' || 
-                  tagName === 'a' || 
-                  tagName === 'input' ||
-                  role === 'button' ||
-                  role === 'link' ||
-                  node.hasAttribute('onclick');
-                
-                if (textMatches && roleMatches && interactiveMatches) {
-                  candidates.push(node);
-                }
+  // Legacy text search recovery
+  if (recoveryInfo && recoveryInfo.text) {
+    console.log('[SelfHeal] Trying legacy text search:', recoveryInfo);
+
+    try {
+      const searchExpression = `
+        (function() {
+          const searchText = ${JSON.stringify(recoveryInfo.text)};
+          const searchRole = ${JSON.stringify(recoveryInfo.role || '')};
+          const isInteractive = ${recoveryInfo.interactive};
+
+          const walker = document.createTreeWalker(
+            document.body,
+            NodeFilter.SHOW_ELEMENT,
+            null
+          );
+
+          let node;
+          const candidates = [];
+
+          while (node = walker.nextNode()) {
+            if (node instanceof HTMLElement) {
+              const textContent = (node.textContent || '').trim();
+              const role = node.getAttribute('role') || '';
+              const tagName = node.tagName.toLowerCase();
+
+              const textMatches = textContent === searchText ||
+                                 textContent.includes(searchText) ||
+                                 (node.getAttribute('aria-label') || '').includes(searchText) ||
+                                 (node.getAttribute('name') || '').includes(searchText);
+
+              const roleMatches = !searchRole || role === searchRole;
+
+              const interactiveMatches = !isInteractive ||
+                tagName === 'button' ||
+                tagName === 'a' ||
+                tagName === 'input' ||
+                role === 'button' ||
+                role === 'link' ||
+                node.hasAttribute('onclick');
+
+              if (textMatches && roleMatches && interactiveMatches) {
+                candidates.push(node);
               }
             }
-            
-            // Return first candidate (most likely match)
-            return candidates.length > 0 ? candidates[0] : null;
-          })()
-        `;
-        
-        const searchResult = (await sendCommand('Runtime.evaluate', {
-          expression: searchExpression,
-        })) as { objectId?: string } | null;
-        
-        if (searchResult?.objectId) {
-          console.log('[SelfHeal] Legacy text recovery successful:', {
-            originalId,
-            recoveryInfo,
-          });
-          return searchResult.objectId;
-        }
-      } catch (recoveryError: unknown) {
-        const recoveryErrorMessage = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
-        console.warn('[SelfHeal] Legacy recovery failed:', recoveryErrorMessage);
+          }
+
+          return candidates.length > 0 ? candidates[0] : null;
+        })()
+      `;
+
+      const searchResult = (await sendCommand('Runtime.evaluate', {
+        expression: searchExpression,
+      })) as { result?: { objectId?: string } } | null;
+
+      if (searchResult?.result?.objectId) {
+        console.log('[SelfHeal] Legacy text recovery successful:', {
+          originalId,
+          recoveryInfo,
+        });
+        return searchResult.result.objectId;
       }
+    } catch (recoveryError: unknown) {
+      const recoveryErrorMessage = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+      console.warn('[SelfHeal] Legacy recovery failed:', recoveryErrorMessage);
     }
-    
-    // If all recovery attempts fail, throw original error with recovery info
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    throw new Error(`[SelfHeal] Element ${originalId} not found and all recovery methods failed: ${errorMessage}`);
   }
+
+  throw new Error(`[SelfHeal] Element ${originalId} not found and all recovery methods failed`);
 }
 
 /**
@@ -846,12 +805,11 @@ async function clickAtPosition(
 ): Promise<void> {
   const tabId = useAppState.getState().currentTask.tabId;
   console.log('[domActions.clickAtPosition] Dispatching mouse events at:', { x, y, clickCount, tabId });
-  
-  // Cosmetic only: ripple animation. Never let this throw / spam console with
-  // "Unchecked runtime.lastError: Could not establish connection. Receiving end does not exist."
+
+  // CDP-based ripple animation (no content script needed)
   if (typeof tabId === 'number') {
-    void callRPC('ripple', [x, y], 1, tabId).catch(() => {
-      // Best-effort: content script may not be ready during navigation
+    void showRippleAt(tabId, x, y).catch(() => {
+      // Best-effort: visual feedback is non-critical
     });
   }
   

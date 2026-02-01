@@ -43,16 +43,24 @@ import {
   updateActiveTaskTimestamp,
   type ActiveTaskState,
 } from '../helpers/taskPersistence';
-import { callRPC } from '../helpers/pageRPC';
+// CDP-based lifecycle management (replaces content script dependencies)
+import {
+  waitForPageReady as cdpWaitForPageReady,
+  waitForNetworkIdle,
+  setNetworkObservationMark as cdpSetNetworkObservationMark,
+  getDidNetworkOccurSinceMark as cdpGetDidNetworkOccurSinceMark,
+} from '../helpers/cdpLifecycle';
+import { extractDomViaCDP, type SemanticNodeV3 } from '../helpers/cdpDomExtractor';
 import { startKeepAlive, stopKeepAlive } from '../helpers/serviceWorkerKeepAlive';
 import { validatePayloadSize, PayloadTooLargeError, PAYLOAD_TOO_LARGE_MESSAGE } from '../helpers/payloadValidation';
 import {
   captureAndOptimizeScreenshot,
   resetScreenshotHashCache
 } from '../helpers/screenshotCapture';
-import { 
-  extractSkeletonDom, 
-  getSkeletonStats 
+import {
+  extractSkeletonDom,
+  getSkeletonStats,
+  extractInteractiveTreeFromSkeleton,
 } from '../helpers/skeletonDom';
 import { selectDomMode, type DomMode } from '../helpers/hybridCapture';
 
@@ -129,51 +137,18 @@ function generateUUID(): string {
 }
 
 /**
- * Wait for content script to be ready on a tab
- * This communicates with the background script which tracks content script readiness
- * 
- * CRITICAL: This prevents "Receiving end does not exist" errors during navigation
- * by ensuring we don't try to communicate with a destroyed content script
- * 
+ * Wait for page to be ready on a tab (CDP-based)
+ *
+ * Uses CDP lifecycle events for page readiness detection.
+ * No content script dependency - uses CDP Page and Network domains.
+ *
  * @param tabId - The tab ID to check
  * @param timeoutMs - Maximum time to wait (default 10 seconds)
- * @returns Promise<boolean> - true if content script is ready, false if timeout
+ * @returns Promise<boolean> - true if page is ready, false if timeout
  */
-async function waitForContentScriptReady(tabId: number, timeoutMs: number = 10000): Promise<boolean> {
-  try {
-    // Check if chrome.runtime is available
-    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
-      console.warn('[waitForContentScriptReady] Chrome runtime not available');
-      return false;
-    }
-    
-    const response = await new Promise<{ ready: boolean; tabId: number; error?: string }>((resolve) => {
-      chrome.runtime.sendMessage(
-        { type: 'WAIT_FOR_CONTENT_SCRIPT', tabId, timeoutMs },
-        (response) => {
-          // Handle potential lastError
-          if (chrome.runtime.lastError) {
-            console.warn('[waitForContentScriptReady] Message failed:', chrome.runtime.lastError.message);
-            resolve({ ready: false, tabId, error: chrome.runtime.lastError.message });
-            return;
-          }
-          resolve(response || { ready: false, tabId });
-        }
-      );
-    });
-    
-    if (response.ready) {
-      console.log(`[waitForContentScriptReady] Content script ready on tab ${tabId}`);
-    } else {
-      console.warn(`[waitForContentScriptReady] Content script not ready on tab ${tabId}:`, response.error || 'timeout');
-    }
-    
-    return response.ready;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('[waitForContentScriptReady] Error:', errorMessage);
-    return false;
-  }
+async function waitForPageReadiness(tabId: number, timeoutMs: number = 10000): Promise<boolean> {
+  // Use CDP-based page readiness detection
+  return cdpWaitForPageReady(tabId, timeoutMs);
 }
 
 /**
@@ -253,52 +228,6 @@ function createSimplifiedDomFromFallback(fallbackResult: FallbackDomResult): Sim
   }
 }
 
-/**
- * Programmatically inject the content script into a tab.
- * 
- * This is a fallback mechanism when the auto-injected content script
- * (via manifest.json content_scripts) fails to load or respond.
- * 
- * IMPORTANT: This requires host_permissions in manifest.json.
- * 
- * @param tabId - The tab ID to inject the content script into
- * @throws Error if injection fails
- */
-async function injectContentScript(tabId: number): Promise<void> {
-  if (!tabId || tabId <= 0) {
-    throw new Error(`Invalid tabId for content script injection: ${tabId}`);
-  }
-  
-  try {
-    // First check if chrome.scripting is available
-    if (typeof chrome === 'undefined' || !chrome.scripting?.executeScript) {
-      throw new Error('chrome.scripting API not available');
-    }
-    
-    console.log(`[injectContentScript] Injecting content script into tab ${tabId}...`);
-    
-    // Inject the content script bundle
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['contentScript.bundle.js'],
-    });
-    
-    console.log(`[injectContentScript] Content script injected successfully into tab ${tabId}`);
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    
-    // Check for common injection failures
-    if (errorMessage.includes('Cannot access') || errorMessage.includes('chrome://') || errorMessage.includes('chrome-extension://')) {
-      throw new Error(`Cannot inject content script into protected page: ${errorMessage}`);
-    }
-    
-    if (errorMessage.includes('No tab with id')) {
-      throw new Error(`Tab ${tabId} no longer exists: ${errorMessage}`);
-    }
-    
-    throw new Error(`Content script injection failed: ${errorMessage}`);
-  }
-}
 
 /**
  * Plan step structure from Manus orchestrator
@@ -790,18 +719,15 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           }
         }
 
-        // CRITICAL FIX: Ensure content script is ready before attaching debugger
-        // This prevents "Could not establish connection" errors on subsequent tasks
+        // CDP-based page readiness check (replaces content script ping)
         try {
-          const { callRPC } = await import('../helpers/pageRPC');
-          // Simple ping to verify content script is responding
-          await callRPC('checkNetworkIdle', [], 3, tabId);
-          console.log('[CurrentTask] Content script verified ready on tab', tabId);
-        } catch (contentScriptError) {
-          console.warn('[CurrentTask] Content script not ready, will retry during DOM extraction:', contentScriptError);
+          await cdpWaitForPageReady(tabId, 5000);
+          console.log('[CurrentTask] Page verified ready via CDP on tab', tabId);
+        } catch (pageReadyError) {
+          console.warn('[CurrentTask] Page readiness check failed, will retry during DOM extraction:', pageReadyError);
           // Continue - DOM extraction has its own retry logic
         }
-        
+
         await attachDebugger(tabId);
         await disableIncompatibleExtensions();
 
@@ -832,64 +758,44 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           let domResult: SimplifiedDomResult | null = null;
           
           // ============================================================================
-          // CRITICAL ARCHITECTURAL FIX: Content Script Readiness Check
-          // 
-          // The fundamental issue with Chrome Extensions navigating to new pages:
-          // - When navigation starts, the OLD content script is DESTROYED immediately
-          // - The NEW content script isn't injected until the page reaches 'interactive' state
-          // - There's a timing gap where no content script exists to receive messages
-          // 
-          // Solution: Wait for the background's readiness tracking to confirm the NEW
-          // content script has loaded and sent its CONTENT_SCRIPT_READY message
+          // CDP-FIRST ARCHITECTURE: Page Readiness Check
+          //
+          // Uses Chrome DevTools Protocol (CDP) to detect page readiness:
+          // - Monitors Page.loadEventFired and Page.domContentEventFired
+          // - Tracks network idle state (no pending requests)
+          // - No longer depends on content script messaging
           // ============================================================================
-          
-          console.log(`[CurrentTask] Waiting for content script readiness on tab ${tabId}...`);
-          let contentScriptReady = await waitForContentScriptReady(tabId, 15000); // 15 second timeout
-          
-          if (!contentScriptReady) {
-            console.warn(`[CurrentTask] Content script not ready after 15s, attempting programmatic injection...`);
-            // Try to programmatically inject the content script
-            try {
-              await injectContentScript(tabId);
-              console.log(`[CurrentTask] Content script injected programmatically, waiting for readiness...`);
-              await sleep(1000); // Give it time to initialize
-              contentScriptReady = await waitForContentScriptReady(tabId, 5000);
-            } catch (injectError) {
-              console.warn(`[CurrentTask] Programmatic injection failed:`, injectError);
-            }
-          }
-          
-          if (contentScriptReady) {
-            console.log(`[CurrentTask] Content script confirmed ready on tab ${tabId}`);
+
+          console.log(`[CurrentTask] Waiting for page readiness via CDP on tab ${tabId}...`);
+          const pageReady = await waitForPageReadiness(tabId, 15000); // 15 second timeout
+
+          if (pageReady) {
+            console.log(`[CurrentTask] Page confirmed ready on tab ${tabId}`);
           } else {
-            console.warn(`[CurrentTask] Content script still not ready, will try DOM extraction anyway...`);
+            console.warn(`[CurrentTask] Page not ready after timeout, will try DOM extraction anyway...`);
           }
           
           // ============================================================================
-          // ROBUST DOM EXTRACTION with Exponential Backoff
-          // 
-          // Some sites like google.com have complex JavaScript that can interfere with
-          // content script timing. We use:
-          // 1. Exponential backoff delays (1.5s, 2s, 3s, 4s, 6s, 8s...)
-          // 2. Content script re-injection on repeated failures
-          // 3. Direct function injection as final fallback
+          // ROBUST DOM EXTRACTION with Exponential Backoff (CDP-First Architecture)
+          //
+          // Uses CDP for DOM extraction which is more reliable than content scripts.
+          // Exponential backoff handles cases where the page is still loading.
           // ============================================================================
           let domRetryCount = 0;
-          const MAX_DOM_RETRIES = 10; // Reduced but with longer waits
+          const MAX_DOM_RETRIES = 10;
           const MIN_RETRY_DELAY = 1500; // Minimum 1.5 seconds between retries
           const MAX_RETRY_DELAY = 10000; // Cap at 10 seconds
-          let hasTriedReinjection = false;
-          
+
           // Exponential backoff function: 1.5s, 2s, 3s, 4.5s, 6s, 8s, 10s...
           const getRetryDelay = (attempt: number): number => {
             const delay = MIN_RETRY_DELAY * Math.pow(1.5, attempt - 1);
             return Math.min(Math.round(delay), MAX_RETRY_DELAY);
           };
-          
+
           while (domRetryCount < MAX_DOM_RETRIES) {
             try {
               domResult = await getSimplifiedDom(tabId);
-              
+
               if (domResult) {
                 // Success! Reset failure counter
                 consecutiveDomFailures = 0;
@@ -898,11 +804,10 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 }
                 break;
               }
-              
+
               // DOM was null - page may be loading
               domRetryCount++;
               if (domRetryCount < MAX_DOM_RETRIES) {
-                // Exponential backoff: 1.5s, 2s, 3s, 4.5s, 6s, 8s, 10s
                 const retryDelay = getRetryDelay(domRetryCount);
                 console.log(`[CurrentTask] DOM extraction returned null (attempt ${domRetryCount}/${MAX_DOM_RETRIES}), waiting ${retryDelay}ms...`);
                 await sleep(retryDelay);
@@ -910,44 +815,13 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             } catch (error: unknown) {
               const errorMessage = error instanceof Error ? error.message : String(error);
               domRetryCount++;
-              
-              // Check if this is a content script communication error (common after navigation)
-              const isContentScriptError = errorMessage.includes('Receiving end does not exist') ||
-                errorMessage.includes('Could not establish connection') ||
-                errorMessage.includes('querySelectorAll') ||
-                errorMessage.includes('Cannot read properties of null');
-              
-              if (isContentScriptError && domRetryCount < MAX_DOM_RETRIES) {
-                console.log(`[CurrentTask] Content script error (attempt ${domRetryCount}/${MAX_DOM_RETRIES}): ${errorMessage}`);
-                
-                // Try programmatic content script re-injection after 4 failed attempts
-                if (domRetryCount >= 4 && !hasTriedReinjection) {
-                  console.log('[CurrentTask] Attempting programmatic content script re-injection...');
-                  hasTriedReinjection = true;
-                  try {
-                    await injectContentScript(tabId);
-                    console.log('[CurrentTask] Content script re-injected, waiting for initialization...');
-                    await sleep(2000);
-                    // Re-check readiness
-                    const nowReady = await waitForContentScriptReady(tabId, 5000);
-                    if (nowReady) {
-                      console.log('[CurrentTask] Content script now ready after re-injection');
-                      continue; // Try DOM extraction immediately
-                    }
-                  } catch (injectError) {
-                    console.warn('[CurrentTask] Content script re-injection failed:', injectError);
-                  }
-                }
-                
-                // Exponential backoff for stubborn sites
+
+              // CDP extraction error - apply exponential backoff
+              if (domRetryCount < MAX_DOM_RETRIES) {
                 const retryDelay = getRetryDelay(domRetryCount);
-                console.log(`[CurrentTask] Waiting ${retryDelay}ms for content script to initialize...`);
-                
-                // CRITICAL: Re-check content script readiness before next retry
-                const stillReady = await waitForContentScriptReady(tabId, 3000);
-                if (!stillReady) {
-                  await sleep(retryDelay);
-                }
+                console.log(`[CurrentTask] CDP DOM extraction error (attempt ${domRetryCount}/${MAX_DOM_RETRIES}): ${errorMessage}`);
+                console.log(`[CurrentTask] Waiting ${retryDelay}ms before retry...`);
+                await sleep(retryDelay);
               } else if (domRetryCount >= MAX_DOM_RETRIES) {
                 // ============================================================================
                 // LAST RESORT: Direct Function Injection Fallback
@@ -1270,48 +1144,89 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           let screenshotBase64: string | null = null;
           let screenshotHash: string | null = null;
 
-          // === SEMANTIC EXTRACTION (PRIMARY) ===
-          // Ultra-light format: ~25-75 tokens instead of 10k+ for full DOM
-          // If fails → fallback to skeleton/hybrid based on query keywords
-          // Reference: DOM_EXTRACTION_ARCHITECTURE.md
+          // === CDP-BASED SEMANTIC EXTRACTION (PRIMARY) ===
+          // Ultra-light format using CDP Accessibility.getFullAXTree
+          // No content script dependencies - eliminates race conditions
+          // Reference: CDP_DOM_EXTRACTION_MIGRATION.md
           if (USE_SEMANTIC_EXTRACTION) {
             try {
-              console.log('[CurrentTask] Attempting semantic extraction via RPC...');
-              const semanticResult = await callRPC('getSemanticDomV3', [{ timeout: 3000 }, { viewportOnly: true, minified: true }], 5, tabId) as SemanticTreeResult | null;
+              console.log('[CurrentTask] Attempting CDP semantic extraction...');
+              const cdpResult = await extractDomViaCDP(tabId);
 
-              if (semanticResult && semanticResult.interactive_tree && semanticResult.interactive_tree.length > 0) {
-                interactiveTree = semanticResult.interactive_tree;
-                pageTitle = semanticResult.title;
-                viewport = semanticResult.viewport;
+              if (cdpResult && cdpResult.interactiveTree && cdpResult.interactiveTree.length > 0) {
+                interactiveTree = cdpResult.interactiveTree;
+                pageTitle = cdpResult.pageTitle;
+                viewport = cdpResult.viewport;
                 domMode = 'semantic';
 
-                console.log('[CurrentTask] Semantic extraction:', {
+                console.log('[CurrentTask] CDP semantic extraction:', {
                   mode: 'semantic',
                   nodeCount: interactiveTree.length,
-                  viewportNodes: semanticResult.meta.viewportElements,
-                  prunedNodes: semanticResult.meta.prunedElements,
-                  occludedNodes: semanticResult.meta.occludedElements,
-                  estimatedTokens: semanticResult.meta.estimatedTokens,
-                  extractionTimeMs: semanticResult.meta.extractionTimeMs,
-                  tokenReduction: `${Math.round((1 - (semanticResult.meta.estimatedTokens * 4) / currentDom.length) * 100)}%`,
+                  axNodeCount: cdpResult.meta.axNodeCount,
+                  estimatedTokens: cdpResult.meta.estimatedTokens,
+                  extractionTimeMs: cdpResult.meta.extractionTimeMs,
+                  tokenReduction: `${Math.round((1 - (cdpResult.meta.estimatedTokens * 4) / Math.max(currentDom.length, 1)) * 100)}%`,
                 });
               } else {
-                console.warn('[CurrentTask] Semantic extraction returned empty result:', {
-                  hasResult: !!semanticResult,
-                  hasTree: !!(semanticResult && semanticResult.interactive_tree),
-                  treeLength: semanticResult?.interactive_tree?.length ?? 0,
+                console.warn('[CurrentTask] CDP extraction returned empty result:', {
+                  hasResult: !!cdpResult,
+                  hasTree: !!(cdpResult && cdpResult.interactiveTree),
+                  treeLength: cdpResult?.interactiveTree?.length ?? 0,
                 });
-                console.warn('[CurrentTask] Falling back to skeleton/hybrid mode');
-                domMode = selectDomMode(safeInstructions, {
-                  interactiveElementCount: skeletonStats.interactiveCount,
-                });
+
+                // FALLBACK: Extract minimal interactive tree from skeleton DOM
+                // This keeps domMode as 'semantic' and avoids sending full skeletonDom
+                console.log('[CurrentTask] Using skeleton-based semantic fallback');
+                const fallbackTree = extractInteractiveTreeFromSkeleton(skeletonDom);
+
+                if (fallbackTree.length > 0) {
+                  // Convert MinimalSemanticNode[] to SemanticNode[]
+                  interactiveTree = fallbackTree.map(node => ({
+                    i: node.i,
+                    r: node.r,
+                    n: node.n,
+                    v: node.v,
+                  }));
+                  domMode = 'semantic';
+                  console.log('[CurrentTask] Skeleton-based semantic fallback:', {
+                    nodeCount: interactiveTree.length,
+                    skeletonLength: skeletonDom.length,
+                    estimatedTokens: interactiveTree.length * 10, // ~10 tokens per node
+                  });
+                } else {
+                  console.warn('[CurrentTask] Skeleton fallback also empty, using skeleton mode');
+                  domMode = selectDomMode(safeInstructions, {
+                    interactiveElementCount: skeletonStats.interactiveCount,
+                  });
+                }
               }
             } catch (semanticError: unknown) {
               const errorMessage = semanticError instanceof Error ? semanticError.message : String(semanticError);
               console.error('[CurrentTask] Semantic extraction RPC failed:', errorMessage);
-              domMode = selectDomMode(safeInstructions, {
-                interactiveElementCount: skeletonStats.interactiveCount,
-              });
+
+              // FALLBACK: Extract minimal interactive tree from skeleton DOM
+              // This keeps domMode as 'semantic' and avoids sending full skeletonDom
+              console.log('[CurrentTask] RPC failed - using skeleton-based semantic fallback');
+              const fallbackTree = extractInteractiveTreeFromSkeleton(skeletonDom);
+
+              if (fallbackTree.length > 0) {
+                interactiveTree = fallbackTree.map(node => ({
+                  i: node.i,
+                  r: node.r,
+                  n: node.n,
+                  v: node.v,
+                }));
+                domMode = 'semantic';
+                console.log('[CurrentTask] Skeleton-based semantic fallback (RPC error):', {
+                  nodeCount: interactiveTree.length,
+                  errorMessage,
+                });
+              } else {
+                console.warn('[CurrentTask] Skeleton fallback also empty, using skeleton mode');
+                domMode = selectDomMode(safeInstructions, {
+                  interactiveElementCount: skeletonStats.interactiveCount,
+                });
+              }
             }
           } else {
             // Semantic disabled - use skeleton/hybrid mode selection
@@ -2000,12 +1915,9 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             }
 
             // Mark start of network observation window for clientObservations.didNetworkOccur
+            // CDP-based network tracking (no content script needed)
             // Reference: INTERACT_FLOW_WALKTHROUGH.md § Client Contract: clientObservations
-            try {
-              await callRPC('setNetworkObservationMark', [], 1, tabId);
-            } catch {
-              // Non-fatal; didNetworkOccur will be undefined
-            }
+            cdpSetNetworkObservationMark(tabId);
             
             // Check if we're clicking a dropdown/popup button (hasPopup attribute)
             // This helps us wait longer for menu items to appear
@@ -2245,22 +2157,12 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 await sleep(2000); // Initial wait for page to start loading
                 
                 // Try to ping the content script to verify it's ready
-                let contentScriptReady = false;
-                for (let attempt = 0; attempt < 8; attempt++) {
-                  try {
-                    // Try to call a simple RPC to verify content script is responsive
-                    await callRPC('checkNetworkIdle', [], 1, tabId);
-                    contentScriptReady = true;
-                    console.log(`[CurrentTask] Content script ready after ${attempt + 1} attempt(s)`);
-                    break;
-                  } catch (pingError) {
-                    console.debug(`[CurrentTask] Content script not ready (attempt ${attempt + 1}/8), waiting...`);
-                    await sleep(1500); // Wait 1.5 seconds before retry
-                  }
-                }
-                
-                if (!contentScriptReady) {
-                  console.warn('[CurrentTask] Content script still not ready after navigation - will retry in DOM extraction');
+                // Wait for page to be ready via CDP (no content script needed)
+                const pageReady = await cdpWaitForPageReady(tabId, 12000); // 12 second timeout
+                if (pageReady) {
+                  console.log('[CurrentTask] Page ready after navigation (CDP)');
+                } else {
+                  console.warn('[CurrentTask] Page readiness timeout after navigation - will retry in DOM extraction');
                 }
                 
                 // Store minimal DOM changes for navigation (no actual DOM diff available)
@@ -2385,32 +2287,17 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     console.log('[CurrentTask] Waiting for new page content script after click-triggered navigation...');
                     await sleep(2000);
                     
-                    // Try to ping the content script
-                    let contentScriptReady = false;
-                    for (let attempt = 0; attempt < 5; attempt++) {
-                      try {
-                        await callRPC('checkNetworkIdle', [], 1, tabId);
-                        contentScriptReady = true;
-                        console.log(`[CurrentTask] Content script ready after ${attempt + 1} attempt(s)`);
-                        break;
-                      } catch (pingError) {
-                        console.debug(`[CurrentTask] Content script not ready (attempt ${attempt + 1}/5), waiting...`);
-                        await sleep(1000);
-                      }
-                    }
-                    
-                    if (!contentScriptReady) {
-                      console.warn('[CurrentTask] Content script still not ready after click-triggered navigation');
+                    // Wait for page to be ready via CDP
+                    const pageReady = await cdpWaitForPageReady(tabId, 5000);
+                    if (pageReady) {
+                      console.log('[CurrentTask] Page ready after click-triggered navigation (CDP)');
+                    } else {
+                      console.warn('[CurrentTask] Page readiness timeout after click-triggered navigation');
                     }
                   }
 
-                  // Did any network request occur during/after action? (for clientObservations.didNetworkOccur)
-                  let didNetworkOccur = false;
-                  try {
-                    didNetworkOccur = (await callRPC('getDidNetworkOccurSinceMark', [], 1, tabId)) ?? false;
-                  } catch {
-                    // Non-fatal
-                  }
+                  // Did any network request occur during/after action? (CDP-based tracking)
+                  const didNetworkOccur = cdpGetDidNetworkOccurSinceMark(tabId);
                   
                   // Store DOM changes in state for next API call (including URL change info for verification)
                   set((state) => {

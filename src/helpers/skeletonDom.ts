@@ -318,13 +318,86 @@ export function getSkeletonStats(originalDomLength: number, skeletonHtml: string
   // Count interactive elements by counting id= occurrences
   const interactiveCount = (skeletonHtml.match(/id="/g) || []).length;
   const skeletonLength = skeletonHtml.length;
-  const compressionRatio = originalDomLength > 0 
-    ? Math.round((1 - skeletonLength / originalDomLength) * 100) 
+  const compressionRatio = originalDomLength > 0
+    ? Math.round((1 - skeletonLength / originalDomLength) * 100)
     : 0;
-  
+
   return {
     interactiveCount,
     skeletonLength,
     compressionRatio,
   };
+}
+
+/**
+ * FALLBACK: Extract a minimal interactive tree from skeleton DOM HTML
+ * when semantic extraction via RPC fails.
+ *
+ * This provides ~95% token reduction compared to sending full skeletonDom.
+ *
+ * @param skeletonHtml - The skeleton DOM HTML string
+ * @returns Array of minified semantic nodes
+ */
+export interface MinimalSemanticNode {
+  i: string;  // ID
+  r: string;  // Role (minified)
+  n: string;  // Name/label
+  v?: string; // Value (for inputs)
+}
+
+const ROLE_MAP: Record<string, string> = {
+  'a': 'link',
+  'button': 'btn',
+  'input': 'inp',
+  'select': 'sel',
+  'textarea': 'inp',
+  'option': 'opt',
+};
+
+export function extractInteractiveTreeFromSkeleton(skeletonHtml: string): MinimalSemanticNode[] {
+  const nodes: MinimalSemanticNode[] = [];
+
+  // Parse the skeleton HTML
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(`<body>${skeletonHtml}</body>`, 'text/html');
+
+  // Find all elements with IDs (these are interactive)
+  const elements = doc.querySelectorAll('[id]');
+
+  elements.forEach(el => {
+    const id = el.getAttribute('id');
+    if (!id) return;
+
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute('role') || ROLE_MAP[tag] || tag.substring(0, 4);
+
+    // Get name from various sources
+    let name = el.getAttribute('aria-label') ||
+               el.getAttribute('name') ||
+               el.getAttribute('title') ||
+               el.getAttribute('placeholder') ||
+               el.textContent?.trim().substring(0, 50) ||
+               '';
+
+    // Clean up name
+    name = name.replace(/\s+/g, ' ').trim();
+    if (name.length > 50) name = name.substring(0, 47) + '...';
+
+    const node: MinimalSemanticNode = {
+      i: id,
+      r: role,
+      n: name,
+    };
+
+    // Add value for inputs
+    const value = el.getAttribute('value');
+    if (value) {
+      node.v = value.substring(0, 50);
+    }
+
+    nodes.push(node);
+  });
+
+  console.log(`[extractInteractiveTreeFromSkeleton] Extracted ${nodes.length} nodes from skeleton DOM`);
+  return nodes;
 }

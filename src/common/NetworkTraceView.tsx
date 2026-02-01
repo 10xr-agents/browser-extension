@@ -29,7 +29,6 @@ import {
 import { CopyIcon } from '@chakra-ui/icons';
 import { useAppState } from '../state/store';
 import type { NetworkLogEntry } from '../state/debug';
-import { callRPC } from '../helpers/pageRPC';
 
 const NetworkTraceView: React.FC = () => {
   const networkLogs = useAppState((state) => state.debug.networkLogs);
@@ -78,7 +77,8 @@ const NetworkTraceView: React.FC = () => {
 
   const handleCopyAll = async () => {
     try {
-      await callRPC('copyToClipboard', [JSON.stringify(filteredLogs, null, 2)]);
+      // Use native clipboard API directly (works in side panel context)
+      await navigator.clipboard.writeText(JSON.stringify(filteredLogs, null, 2));
     } catch (error) {
       console.error('Failed to copy logs:', error);
     }
@@ -177,7 +177,8 @@ const NetworkLogItem: React.FC<{
 
   const handleCopyUrl = async () => {
     try {
-      await callRPC('copyToClipboard', [log.endpoint]);
+      // Use native clipboard API directly (works in side panel context)
+      await navigator.clipboard.writeText(log.endpoint);
     } catch (error) {
       console.error('Failed to copy URL:', error);
     }

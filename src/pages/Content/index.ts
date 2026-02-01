@@ -8,7 +8,7 @@
  * Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #3 (State Wipe on Navigation)
  */
 
-import { watchForRPCRequests } from '../../helpers/pageRPC';
+// pageRPC removed - CDP-first architecture no longer uses content script RPC
 import { checkForActiveTask } from '../../helpers/taskPersistence';
 import { startAutoTagger } from './tagger';
 import { startMutationLogger } from './mutationLog';
@@ -86,7 +86,7 @@ async function checkAndResumeActiveTask(): Promise<void> {
 // Only set up the listener once, even if script is injected multiple times
 // Check if listener is already set up by checking for a marker on window
 if (!(window as any).__spadeworksContentScriptLoaded) {
-  watchForRPCRequests();
+  // watchForRPCRequests removed - CDP-first architecture
   (window as any).__spadeworksContentScriptLoaded = true;
   
   // === V3 ADVANCED: Initialize Tagger + Mutation Logger ===

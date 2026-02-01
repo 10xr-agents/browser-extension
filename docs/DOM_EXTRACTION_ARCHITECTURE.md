@@ -4,32 +4,35 @@
 
 **Last Updated:** February 1, 2026
 
-**Implementation Status:** ✅ Fully Integrated
+**Implementation Status:** ✅ Fully Integrated (CDP-First Architecture)
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| Semantic Extraction (PRIMARY) | ✅ Active | `semanticTree.ts` → `currentTask.ts` |
+| **CDP Extraction (PRIMARY)** | ✅ Active | `cdpDomExtractor.ts` → `currentTask.ts` |
+| CDP Lifecycle (Page Ready) | ✅ Active | `cdpLifecycle.ts` |
+| CDP Visual Feedback | ✅ Active | `cdpVisualFeedback.ts` |
+| Viewport Pruning | ✅ Active | `extractDomViaCDP()` |
 | Skeleton/Hybrid (Fallback) | ✅ Active | `skeletonDom.ts`, `hybridCapture.ts` |
-| Viewport Pruning | ✅ Active | `extractSemanticTreeV3()` |
-| Raycasting (Modal Killer) | ✅ Active | `isActuallyClickable()` |
-| Label Hunting | ✅ Active | `findLabelForInput()` |
-| Mutation Stream | ✅ Implemented | `mutationLog.ts` |
 | Delta Hashing | ✅ Implemented | `deltaHash.ts` |
 | DOM RAG | ✅ Implemented | `domRag.ts` |
 | Sentinel Verification | ✅ Implemented | `sentinelVerification.ts` |
-| AXTree (CDP) | ✅ Implemented | `axTreeExtractor.ts` |
 | Backend Negotiation | ✅ Active | `currentTask.ts` (needs_context handling) |
+
+> **Architecture Change (Feb 2026):** Content scripts have been **removed**. All DOM extraction now uses Chrome DevTools Protocol (CDP) directly from the background service worker. This eliminates "content script not ready" race conditions and provides stable element IDs via `backendNodeId`.
 
 ## Extraction Flow
 
 ```
-1. Semantic Extraction (PRIMARY) - ~25-75 tokens
-   └── getSemanticDomV3() with viewport pruning, raycasting
+1. CDP Extraction (PRIMARY) - ~25-75 tokens
+   └── extractDomViaCDP() using Accessibility.getFullAXTree + DOMSnapshot
 
-2. Skeleton/Hybrid (FALLBACK) - ~500-3000 tokens
-   └── selectDomMode() based on query keywords (if semantic fails)
+2. Legacy Accessibility (FALLBACK) - ~50-150 tokens
+   └── getAccessibilityTree() if CDP extraction fails
 
-3. Backend Negotiation (ON REQUEST)
+3. Skeleton/Hybrid (FALLBACK) - ~500-3000 tokens
+   └── selectDomMode() based on query keywords (if both fail)
+
+4. Backend Negotiation (ON REQUEST)
    └── needs_context/needs_full_dom → retry with requested artifacts
 ```
 
@@ -38,24 +41,26 @@
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Semantic Architecture - Ultra-Light Extraction](#2-semantic-architecture---ultra-light-extraction)
-   - 2.5 [Advanced Features](#25-advanced-features-production-grade)
-   - 2.6 [Production-Grade Features](#26-production-grade-features)
-   - 2.7 [Element ID Strategy: data-llm-id vs backendNodeId](#27-element-id-strategy-data-llm-id-vs-backendnodeid)
-   - 2.8 [Midscene-Inspired Optimizations](#28-midscene-inspired-optimizations)
-3. [Extraction Pipeline](#3-extraction-pipeline)
-4. [The Tag & Freeze Strategy](#4-the-tag--freeze-strategy)
+2. [CDP-First Architecture](#2-cdp-first-architecture)
+   - 2.1 [Why CDP Over Content Scripts](#21-why-cdp-over-content-scripts)
+   - 2.2 [CDP Domains Used](#22-cdp-domains-used)
+   - 2.3 [Element ID Strategy: backendNodeId](#23-element-id-strategy-backendnodeid)
+   - 2.4 [Page Lifecycle Detection](#24-page-lifecycle-detection)
+3. [Semantic Architecture - Ultra-Light Extraction](#3-semantic-architecture---ultra-light-extraction)
+   - 3.5 [Advanced Features](#35-advanced-features-production-grade)
+   - 3.6 [Production-Grade Features](#36-production-grade-features)
+   - 3.7 [Midscene-Inspired Optimizations](#37-midscene-inspired-optimizations)
+4. [Extraction Pipeline](#4-extraction-pipeline)
 5. [Shadow DOM Support](#5-shadow-dom-support)
-6. [Iframe Support (Distributed Extraction)](#6-iframe-support-distributed-extraction)
+6. [Iframe Support](#6-iframe-support)
 7. [Extraction Modes](#7-extraction-modes)
 8. [Semantic JSON Protocol](#8-semantic-json-protocol)
 9. [Skeleton DOM Extraction](#9-skeleton-dom-extraction)
-10. [Full DOM Extraction](#10-full-dom-extraction)
-11. [DOM Stability Waiting](#11-dom-stability-waiting)
-12. [What Gets Sent to the LLM](#12-what-gets-sent-to-the-llm)
-13. [Mode Selection Logic](#13-mode-selection-logic)
-14. [Fallback Handling](#14-fallback-handling)
-15. [Source Files Reference](#15-source-files-reference)
+10. [DOM Stability Waiting](#10-dom-stability-waiting)
+11. [What Gets Sent to the LLM](#11-what-gets-sent-to-the-llm)
+12. [Mode Selection Logic](#12-mode-selection-logic)
+13. [Fallback Handling](#13-fallback-handling)
+14. [Source Files Reference](#14-source-files-reference)
 
 ---
 
@@ -71,49 +76,195 @@ LLMs need to "see" the page to decide what to click, type, or interact with. How
 2. **Most HTML is irrelevant** - Scripts, styles, nested divs are noise for the LLM
 3. **Element IDs drift** - On dynamic sites (React, Vue), element positions change after re-renders
 4. **Timing matters** - Pages load progressively; extracting too early gives incomplete data
+5. **Content script race conditions** - Content scripts die on navigation and take time to re-inject
 
 ### The Solution
 
-We use a multi-layered extraction system:
+We use **Chrome DevTools Protocol (CDP)** for direct DOM extraction from the background service worker:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    DOM EXTRACTION PIPELINE                       │
+│                CDP-FIRST EXTRACTION PIPELINE                      │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
-│  │   Tagger     │───▶│   Waiter     │───▶│    Extractor     │  │
+│  │  CDP Attach  │───▶│ Page Ready   │───▶│  CDP Extraction  │  │
 │  │              │    │              │    │                  │  │
-│  │ Assigns      │    │ Waits for    │    │ Semantic (JSON)  │  │
-│  │ data-llm-id  │    │ DOM stable   │    │ Skeleton (HTML)  │  │
-│  │              │    │              │    │ Full (HTML)      │  │
+│  │ Debugger     │    │ Lifecycle +  │    │ AXTree + DOM     │  │
+│  │ attach()     │    │ Network Idle │    │ Snapshot merge   │  │
+│  │              │    │              │    │                  │  │
 │  └──────────────┘    └──────────────┘    └──────────────────┘  │
 │                                                                  │
 │         ▼                    ▼                    ▼             │
-│  Elements tagged      300ms no mutations    Mode selected       │
-│  on page load         before extraction     based on query      │
+│  CDP session         CDP lifecycle        SemanticNodeV3[]      │
+│  persists across     events ensure        with backendNodeId    │
+│  navigations         page is ready        for stable targeting  │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Key Benefits of CDP-First
+
+| Benefit | Description |
+|---------|-------------|
+| **No race conditions** | CDP session persists across navigations |
+| **Stable element IDs** | `backendNodeId` doesn't drift on re-renders |
+| **No content scripts** | Zero injection timing issues |
+| **Faster extraction** | Direct CDP access vs content script round-trip |
+| **Better error handling** | CDP errors are immediate and clear |
+
 ---
 
-## 2. Semantic Architecture - Ultra-Light Extraction
+## 2. CDP-First Architecture
 
-**Semantic JSON is the current PRIMARY extraction mode.** It provides 99.8% token reduction through key innovations.
+### 2.1 Why CDP Over Content Scripts
+
+The previous architecture used content scripts injected into every page, which caused several issues:
+
+| Problem | Content Script Issue | CDP Solution |
+|---------|---------------------|--------------|
+| Script not ready | Content scripts die on navigation, need re-injection | CDP debugger session persists |
+| Race conditions | Script injection timing varies | Synchronous CDP commands |
+| ID drift | `data-llm-id` wiped on framework re-renders | `backendNodeId` is stable |
+| Shadow DOM | Requires special library | Chrome handles automatically |
+| Iframe content | Complex distributed extraction | Chrome stitches frames together |
+
+### 2.2 CDP Domains Used
+
+| Domain | Commands | Purpose |
+|--------|----------|---------|
+| **Accessibility** | `enable`, `getFullAXTree` | Get semantic role, name, value, backendDOMNodeId |
+| **DOMSnapshot** | `enable`, `captureSnapshot` | Get bounds, visibility, paint order |
+| **DOM** | `enable`, `resolveNode` | Convert backendNodeId to objectId for actions |
+| **Page** | `enable`, lifecycle events | Detect page load states |
+| **Network** | `enable`, request events | Track in-flight requests for network idle |
+| **Runtime** | `evaluate` | Inject ripple effect, get viewport info |
+
+### 2.3 Element ID Strategy: backendNodeId
+
+**File:** `src/helpers/cdpDomExtractor.ts`
+
+Chrome assigns each DOM node a unique `backendNodeId` that:
+- Is **immutable** - assigned at node creation
+- **Survives re-renders** - same node keeps same ID
+- **Works across frames** - unique within the page
+- **Enables direct resolution** - convert to objectId for CDP actions
+
+```typescript
+// CDP extraction returns backendNodeId as the element ID
+interface SemanticNodeV3 {
+  i: string;   // backendNodeId as string
+  r: string;   // Role (minified: btn, inp, link, etc.)
+  n: string;   // Name/label
+  v?: string;  // Value
+  s?: string;  // State (disabled, checked, expanded)
+  xy?: [number, number];  // Center coordinates
+  box?: [number, number, number, number];  // Bounding box [x,y,w,h]
+  f?: number;  // Frame ID (0 = main, omitted if 0)
+  occ?: boolean;  // Occluded by overlay
+  scr?: { depth: string; h: boolean };  // Scrollable container info
+}
+```
+
+**Action Execution with backendNodeId:**
+
+```typescript
+// src/helpers/domActions.ts - CDP-first resolution
+async function getObjectId(elementId: number | string, tabId: number): Promise<string | null> {
+  const originalId = typeof elementId === 'string' ? parseInt(elementId, 10) : elementId;
+
+  // CDP-FIRST: Resolve backendNodeId directly
+  const result = await sendCommand('DOM.resolveNode', {
+    backendNodeId: originalId,
+  });
+
+  if (result?.object?.objectId) {
+    return result.object.objectId;
+  }
+
+  // Fallback: querySelector for legacy compatibility
+  // ...
+}
+```
+
+### 2.4 Page Lifecycle Detection
+
+**File:** `src/helpers/cdpLifecycle.ts`
+
+CDP provides lifecycle events for reliable page readiness detection:
+
+```typescript
+// Wait for page to be ready before extraction
+export async function waitForPageReady(tabId: number, timeoutMs: number = 15000): Promise<boolean> {
+  // 1. Check if already attached to debugger
+  // 2. Listen for Page.lifecycleEvent (load, DOMContentLoaded, networkIdle)
+  // 3. Wait for Network.loadingFinished on all requests
+  // 4. Additional 500ms stability buffer
+}
+
+// Track network activity for DOM change detection
+export function setNetworkObservationMark(tabId: number): void;
+export function getDidNetworkOccurSinceMark(tabId: number): boolean;
+```
+
+**Benefits over content script DOM waiting:**
+- No MutationObserver overhead in page
+- Direct access to browser lifecycle events
+- Accurate network idle detection
+
+---
+
+## 3. Semantic Architecture - Ultra-Light Extraction
+
+**CDP-based Semantic JSON is the current PRIMARY extraction mode.** It provides 99.8% token reduction through key innovations.
 
 ### Key Principle
 
 > **Semantic JSON is the ONLY source of truth. Full DOM should NEVER be sent proactively — only when the backend explicitly requests it via `needs_full_dom` response.**
 
+### CDP-Based Semantic Extraction
+
+**File:** `src/helpers/cdpDomExtractor.ts`
+
+The primary extraction now uses CDP directly:
+
+```typescript
+export async function extractDomViaCDP(tabId: number): Promise<CDPExtractionResult> {
+  // 1. Get accessibility tree with all semantic info
+  const { nodes } = await sendCommand('Accessibility.getFullAXTree');
+
+  // 2. Get DOM snapshot for bounds/visibility
+  const snapshot = await sendCommand('DOMSnapshot.captureSnapshot', {
+    computedStyles: [],
+    includePaintOrder: true,
+    includeDOMRects: true,
+  });
+
+  // 3. Build backendNodeId → bounds lookup from snapshot
+  // 4. Filter to interactive nodes only
+  // 5. Merge AX info with bounds → SemanticNodeV3[]
+  // 6. Apply viewport pruning
+
+  return {
+    interactiveTree: semanticNodes,
+    viewport: { width, height },
+    pageTitle,
+    url,
+    scrollPosition,
+    meta: { nodeCount, extractionTimeMs, axNodeCount, estimatedTokens }
+  };
+}
+```
+
 ### Semantic Enhancements
 
 | Enhancement | Description | Impact |
 |-------------|-------------|--------|
+| **CDP AXTree** | `Accessibility.getFullAXTree` for 100% reliable extraction | Bypasses all DOM issues |
 | **Viewport Pruning** | Skip elements below/above the visible viewport | ~60% reduction on long pages |
 | **Minified JSON Keys** | `i/r/n/v/s/xy` instead of `id/role/name/value/state/coordinates` | ~30% reduction |
 | **Coordinates Included** | `[x, y]` center point for direct click targeting | Eliminates coordinate lookups |
-| **AXTree Alternative** | CDP `Accessibility.getFullAXTree` for 100% reliable extraction | Bypasses all DOM issues |
+| **Stable IDs** | `backendNodeId` doesn't drift on re-renders | No self-healing needed |
 
 ### Token Cost Comparison
 
@@ -194,32 +345,48 @@ if (rect.width === 0 && rect.height === 0) {
 
 **Result:** On a Twitter feed with 100 elements, only ~40 visible elements are sent.
 
-### AXTree Extraction (Alternative)
+### CDP AXTree Extraction (Primary Method)
 
-Semantic mode also provides an AXTree-based extraction via CDP for 100% reliable element detection:
+**File:** `src/helpers/cdpDomExtractor.ts`
+
+The CDP extractor provides 100% reliable element detection:
 
 ```typescript
-// src/helpers/axTreeExtractor.ts
-async function extractAXTree(tabId: number) {
-  // 1. Enable Accessibility domain
-  await chrome.debugger.sendCommand({ tabId }, 'Accessibility.enable');
+// Core extraction logic
+async function extractDomViaCDP(tabId: number): Promise<CDPExtractionResult> {
+  const target = { tabId };
 
-  // 2. Get clean tree (Chrome handles Shadow DOM + iframes)
-  const { nodes } = await chrome.debugger.sendCommand(
-    { tabId }, 
+  // 1. Get full accessibility tree
+  const axResult = await chrome.debugger.sendCommand(
+    target,
     'Accessibility.getFullAXTree'
   );
 
-  // 3. Filter to interactive elements only
-  return nodes.filter(node => 
-    INTERACTIVE_ROLES.has(node.role?.value) && 
-    node.name?.value
-  ).map(node => ({
-    i: String(node.backendDOMNodeId),
-    r: ROLE_MAP[node.role.value] || node.role.value,
-    n: node.name.value.substring(0, 50),
-    // ... state, value, coordinates
-  }));
+  // 2. Get DOM snapshot for bounds
+  const snapshot = await chrome.debugger.sendCommand(
+    target,
+    'DOMSnapshot.captureSnapshot',
+    { computedStyles: [], includePaintOrder: true, includeDOMRects: true }
+  );
+
+  // 3. Build bounds lookup: backendNodeId → [x, y, w, h]
+  const boundsMap = buildBoundsMap(snapshot);
+
+  // 4. Filter to interactive roles and map to SemanticNodeV3
+  const interactiveTree = axResult.nodes
+    .filter(node => !node.ignored && INTERACTIVE_ROLES.has(node.role?.value))
+    .map(node => ({
+      i: String(node.backendDOMNodeId),
+      r: ROLE_MAP[node.role.value] || node.role.value,
+      n: node.name?.value?.substring(0, 80) || '',
+      v: node.value?.value,
+      s: extractState(node.properties),
+      xy: getCenterFromBounds(boundsMap.get(node.backendDOMNodeId)),
+      box: boundsMap.get(node.backendDOMNodeId),
+    }))
+    .filter(node => isInViewport(node.box, viewport));
+
+  return { interactiveTree, viewport, pageTitle, url, scrollPosition, meta };
 }
 ```
 
@@ -228,10 +395,11 @@ async function extractAXTree(tabId: number) {
 - Bypasses Shadow DOM automatically
 - Bypasses iframes automatically
 - Zero content script overhead
+- Stable `backendNodeId` for action targeting
 
 ---
 
-## 2.5 Advanced Features (Production-Grade)
+## 3.5 Advanced Features (Production-Grade)
 
 The semantic architecture includes production-grade reliability features that match state-of-the-art agents like Browser Use and OpenHands.
 
@@ -247,7 +415,7 @@ The semantic architecture includes production-grade reliability features that ma
 | **Self-Healing Recovery** | Element IDs become stale after React re-render | Auto-recovers from stale IDs |
 | **Bounding Box (Set-of-Mark)** | Multimodal vision needs element positions | Future-proof for GPT-4o vision |
 
-### 2.5.1 True Visibility Raycasting (Modal Killer)
+### 3.5.1 True Visibility Raycasting (Modal Killer)
 
 **Problem:** An element with `display: block` might be covered by a popup, cookie banner, or transparent overlay. Clicks are intercepted by the overlay.
 
@@ -305,7 +473,7 @@ function isActuallyClickable(element: HTMLElement): boolean {
 - Elements behind semi-transparent overlays
 - Modals that don't cover center but block interaction
 
-### 2.5.1.1 Hidden Event Listener Detection (Browser-Use Inspired)
+### 3.5.1.1 Hidden Event Listener Detection (Browser-Use Inspired)
 
 **Problem:** Modern SPAs (React, Vue, Angular) attach click handlers via JavaScript that are invisible to standard DOM inspection. CDP's `isClickable` flag and our tagger don't detect:
 - React's `onClick` (synthetic events)
@@ -353,7 +521,7 @@ const result = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', 
 - `src/helpers/hiddenListenerDetector.ts` - Detection and marking logic
 - Reference: `docs/browser-use-dom-extraction.md` - Full Browser-Use implementation details
 
-### 2.5.2 Explicit Label Association (Form Fix)
+### 3.5.2 Explicit Label Association (Form Fix)
 
 **Problem:** Inputs often have no meaningful attributes. The label "Email Address" is in a separate `<span>`.
 
@@ -373,7 +541,9 @@ function findLabelForInput(input: HTMLElement): string {
 
 **Impact:** `{"role": "input", "name": "Email Address"}` instead of `{"role": "input", "name": ""}`
 
-### 2.5.3 Mutation Stream (Ghost State Detection)
+### 3.5.3 Mutation Stream (Ghost State Detection)
+
+> **Note:** With CDP-first architecture, mutation tracking is now done via `CDP DOM.mutated` events rather than content script MutationObserver.
 
 **Problem:** Static snapshots miss transient events. Success toast appears for 2s and vanishes.
 
@@ -407,7 +577,7 @@ export function getRecentMutations(): string[] {
 }
 ```
 
-### 2.5.4 Delta Hashing (Bandwidth Optimization)
+### 3.5.4 Delta Hashing (Bandwidth Optimization)
 
 **Problem:** Sending JSON tree every 2s wastes bandwidth if nothing changed.
 
@@ -431,7 +601,7 @@ export function shouldSendTree(tree: SemanticTreeResultV3): boolean {
 
 **Impact:** ~50% bandwidth reduction during typing/waiting steps
 
-### 2.5.5 Virtual List Detection (Infinite Scroll Fix)
+### 3.5.5 Virtual List Detection (Infinite Scroll Fix)
 
 **Problem:** Virtual lists (Twitter, LinkedIn) only render visible items. Hidden content not in DOM.
 
@@ -453,35 +623,40 @@ if (element.scrollHeight > element.clientHeight + 50) {
 
 **LLM Instruction:** "If target not found, emit `scroll(id)` to load more content"
 
-### 2.5.6 Self-Healing Element Recovery (Stale ID Fix)
+### 3.5.6 Stable IDs with backendNodeId (Replaces Self-Healing)
 
-**Problem:** React/Vue can destroy/recreate elements between LLM decision and execution. ID becomes invalid.
+**Problem (Old):** React/Vue can destroy/recreate elements between LLM decision and execution. Content script `data-llm-id` becomes invalid.
 
-**Solution:** "Ghost Match" recovery using role + name + coordinates:
+**Solution (CDP-First):** Use Chrome's `backendNodeId` which is **immutable** for the lifetime of the node:
 
 ```typescript
-// src/helpers/domActions.ts
-async function findGhostMatch(config: GhostMatchConfig): Promise<GhostMatchResult | null> {
-  // Confidence scoring:
-  // - Exact text match: +0.4
-  // - Role match: +0.3
-  // - Coordinates within 50px: +0.3
-  
-  // Find element with highest confidence >= threshold
-  // Return recovered objectId
+// src/helpers/domActions.ts - CDP-first resolution
+async function getObjectId(elementId: number | string, tabId: number): Promise<string | null> {
+  const backendNodeId = typeof elementId === 'string' ? parseInt(elementId, 10) : elementId;
+
+  // Direct resolution via CDP - no searching needed
+  const result = await sendCommand('DOM.resolveNode', {
+    backendNodeId,
+  });
+
+  if (result?.object?.objectId) {
+    return result.object.objectId;
+  }
+
+  // Fallback: querySelector for legacy compatibility
+  // ...
 }
 ```
 
-**Workflow:**
-1. Backend sends: `click(id="55")`
-2. Extension: ID 55 not found!
-3. Self-Heal: Search for element with same role/name/coordinates
-4. If confidence ≥ 50%: Execute on recovered element
-5. Report: "Action executed on recovered element (ID 55 → ID 92)"
+**Benefits:**
+- **No ID drift** - backendNodeId is assigned at DOM node creation
+- **No self-healing needed** - ID is stable across re-renders (if the node survives)
+- **Instant resolution** - Direct CDP call vs searching the DOM
+- **Accurate error reporting** - If node is truly gone, we know immediately
 
-**Impact:** Saves 5-10 second error loop round-trip
+> **Legacy Self-Healing:** The ghost match recovery is still available as a fallback for edge cases where an element is destroyed and recreated, but it's rarely needed with CDP-first architecture.
 
-### 2.5.7 Bounding Box for Set-of-Mark
+### 3.5.7 Bounding Box for Set-of-Mark
 
 **Problem:** Pure JSON can't describe "the blue button" or "center card".
 
@@ -525,7 +700,7 @@ async function findGhostMatch(config: GhostMatchConfig): Promise<GhostMatchResul
 
 ---
 
-## 2.6 Production-Grade Features
+## 3.6 Production-Grade Features
 
 These features bring the extension to parity with state-of-the-art agents like Devin, MultiOn, and Browser Use.
 
@@ -537,11 +712,11 @@ These features bring the extension to parity with state-of-the-art agents like D
 | **DOM RAG** | `domRag.ts` | Handles massive pages (5000+ elements) without token overflow |
 | **Sentinel Verification** | `sentinelVerification.ts` | Verifies actions actually worked (catches silent failures) |
 
-### 2.6.1 Self-Healing (Ghost Match Recovery)
+### 3.6.1 Stable IDs (backendNodeId)
 
-**Already implemented.** See [Section 2.5.6](#256-self-healing-element-recovery-stale-id-fix).
+**Already implemented.** See [Section 3.5.6](#356-stable-ids-with-backendnodeid-replaces-self-healing).
 
-### 2.6.2 DOM RAG (Retrieval-Augmented Generation)
+### 3.6.2 DOM RAG (Retrieval-Augmented Generation)
 
 **Problem:** Amazon search results or Wikipedia articles can have 5,000+ elements. Even optimized JSON hits 30k+ tokens.
 
@@ -613,7 +788,7 @@ Backend can re-rank chunks using embeddings:
 }
 ```
 
-### 2.6.3 Sentinel Verification System
+### 3.6.3 Sentinel Verification System
 
 **Problem:** LLM clicks "Save" and assumes it worked. But a tiny "Invalid Email" toast appeared for 1 second and vanished. The agent continues happily, failing 5 steps later.
 
@@ -733,119 +908,20 @@ interface VerificationResult {
 
 | Layer | Feature | Impact |
 |-------|---------|--------|
-| **Extraction** | AXTree (CDP) | 100% reliable structure |
-| **Navigation** | Distributed Iframe | Enterprise apps (Salesforce) |
-| **Stability** | Self-Healing | Fixes stale elements locally |
+| **Extraction** | CDP AXTree | 100% reliable structure |
+| **Navigation** | CDP Lifecycle | Accurate page readiness |
+| **Stability** | backendNodeId | Immutable element IDs |
 | **Speed** | DOM RAG | Handles massive pages |
 | **Accuracy** | Sentinel Checks | Catches silent failures |
 | **Vision** | Set-of-Mark | Multimodal ready |
 
 ---
 
-## 2.7 Element ID Strategy: `data-llm-id` vs `backendNodeId`
-
-### The Trade-Off
-
-Browser-Use uses Chrome's native `backendNodeId` from CDP, while we use injected `data-llm-id` attributes. Each approach has distinct advantages:
-
-| Aspect | Our Approach (`data-llm-id`) | Browser-Use (`backendNodeId`) |
-|--------|------------------------------|-------------------------------|
-| **ID Source** | Injected attribute via content script | Chrome's internal node identifier |
-| **Stability** | Persists across re-renders if element survives | Immutable - assigned by Chrome at node creation |
-| **Risk** | Can be wiped if framework destroys/recreates DOM node | Requires active debugger session |
-| **Debugger Banner** | ❌ Not required for basic operation | ⚠️ Shows "Chrome is being controlled by automated software" |
-| **Stealthiness** | ✅ Extension operates invisibly | ❌ Visible debugging indicator |
-| **Shadow DOM** | Requires `querySelectorAllDeep` to pierce | Chrome handles automatically |
-| **Iframe Support** | Requires distributed extraction | Chrome stitches frames together |
-
-### Why We Chose `data-llm-id`
-
-1. **User Experience:** No debugging banner that alarms users or triggers bot detection
-2. **Stealth Operation:** Extension can work without visible indicators that automation is active
-3. **Compatibility:** Works on sites that detect/block debugger connections
-4. **Simplicity:** Content script injection is more straightforward than maintaining CDP sessions
-
-### Mitigations for ID Instability
-
-Since injected IDs can be lost when frameworks completely destroy and recreate DOM nodes, we have multiple layers of protection:
-
-#### 1. MutationObserver Re-Tagging (`tagger.ts`)
-
-```typescript
-// Automatically re-tags new elements as they appear
-const observer = new MutationObserver((mutations) => {
-  if (mutations.some(m => m.addedNodes.length > 0)) {
-    ensureStableIds(); // Re-tag any untagged interactive elements
-  }
-});
-observer.observe(document.body, { childList: true, subtree: true });
-```
-
-#### 2. Self-Healing Ghost Match (`domActions.ts`)
-
-When an ID becomes stale, we recover using role + name + coordinates:
-
-```typescript
-// If element ID not found, attempt ghost match recovery
-const ghostMatch = await findGhostMatch({
-  name: originalName,
-  role: originalRole,
-  coordinates: originalXY,
-  minConfidence: 0.5,
-});
-// Confidence scoring: exact text +0.4, role match +0.3, coordinates within 50px +0.3
-```
-
-#### 3. Coordinate-Based Fallback
-
-Even if ID is lost, the `xy` coordinates in the semantic payload allow CDP-based clicking:
-
-```typescript
-// Fallback: click by coordinates via CDP
-await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-  type: 'click',
-  x: savedCoordinates[0],
-  y: savedCoordinates[1],
-});
-```
-
-### When to Use CDP `backendNodeId`
-
-For operations that **already require the debugger** (hidden listener detection, AXTree extraction), we do use `backendNodeId`:
-
-```typescript
-// axTreeExtractor.ts - uses backendDOMNodeId for reliability
-const nodes = await chrome.debugger.sendCommand({ tabId }, 'Accessibility.getFullAXTree');
-nodes.forEach(node => {
-  // node.backendDOMNodeId is stable within the debugger session
-  semanticNodes.push({ i: String(node.backendDOMNodeId), ... });
-});
-```
-
-### Hybrid Approach (Future Consideration)
-
-A potential enhancement: use `data-llm-id` for normal operation, but opportunistically capture `backendNodeId` when debugger is already attached (e.g., for hidden listener detection) and store the mapping:
-
-```typescript
-// Potential future enhancement
-interface ElementMapping {
-  llmId: string;           // Our injected ID
-  backendNodeId?: number;  // CDP ID when available
-  lastKnownXY: [number, number];
-  role: string;
-  name: string;
-}
-```
-
-This would give us the best of both worlds: stealth operation normally, with CDP-grade stability when the debugger is attached anyway.
-
----
-
-## 2.8 Midscene-Inspired Optimizations
+## 3.7 Midscene-Inspired Optimizations
 
 Midscene uses a "vision-first" approach but its optional DOM extractor has several clever optimizations that we've adopted to further reduce token count and improve reliability.
 
-### 2.8.1 Atomic Leaf Traversal (~30% Tree Depth Reduction)
+### 3.7.1 Atomic Leaf Traversal (~30% Tree Depth Reduction)
 
 **Problem:** Standard extraction recurses into everything: `div > button > span > i > text`, creating unnecessary depth in the JSON tree.
 
@@ -884,7 +960,7 @@ function getAtomicElementText(element: HTMLElement): string {
 
 **Impact:** Reduces tree depth and token count by ~30% on complex UIs like Gmail, Slack, or Salesforce.
 
-### 2.8.2 The 2/3 Visibility Rule (Precision Pruning)
+### 3.7.2 The 2/3 Visibility Rule (Precision Pruning)
 
 **Problem:** Simple viewport bounds checking includes elements that are only 1px visible. Clicking the very edge of a partially visible button often fails.
 
@@ -914,7 +990,7 @@ function isReliablyVisible(element: HTMLElement, minVisibleRatio = 0.66): boolea
 
 **Impact:** Prevents the LLM from trying to interact with half-hidden elements that require scrolling first.
 
-### 2.8.3 Container Classification (Tree Flattening)
+### 3.7.3 Container Classification (Tree Flattening)
 
 **Problem:** Generic `<div>` wrappers without visual styling don't add semantic value but bloat the tree.
 
@@ -945,7 +1021,7 @@ function isMeaningfulContainer(element: HTMLElement): boolean {
 
 **Impact:** Flattens the tree by removing invisible wrapper divs that confuse the LLM.
 
-### 2.8.4 Extraction Options
+### 3.7.4 Extraction Options
 
 New options available in `extractSemanticTreeV3()`:
 
@@ -955,7 +1031,7 @@ New options available in `extractSemanticTreeV3()`:
 | `minVisibleRatio` | `0.66` | Minimum visible area ratio (2/3 rule) |
 | `pruneEmptyContainers` | `true` | Strip generic containers without visual boundaries |
 
-### 2.8.5 Combined Impact
+### 3.7.5 Combined Impact
 
 | Optimization | Token Reduction | Reliability Improvement |
 |--------------|-----------------|-------------------------|
@@ -964,7 +1040,7 @@ New options available in `extractSemanticTreeV3()`:
 | Container Pruning | ~15-20% | Less noise for LLM |
 | **Combined** | **~50-60%** | **Significantly more reliable** |
 
-### 2.8.6 Comparison with Midscene
+### 3.7.6 Comparison with Midscene
 
 | Aspect | Midscene | Spadeworks V4 |
 |--------|----------|---------------|
@@ -979,137 +1055,55 @@ New options available in `extractSemanticTreeV3()`:
 
 ---
 
-## 3. Extraction Pipeline
+## 4. Extraction Pipeline
 
-This section is now integrated into the main extraction pipeline documentation below.
-
----
-
-## 4. The Tag & Freeze Strategy
-
-### Step-by-Step Flow
+### CDP-First Step-by-Step Flow
 
 When a task runs, the following sequence occurs on each action cycle:
 
 ```
-1. TAGGER (runs on page load)
-   └── Injects data-llm-id="1", "2", "3"... into interactive elements
-   └── MutationObserver watches for new elements
+1. CDP ATTACH (once per session)
+   └── chrome.debugger.attach({ tabId }, '1.3')
+   └── Enable domains: Accessibility, DOM, DOMSnapshot, Page, Network, Runtime
+   └── Session persists across navigations
 
-2. DOM STABILITY WAIT (before extraction)
-   └── Wait up to 3 seconds for DOM mutations to settle
-   └── Wait for network activity to complete
-   └── Minimum 300ms of "quiet" before proceeding
+2. PAGE READY WAIT (before extraction)
+   └── waitForPageReady() via cdpLifecycle.ts
+   └── Page.lifecycleEvent for load/DOMContentLoaded/networkIdle
+   └── Network.loadingFinished for all requests
+   └── 500ms stability buffer
 
-3. MODE SELECTION
-   └── Analyze user query for visual keywords
-   └── Check page complexity (element count)
-   └── Select: semantic | skeleton | hybrid | full
+3. CDP EXTRACTION
+   └── Accessibility.getFullAXTree → semantic roles, names, backendDOMNodeId
+   └── DOMSnapshot.captureSnapshot → bounds, visibility, paint order
+   └── Merge into SemanticNodeV3[] format
+   └── Apply viewport pruning
 
-4. EXTRACTION (based on mode)
-   └── SEMANTIC: Extract JSON array of tagged elements
-   └── SKELETON: Extract minimal HTML of interactive elements
-   └── HYBRID: Screenshot + skeleton
-   └── FULL: Complete templatized HTML
-
-5. PAYLOAD CONSTRUCTION
-   └── Build request body with selected mode
-   └── Always include fallback fields
+4. PAYLOAD CONSTRUCTION
+   └── Build request body with semantic tree
    └── Send to POST /api/agent/interact
 
-6. LLM DECISION
+5. LLM DECISION
    └── Backend processes payload
-   └── Returns: { thought, action: "click(7)" }
+   └── Returns: { thought, action: "click(100)" }  // backendNodeId
 
-7. ACTION EXECUTION
-   └── Find element by [data-llm-id="7"]
-   └── Execute click/setValue/etc.
+6. ACTION EXECUTION
+   └── DOM.resolveNode({ backendNodeId: 100 }) → objectId
+   └── Execute action via Runtime.callFunctionOn or Input.dispatchMouseEvent
+   └── Show ripple feedback via Runtime.evaluate
    └── Loop back to step 2
 ```
 
 ### Code Location
 
-The main extraction logic lives in `src/state/currentTask.ts` within the `runTaskLoop()` function, specifically around the "transforming-dom" action status phase.
+The main extraction logic lives in:
+- `src/helpers/cdpDomExtractor.ts` - Core CDP extraction
+- `src/helpers/cdpLifecycle.ts` - Page readiness detection
+- `src/state/currentTask.ts` - Task orchestration and action execution
 
 ---
 
-## 5. The Tag & Freeze Strategy
-
-### Problem: ID Drift
-
-Traditional DOM extraction calculates IDs during extraction:
-
-```javascript
-// OLD APPROACH (problematic)
-elements.forEach((el, index) => {
-  el.setAttribute('data-id', index);  // ID assigned during extraction
-});
-```
-
-By the time the LLM returns an action (2-5 seconds later), React/Vue may have re-rendered the page, and the element at index 6 might now be index 8 or gone entirely.
-
-### Solution: Persistent Tagging
-
-We inject stable IDs **early and permanently**:
-
-```javascript
-// NEW APPROACH (stable)
-// tagger.ts runs when page loads
-el.setAttribute('data-llm-id', uniqueIdCounter++);  // ID stamped permanently
-```
-
-### How the Tagger Works
-
-**File:** `src/pages/Content/tagger.ts`
-
-```typescript
-// 1. Selectors for interactive elements
-const INTERACTIVE_SELECTORS = [
-  'a[href]', 'button', 'input', 'textarea', 'select',
-  '[role="button"]', '[role="link"]', '[role="menuitem"]',
-  '[onclick]', '[tabindex]:not([tabindex="-1"])',
-  '[contenteditable="true"]'
-].join(', ');
-
-// 2. Tag function
-function tagElement(el: Element): boolean {
-  if (el.hasAttribute(LLM_ID_ATTR)) return false;  // Already tagged
-  if (!isVisibleAndInteractive(el)) return false;   // Skip hidden
-  
-  el.setAttribute('data-llm-id', String(uniqueIdCounter++));
-  return true;
-}
-
-// 3. Auto-tagger with MutationObserver
-const observer = new MutationObserver((mutations) => {
-  // Debounce and re-tag when DOM changes
-  debounceTimer = setTimeout(() => {
-    if (mutations.some(m => m.addedNodes.length > 0)) {
-      ensureStableIds();
-    }
-  }, 100);
-});
-
-observer.observe(document.body, { childList: true, subtree: true });
-```
-
-### Result in the DOM
-
-```html
-<!-- Before tagging -->
-<button class="btn-primary">Submit</button>
-<input type="text" placeholder="Search">
-
-<!-- After tagging -->
-<button class="btn-primary" data-llm-id="1">Submit</button>
-<input type="text" placeholder="Search" data-llm-id="2">
-```
-
-These IDs persist even if the page re-renders, because the tagger only adds IDs to elements that don't already have them.
-
----
-
-## 6. Shadow DOM Support
+## 5. Shadow DOM Support
 
 ### The Problem
 
@@ -1123,155 +1117,105 @@ Enterprise applications (Salesforce LWC, Google products, Shopify) use Shadow DO
 </my-component>
 ```
 
-### The Solution: `query-selector-shadow-dom`
+### The CDP Solution: Automatic Handling
 
-The extension uses the `query-selector-shadow-dom` library to pierce Shadow DOM boundaries:
+With CDP-first architecture, **Chrome handles Shadow DOM automatically**:
 
 ```typescript
-// V1 (broken for Shadow DOM)
-const elements = document.querySelectorAll('button');  // Misses shadow buttons
+// CDP Accessibility.getFullAXTree includes ALL elements
+// regardless of Shadow DOM boundaries
+const { nodes } = await chrome.debugger.sendCommand(
+  { tabId },
+  'Accessibility.getFullAXTree'
+);
 
-// V2 (pierces Shadow DOM)
-import { querySelectorAllDeep } from 'query-selector-shadow-dom';
-const elements = querySelectorAllDeep('button');  // Finds ALL buttons
+// Each node has backendDOMNodeId that can be resolved
+// even if the element is inside a Shadow Root
+nodes.forEach(node => {
+  // node.backendDOMNodeId works for shadow DOM elements
+  console.log(node.role.value, node.name.value);
+});
 ```
 
-### How It Works in the Tagger
+**Benefits:**
+- No special library needed (unlike content script approach)
+- Chrome's accessibility tree automatically traverses Shadow DOMs
+- `backendNodeId` resolution works across Shadow boundaries
+
+### Action Execution in Shadow DOM
 
 ```typescript
-// src/pages/Content/tagger.ts
-import { querySelectorAllDeep } from 'query-selector-shadow-dom';
+// CDP can resolve and interact with Shadow DOM elements
+async function clickShadowElement(backendNodeId: number) {
+  // Resolve to objectId - works even in Shadow DOM
+  const { object } = await sendCommand('DOM.resolveNode', { backendNodeId });
 
-export function ensureStableIds(): number {
-  // V2: Use deep query to find elements inside Shadow DOMs
-  const candidates = querySelectorAllDeep(INTERACTIVE_SELECTORS, document.body);
-  
-  candidates.forEach(el => {
-    if (!el.hasAttribute(LLM_ID_ATTR)) {
-      el.setAttribute(LLM_ID_ATTR, String(uniqueIdCounter++));
-      
-      // V2: Track if inside Shadow DOM
-      if (isInShadowDom(el)) {
-        el.setAttribute('data-llm-in-shadow', 'true');
-      }
-    }
+  // Click via Runtime - works anywhere
+  await sendCommand('Runtime.callFunctionOn', {
+    objectId: object.objectId,
+    functionDeclaration: 'function() { this.click(); }',
   });
-}
-
-function isInShadowDom(el: Element): boolean {
-  let parent = el.parentNode;
-  while (parent) {
-    if (parent instanceof ShadowRoot) return true;
-    parent = parent.parentNode;
-  }
-  return false;
-}
-```
-
-### Resulting Node Structure
-
-```json
-{
-  "id": "42",
-  "role": "button",
-  "name": "Save",
-  "isInShadow": true  // Indicates element is inside Shadow DOM
 }
 ```
 
 ---
 
-## 7. Iframe Support - Distributed Extraction
+## 6. Iframe Support
 
-### The Problem
+### The CDP Solution: Automatic Frame Handling
 
-Content scripts cannot access cross-origin iframe content from the parent page. Each iframe is an isolated context.
-
-```
-┌─────────────────────────────────────┐
-│  Main Page (example.com)            │
-│                                     │
-│  ┌───────────────────────────────┐  │
-│  │  Iframe (analytics.com)       │  │  ← Cannot access from parent!
-│  │  ┌─────────────────────────┐  │  │
-│  │  │ <button>Track</button>  │  │  │
-│  │  └─────────────────────────┘  │  │
-│  └───────────────────────────────┘  │
-└─────────────────────────────────────┘
-```
-
-### The Solution: Distributed Extraction
-
-**Step 1: Manifest Configuration**
-
-```json
-{
-  "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["contentScript.bundle.js"],
-    "all_frames": true  // ← Content script runs in EVERY frame
-  }]
-}
-```
-
-**Step 2: Background Aggregation**
-
-Each frame runs its own tagger and extractor. The background script aggregates results:
+With CDP-first architecture, **Chrome handles iframes automatically**:
 
 ```typescript
-// src/helpers/domAggregator.ts
-async function extractFromAllFrames(tabId: number): Promise<AggregatedDomResult> {
-  // Execute extraction in ALL frames
-  const results = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    func: extractLocalFrame,  // Runs inside each frame
-  });
-  
-  // Stitch results together
-  return {
-    nodes: [
-      ...mainFrameNodes,           // frameId = 0
-      ...iframe1Nodes,             // frameId = 1
-      ...iframe2Nodes,             // frameId = 2
-    ],
-    frameCount: results.length,
-  };
-}
+// CDP Accessibility.getFullAXTree includes ALL frames by default
+const { nodes } = await chrome.debugger.sendCommand(
+  { tabId },
+  'Accessibility.getFullAXTree'
+);
+
+// Elements from iframes have their own backendNodeId
+// Chrome maintains proper frame context internally
 ```
 
-**Step 3: Frame ID Tracking**
+### Frame ID Tracking
 
-Each element gets a `frameId` attribute:
+Each element can include a frame ID field:
 
 ```json
 [
-  { "id": "1", "role": "button", "name": "Save", "frameId": 0 },
-  { "id": "f1_5", "role": "button", "name": "Track", "frameId": 1 }
+  { "i": "100", "r": "btn", "n": "Save", "f": 0 },
+  { "i": "200", "r": "btn", "n": "Track", "f": 1 }
 ]
 ```
 
-### Global ID Generation
+### Benefits of CDP for Iframes
 
-To avoid ID collisions across frames, IDs are prefixed:
+| Aspect | Content Script (Old) | CDP (Current) |
+|--------|---------------------|---------------|
+| **Cross-origin** | Requires `all_frames: true` | Automatic |
+| **ID collision** | Manual frame prefixing | Unique backendNodeId |
+| **Nested iframes** | Recursive extraction | Automatic |
+| **Sandboxed** | Partial support | Full support |
 
-| Frame | Original ID | Global ID |
-|-------|-------------|-----------|
-| Main (0) | `5` | `5` |
-| Iframe 1 | `5` | `f1_5` |
-| Iframe 2 | `5` | `f2_5` |
+### Action Execution in Iframes
 
-### Limitations
+```typescript
+// CDP can resolve elements in any frame
+async function clickIframeElement(backendNodeId: number) {
+  // Chrome handles frame context automatically
+  const { object } = await sendCommand('DOM.resolveNode', { backendNodeId });
 
-| Scenario | Supported? |
-|----------|------------|
-| Same-origin iframes | ✅ Yes |
-| Cross-origin iframes | ✅ Yes (with `all_frames: true`) |
-| Sandboxed iframes | ⚠️ Partial (depends on sandbox flags) |
-| Deeply nested iframes | ✅ Yes (recursive) |
+  // Action works regardless of frame origin
+  await sendCommand('Runtime.callFunctionOn', {
+    objectId: object.objectId,
+    functionDeclaration: 'function() { this.click(); }',
+  });
+}
+```
 
 ---
 
-## 8. Extraction Modes
+## 7. Extraction Modes
 
 The extension supports four extraction modes:
 
@@ -1317,80 +1261,77 @@ FULL MODE (~10000+ tokens) ← ONLY ON BACKEND REQUEST
 
 ---
 
-## 9. Semantic JSON Protocol
+## 8. Semantic JSON Protocol
 
-**File:** `src/pages/Content/semanticTree.ts`
+**File:** `src/helpers/cdpDomExtractor.ts`
 
-The semantic extractor builds a clean JSON array from tagged elements.
+The CDP semantic extractor builds a clean JSON array from the accessibility tree.
 
-### SemanticNode Structure
+### SemanticNodeV3 Structure
 
 ```typescript
-interface SemanticNode {
-  id: string;           // Stable data-llm-id
-  role: string;         // Semantic role: 'button', 'link', 'input', etc.
-  name: string;         // Human-readable label
-  value?: string;       // Current value for inputs
-  state?: string;       // 'checked', 'disabled', 'selected', etc.
-  type?: string;        // Input type
-  placeholder?: string;
-  href?: string;        // For links
+interface SemanticNodeV3 {
+  i: string;   // backendNodeId as string (stable element identifier)
+  r: string;   // Role (minified: btn, inp, link, chk, etc.)
+  n: string;   // Name/label (from accessibility tree)
+  v?: string;  // Value (for inputs)
+  s?: string;  // State (disabled, checked, expanded)
+  xy?: [number, number];  // Center coordinates
+  box?: [number, number, number, number];  // Bounding box [x, y, w, h]
+  f?: number;  // Frame ID (0 = main, omitted if 0)
+  occ?: boolean;  // Occluded by overlay
+  scr?: { depth: string; h: boolean };  // Scrollable container info
 }
 ```
 
-### How Names Are Determined
+### How Names Are Determined (CDP)
 
-The `name` field uses this priority order:
+Chrome's accessibility engine computes names automatically:
 
 ```typescript
-function getElementName(el: HTMLElement): string {
-  // 1. Explicit aria-label
-  if (el.getAttribute('aria-label')) return ariaLabel;
-  
-  // 2. aria-labelledby reference
-  if (el.getAttribute('aria-labelledby')) { /* ... */ }
-  
-  // 3. Associated <label for="...">
-  if (el.id) { /* ... */ }
-  
-  // 4. Inner text content (truncated to 100 chars)
-  if (el.innerText) return cleanText(el.innerText);
-  
-  // 5. Placeholder
-  if (el.getAttribute('placeholder')) return placeholder;
-  
-  // 6. Title attribute
-  if (el.getAttribute('title')) return title;
-  
-  // 7. Name attribute
-  if (el.getAttribute('name')) return name;
-  
-  // 8. Alt text (for images)
-  if (el.getAttribute('alt')) return alt;
-  
-  // 9. Fallback to tag name
-  return el.tagName.toLowerCase();
-}
+// CDP provides computed name via Accessibility.getFullAXTree
+const axNode = {
+  nodeId: 'ax1',
+  role: { type: 'internalRole', value: 'button' },
+  name: { type: 'computedString', value: 'Submit' },  // Chrome computed this
+  backendDOMNodeId: 100,
+};
+
+// Chrome's name computation follows ARIA spec:
+// 1. aria-labelledby references
+// 2. aria-label attribute
+// 3. Native label association (<label for="...">)
+// 4. Native text content
+// 5. title attribute
+// 6. placeholder (for inputs)
 ```
 
-### How Roles Are Determined
+### How Roles Are Determined (CDP)
+
+Chrome's accessibility engine determines roles:
 
 ```typescript
-function getElementRole(el: HTMLElement): string {
-  // 1. Explicit ARIA role takes priority
-  if (el.getAttribute('role')) return ariaRole;
-  
-  // 2. Special handling for inputs
-  if (el.tagName === 'INPUT') {
-    const type = el.type || 'text';
-    // text → textbox, checkbox → checkbox, etc.
-    return INPUT_TYPE_ROLE_MAP[type];
-  }
-  
-  // 3. Map from tag name
-  // a → link, button → button, textarea → textbox
-  return TAG_ROLE_MAP[el.tagName.toLowerCase()];
-}
+// CDP AX node includes computed role
+const axNode = {
+  role: { type: 'internalRole', value: 'textbox' },  // Chrome determined this
+  // ...
+};
+
+// Role minification for token efficiency
+const ROLE_MAP: Record<string, string> = {
+  'button': 'btn',
+  'textbox': 'inp',
+  'searchbox': 'inp',
+  'link': 'link',
+  'checkbox': 'chk',
+  'radio': 'radio',
+  'combobox': 'sel',
+  'menuitem': 'menu',
+  'tab': 'tab',
+  'option': 'opt',
+  'switch': 'switch',
+  'slider': 'slider',
+};
 ```
 
 ### Extraction Example
@@ -1399,41 +1340,51 @@ Given this HTML:
 
 ```html
 <form>
-  <input data-llm-id="5" type="email" placeholder="Enter email" value="john@example.com">
-  <input data-llm-id="6" type="checkbox" aria-label="Subscribe to newsletter" checked>
-  <button data-llm-id="7" type="submit">Sign Up</button>
+  <input type="email" placeholder="Enter email" value="john@example.com">
+  <input type="checkbox" aria-label="Subscribe to newsletter" checked>
+  <button type="submit">Sign Up</button>
 </form>
 ```
 
-Produces this JSON:
+CDP extraction produces this minified JSON:
 
 ```json
 [
   {
-    "id": "5",
-    "role": "textbox",
-    "name": "Enter email",
-    "value": "john@example.com",
-    "type": "email",
-    "placeholder": "Enter email"
+    "i": "100",
+    "r": "inp",
+    "n": "Enter email",
+    "v": "john@example.com",
+    "xy": [200, 150],
+    "box": [100, 140, 200, 25]
   },
   {
-    "id": "6",
-    "role": "checkbox",
-    "name": "Subscribe to newsletter",
-    "state": "checked"
+    "i": "101",
+    "r": "chk",
+    "n": "Subscribe to newsletter",
+    "s": "checked",
+    "xy": [110, 180],
+    "box": [100, 175, 20, 20]
   },
   {
-    "id": "7",
-    "role": "button",
-    "name": "Sign Up"
+    "i": "102",
+    "r": "btn",
+    "n": "Sign Up",
+    "xy": [150, 220],
+    "box": [100, 200, 100, 40]
   }
 ]
 ```
 
+**Key Differences from Content Script Approach:**
+- `i` is Chrome's `backendNodeId` (stable, immutable)
+- No `data-llm-id` injection needed
+- Bounds come from `DOMSnapshot.captureSnapshot`
+- Names come from Chrome's accessibility engine
+
 ---
 
-## 10. Skeleton DOM Extraction
+## 9. Skeleton DOM Extraction
 
 **File:** `src/helpers/skeletonDom.ts`
 
@@ -1482,80 +1433,11 @@ const DISCARD_TAGS = [
 
 ---
 
-## 11. Full DOM Extraction
+## 10. DOM Stability Waiting
 
-**File:** `src/pages/Content/getAnnotatedDOM.ts`
+**File:** `src/helpers/cdpLifecycle.ts`
 
-The full DOM extraction provides complete HTML with annotations.
-
-### Process
-
-1. **Clone the DOM** - Create a deep clone of `document.documentElement`
-2. **Traverse and Annotate** - Walk every element and add:
-   - `data-id="N"` - Sequential index
-   - `data-interactive="true/false"` - Is element interactive?
-   - `data-visible="true/false"` - Is element visible?
-   - `data-frame-id="..."` - Frame identifier for iframes
-3. **Strip Heavy Elements** - Remove scripts, styles, SVGs, comments
-4. **Templatize** - Compress repeated patterns
-5. **Serialize** - Return `outerHTML`
-
-### Annotations Added
-
-```html
-<!-- Before annotation -->
-<button class="btn">Click</button>
-
-<!-- After annotation -->
-<button class="btn" 
-        data-id="42" 
-        data-interactive="true" 
-        data-visible="true"
-        data-frame-id="main-frame">Click</button>
-```
-
-### Heavy Element Removal
-
-Before serialization, these are removed to reduce size:
-
-```typescript
-const HEAVY_ELEMENT_SELECTORS = [
-  'script',                    // JavaScript code
-  'style',                     // CSS rules
-  'svg',                       // Vector graphics (often huge)
-  'noscript',                  // Fallback content
-  'template',                  // Unused templates
-  'link[rel="stylesheet"]',    // External CSS refs
-  'meta',                      // Page metadata
-];
-```
-
-This can reduce payload by 80-90%.
-
-### Templatization
-
-**File:** `src/helpers/shrinkHTML/templatize.ts`
-
-Repeated HTML patterns are compressed:
-
-```html
-<!-- Before -->
-<div class="item"><span class="price">$10</span></div>
-<div class="item"><span class="price">$20</span></div>
-<div class="item"><span class="price">$30</span></div>
-
-<!-- After (conceptual) -->
-<template id="t1"><div class="item"><span class="price">{{v}}</span></div></template>
-<t1 v="$10"/><t1 v="$20"/><t1 v="$30"/>
-```
-
----
-
-## 12. DOM Stability Waiting
-
-**File:** `src/pages/Content/domWait.ts`
-
-Before extracting, we wait for the DOM to stabilize. This prevents capturing "skeleton" pages that are still loading.
+Before extracting, we wait for the page to be ready using CDP lifecycle events.
 
 ### Why This Matters
 
@@ -1572,61 +1454,93 @@ t=1500ms Full content rendered
 
 Extracting at t=200ms would give us an empty page!
 
-### Stability Detection
+### CDP-Based Page Readiness
 
 ```typescript
-function waitForDomStability(config = {}): Promise<void> {
-  const {
-    timeout = 3000,           // Max wait
-    stabilityThreshold = 300, // Time without mutations
-    waitForNetwork = true,
-    networkIdleThreshold = 500
-  } = config;
-  
-  let lastMutationTime = Date.now();
-  
-  // MutationObserver tracks DOM changes
-  const observer = new MutationObserver(() => {
-    lastMutationTime = Date.now();
+// src/helpers/cdpLifecycle.ts
+export async function waitForPageReady(
+  tabId: number,
+  timeoutMs: number = 15000
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const target = { tabId };
+    const startTime = Date.now();
+
+    // Track lifecycle events
+    let loadFired = false;
+    let domContentLoaded = false;
+
+    const checkReady = () => {
+      if (loadFired && domContentLoaded) {
+        // Add stability buffer
+        setTimeout(() => resolve(true), 500);
+      }
+    };
+
+    // Listen for Page.lifecycleEvent
+    const listener = (
+      source: chrome.debugger.Debuggee,
+      method: string,
+      params: any
+    ) => {
+      if (source.tabId !== tabId) return;
+
+      if (method === 'Page.lifecycleEvent') {
+        if (params.name === 'load') loadFired = true;
+        if (params.name === 'DOMContentLoaded') domContentLoaded = true;
+        checkReady();
+      }
+    };
+
+    chrome.debugger.onEvent.addListener(listener);
+
+    // Timeout fallback
+    setTimeout(() => {
+      chrome.debugger.onEvent.removeListener(listener);
+      resolve(false);
+    }, timeoutMs);
   });
-  
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    characterData: true
-  });
-  
-  // Check periodically
-  const checkInterval = setInterval(() => {
-    const timeSinceMutation = Date.now() - lastMutationTime;
-    
-    // DOM stable if no mutations for 300ms
-    if (timeSinceMutation >= stabilityThreshold) {
-      cleanup();
-      resolve();
-    }
-  }, 50);
 }
 ```
 
-### Network Idle Detection
+### Network Idle Detection (CDP)
 
 ```typescript
-// Also wait for network to be idle
-if (waitForNetwork) {
-  const entries = performance.getEntriesByType('resource');
-  const recentRequests = entries.filter(entry => {
-    return (Date.now() - entry.responseEnd) < networkIdleThreshold;
-  });
-  
-  const networkIdle = recentRequests.length === 0;
+// Track in-flight requests via Network domain
+const pendingRequests = new Map<string, number>();
+
+function handleNetworkEvent(method: string, params: any) {
+  if (method === 'Network.requestWillBeSent') {
+    pendingRequests.set(params.requestId, Date.now());
+  }
+  if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+    pendingRequests.delete(params.requestId);
+  }
+}
+
+export async function waitForNetworkIdle(
+  tabId: number,
+  idleThresholdMs: number = 500
+): Promise<void> {
+  // Wait until no requests for idleThresholdMs
+  while (pendingRequests.size > 0 || (Date.now() - lastRequestTime) < idleThresholdMs) {
+    await sleep(100);
+  }
 }
 ```
+
+### Benefits Over Content Script DOM Waiting
+
+| Aspect | Content Script (Old) | CDP (Current) |
+|--------|---------------------|---------------|
+| **Lifecycle events** | Approximated via MutationObserver | Direct Page.lifecycleEvent |
+| **Network tracking** | performance.getEntriesByType (limited) | Full Network domain access |
+| **Reliability** | Depends on script injection timing | Always available |
+| **Overhead** | Observer in page context | No page overhead |
 
 ---
 
-## 13. What Gets Sent to the LLM
+## 11. What Gets Sent to the LLM
 
 ### API Request Structure
 
@@ -1740,7 +1654,7 @@ interface AgentInteractRequest {
 
 ---
 
-## 14. Mode Selection Logic (Backend-Driven Negotiation)
+## 12. Mode Selection Logic (Backend-Driven Negotiation)
 
 **File:** `src/state/currentTask.ts` and `src/api/client.ts`
 
@@ -1782,15 +1696,18 @@ If the backend cannot plan/verify using semantic JSON alone, it responds request
 ### Actual Implementation (currentTask.ts)
 
 ```typescript
-// Semantic extraction is PRIMARY
+// CDP extraction is PRIMARY
 if (USE_SEMANTIC_EXTRACTION) {
-  // 1. Try semantic extraction (ultra-light, ~25-75 tokens)
-  const semanticResult = await callRPC('getSemanticDomV3', ...);
-  if (semanticResult?.interactive_tree?.length > 0) {
-    domMode = 'semantic'; // API field name for backend compatibility
-    interactiveTree = semanticResult.interactive_tree;
-  } else {
-    // 2. Fallback to skeleton/hybrid based on query keywords
+  // 1. Try CDP extraction (ultra-light, ~25-75 tokens)
+  try {
+    const cdpResult = await extractDomViaCDP(tabId);
+    if (cdpResult?.interactiveTree?.length > 0) {
+      domMode = 'semantic'; // API field name for backend compatibility
+      interactiveTree = cdpResult.interactiveTree;
+    }
+  } catch (error) {
+    // 2. Fallback to legacy accessibility or skeleton
+    console.warn('CDP extraction failed:', error);
     domMode = selectDomMode(query, context);
   }
 }
@@ -1838,7 +1755,7 @@ const SIMPLE_ACTIONS = [
 
 ---
 
-## 15. Fallback Handling
+## 13. Fallback Handling
 
 ### Server Requests Full DOM
 
@@ -1873,135 +1790,124 @@ if (response.status === 'needs_full_dom') {
 }
 ```
 
-### Semantic Extraction Fails
+### CDP Extraction Fails
 
-If semantic extraction returns empty or throws:
+If CDP extraction returns empty or throws:
 
 ```typescript
 try {
-  const semanticResult = await callRPC('getSemanticDom', ...);
-  
-  if (semanticResult?.nodes?.length > 0) {
+  // Primary: CDP extraction
+  const cdpResult = await extractDomViaCDP(tabId);
+
+  if (cdpResult?.interactiveTree?.length > 0) {
     domMode = 'semantic';
+    interactiveTree = cdpResult.interactiveTree;
   } else {
-    console.warn('Semantic extraction empty, falling back to skeleton');
-    domMode = selectDomMode(query, context);  // Skeleton or hybrid
+    console.warn('CDP extraction empty, falling back to legacy');
+    // Fallback to legacy accessibility tree
+    const axTree = await getAccessibilityTree(tabId);
+    // ... process legacy tree
   }
-} catch (error) {
-  console.warn('Semantic extraction failed:', error);
-  domMode = selectDomMode(query, context);  // Fallback
+} catch (cdpError) {
+  console.warn('CDP extraction failed:', cdpError);
+  // Final fallback: skeleton/hybrid mode
+  domMode = selectDomMode(query, context);
 }
 ```
 
 ---
 
-## 16. Source Files Reference
+## 14. Source Files Reference
 
-### Core Extraction Files
+### Core Extraction Files (CDP-First)
 
 | File | Purpose | Features |
 |------|---------|----------|
-| `src/pages/Content/tagger.ts` | Injects stable `data-llm-id` attributes | Uses `querySelectorAllDeep`, tracks Shadow DOM |
-| `src/pages/Content/semanticTree.ts` | Extracts JSON representation | Multi-point raycasting, label hunting, scrollable detection, atomic leaves, 2/3 visibility |
-| `src/pages/Content/domWait.ts` | Waits for DOM stability | - |
-| `src/pages/Content/getAnnotatedDOM.ts` | Full DOM extraction with annotations | - |
-| `src/pages/Content/mutationLog.ts` | Tracks DOM changes for ghost state detection | - |
-| `src/helpers/skeletonDom.ts` | Skeleton HTML extraction | - |
-| `src/helpers/shrinkHTML/templatize.ts` | HTML compression | - |
+| **`src/helpers/cdpDomExtractor.ts`** | **Primary CDP extraction** | AXTree + DOMSnapshot merge, viewport pruning |
+| **`src/helpers/cdpLifecycle.ts`** | **Page readiness detection** | Lifecycle events, network idle |
+| **`src/helpers/cdpVisualFeedback.ts`** | **Visual feedback via CDP** | Ripple injection, element highlighting |
+| `src/helpers/chromeDebugger.ts` | CDP session management | Domain enabling, command sending |
+| `src/helpers/domActions.ts` | Action execution | backendNodeId resolution, ghost match fallback |
+| `src/helpers/simplifyDom.ts` | DOM extraction wrapper | CDP-first with legacy fallback |
+| `src/helpers/skeletonDom.ts` | Skeleton HTML extraction (fallback) | - |
 | `src/helpers/hybridCapture.ts` | Mode selection logic | - |
-| `src/helpers/domAggregator.ts` | Aggregates DOM from all frames | - |
-| `src/helpers/axTreeExtractor.ts` | CDP-based accessibility tree extraction | - |
-| `src/helpers/deltaHash.ts` | Hash-based change detection for bandwidth optimization | - |
-| `src/helpers/domRag.ts` | DOM chunking and relevance filtering for huge pages | Production-Grade |
-| `src/helpers/sentinelVerification.ts` | Action outcome verification system | Production-Grade |
-| `src/helpers/hiddenListenerDetector.ts` | Detects React/Vue/Angular click handlers via CDP | Browser-Use Inspired |
+| `src/helpers/accessibilityTree.ts` | Legacy AX tree extraction | Fallback when CDP fails |
+| `src/helpers/deltaHash.ts` | Hash-based change detection | Bandwidth optimization |
+| `src/helpers/domRag.ts` | DOM chunking and filtering | Production-Grade, huge pages |
+| `src/helpers/sentinelVerification.ts` | Action outcome verification | Production-Grade |
 
 ### Integration Files
 
 | File | Purpose |
 |------|---------|
-| `src/helpers/pageRPC.ts` | RPC methods exposed to background (includes mutation log methods) |
-| `src/state/currentTask.ts` | Main action loop orchestration |
+| `src/state/currentTask.ts` | Main action loop orchestration, CDP extraction calls |
 | `src/api/client.ts` | API client with payload construction |
-| `src/pages/Content/index.ts` | Content script entry (starts tagger + mutation logger) |
-| `src/helpers/domActions.ts` | Action execution with self-healing recovery |
+| `src/helpers/domActions.ts` | Action execution with backendNodeId resolution |
 
-### Key Functions
+### Key Functions (CDP-First)
 
 | Function | File | Purpose |
 |----------|------|---------|
-| `extractSemanticTree()` | semanticTree.ts | Ultra-light extraction with raycasting, labels, scrollable |
-| `getVisibilityScore()` | semanticTree.ts | Multi-point visibility scoring (0.0-1.0) for occlusion detection |
-| `isActuallyClickable()` | semanticTree.ts | Multi-point raycasting to detect occluded elements (≥50% visible) |
-| `detectHiddenClickListeners()` | hiddenListenerDetector.ts | CDP-based detection of React/Vue/Angular click handlers |
-| `detectAndMarkHiddenListeners()` | hiddenListenerDetector.ts | Full pipeline: detect + mark elements in DOM |
-| `isInsideAtomicParent()` | semanticTree.ts | Midscene: Check if element is inside button/link (skip extraction) |
-| `isReliablyVisible()` | semanticTree.ts | Midscene: 2/3 visibility rule (≥66% in viewport) |
-| `isMeaningfulContainer()` | semanticTree.ts | Midscene: Check if container has visual boundaries |
-| `getAtomicElementText()` | semanticTree.ts | Midscene: Get combined text from atomic elements |
-| `findLabelForInput()` | semanticTree.ts | Hunts for semantic labels |
-| `getScrollableInfo()` | semanticTree.ts | Detects virtual list containers |
-| `getRecentMutations()` | mutationLog.ts | Returns recent DOM changes |
-| `getMutationSummary()` | mutationLog.ts | Summary with error/success flags |
+| **`extractDomViaCDP()`** | cdpDomExtractor.ts | Primary extraction: AXTree + DOMSnapshot → SemanticNodeV3[] |
+| **`resolveBackendNodeId()`** | cdpDomExtractor.ts | Convert backendNodeId to objectId for actions |
+| **`waitForPageReady()`** | cdpLifecycle.ts | CDP-based page readiness detection |
+| **`waitForNetworkIdle()`** | cdpLifecycle.ts | Track pending network requests |
+| **`setNetworkObservationMark()`** | cdpLifecycle.ts | Mark point for network change detection |
+| **`getDidNetworkOccurSinceMark()`** | cdpLifecycle.ts | Check if network activity occurred |
+| **`showRippleAt()`** | cdpVisualFeedback.ts | Inject ripple animation via Runtime.evaluate |
+| **`highlightElement()`** | cdpVisualFeedback.ts | Highlight element via DOM.highlightNode |
+| `getObjectId()` | domActions.ts | Multi-level resolution: backendNodeId → objectId |
+| `getSimplifiedDom()` | simplifyDom.ts | Wrapper with CDP-first, legacy fallback |
+| `getCDPSimplifiedDom()` | simplifyDom.ts | Direct CDP extraction for new code |
 | `shouldSendTree()` | deltaHash.ts | Hash-based change detection |
-| `findGhostMatch()` | domActions.ts | Self-healing element recovery |
-| `getSemanticDom()` | pageRPC.ts | RPC wrapper for semantic extraction |
-| `extractAXTree()` | axTreeExtractor.ts | CDP-based accessibility tree |
-| `getSemanticLegend()` | semanticTree.ts | Returns legend for system prompt |
-| `ensureStableIds()` | tagger.ts | Tags all interactive elements (pierces Shadow DOM) |
-| `startAutoTagger()` | tagger.ts | Starts MutationObserver |
-| `startMutationLogger()` | mutationLog.ts | Starts mutation tracking |
-| `findElementByIdDeep()` | tagger.ts | Finds element by ID, piercing Shadow DOM |
-| `isInShadowDom()` | tagger.ts | Checks if element is in Shadow Root |
-| `waitForDomStability()` | domWait.ts | Waits for mutations to stop |
-| `extractSkeletonDom()` | skeletonDom.ts | Returns minimal HTML |
-| `getAnnotatedDOM()` | getAnnotatedDOM.ts | Returns full annotated HTML |
+| `findGhostMatch()` | domActions.ts | Legacy self-healing (rarely needed with CDP) |
+| `extractSkeletonDom()` | skeletonDom.ts | Returns minimal HTML (fallback) |
 | `selectDomMode()` | hybridCapture.ts | Chooses extraction mode |
 | `agentInteract()` | client.ts | Sends payload to backend |
-| `extractFromAllFrames()` | domAggregator.ts | Aggregates extraction from all frames |
 
 ### Types
 
 ```typescript
-// Minified semantic node
-interface SemanticNode {
-  i: string;                           // Element ID
-  r: string;                           // Role (minified)
-  n: string;                           // Name
-  v?: string;                          // Value
-  s?: string;                          // State
-  xy?: [number, number];               // Center coordinates
-  f?: number;                          // Frame ID
-  // Advanced fields:
-  box?: [number, number, number, number]; // Bounding box [x,y,w,h]
-  scr?: { depth: string; h: boolean };    // Scrollable info
-  occ?: boolean;                          // Occluded by overlay
+// SemanticNodeV3 - Primary format for CDP extraction
+export interface SemanticNodeV3 {
+  i: string;   // backendNodeId as string (stable element identifier)
+  r: string;   // Role (minified: btn, inp, link, chk, etc.)
+  n: string;   // Name/label (from accessibility tree)
+  v?: string;  // Value (for inputs)
+  s?: string;  // State (disabled, checked, expanded)
+  xy?: [number, number];  // Center coordinates
+  box?: [number, number, number, number];  // Bounding box [x, y, w, h]
+  f?: number;  // Frame ID (0 = main, omitted if 0)
+  occ?: boolean;  // Occluded by overlay
+  scr?: { depth: string; h: boolean };  // Scrollable container info
 }
 
-// Semantic extraction result
-interface SemanticTreeResult {
-  mode: 'semantic';
-  url: string;
-  title: string;
+// CDP extraction result
+export interface CDPExtractionResult {
+  interactiveTree: SemanticNodeV3[];
   viewport: { width: number; height: number };
-  scroll_position?: string;           // Page scroll depth
-  interactive_tree: SemanticNode[];
-  scrollable_containers?: Array<{     // Virtual lists
-    id: string;
-    depth: string;
-    hasMore: boolean;
-  }>;
+  pageTitle: string;
+  url: string;
+  scrollPosition: string;
   meta: {
-    totalElements: number;
-    viewportElements: number;
-    prunedElements: number;
-    occludedElements: number;         // Elements behind modals
+    nodeCount: number;
     extractionTimeMs: number;
+    axNodeCount: number;
     estimatedTokens: number;
   };
 }
 
-// Self-healing ghost match config
+// Simplified DOM result (wrapper format)
+export interface SimplifiedDomResult {
+  annotatedDomHtml: string;  // Empty in CDP mode
+  dom: HTMLElement;          // Minimal in CDP mode
+  usedAccessibility: boolean;
+  hybridElements?: HybridElement[];
+  cdpResult?: CDPExtractionResult;
+  coverageMetrics?: CoverageMetrics;
+}
+
+// Self-healing ghost match config (legacy fallback)
 interface GhostMatchConfig {
   name: string | null;
   role: string | null;
@@ -2009,21 +1915,14 @@ interface GhostMatchConfig {
   interactive: boolean;
   minConfidence: number;
 }
-
-// Mutation entry
-interface MutationEntry {
-  timestamp: number;
-  type: 'added' | 'removed' | 'changed';
-  category: 'text' | 'element' | 'error' | 'success' | 'warning' | 'loading' | 'form';
-  description: string;
-}
 ```
 
 ### Libraries
 
 | Library | Version | Purpose |
 |---------|---------|---------|
-| `query-selector-shadow-dom` | ^1.0.1 | Pierces Shadow DOM for element queries |
+| Chrome DevTools Protocol | 1.3 | CDP domains: Accessibility, DOM, DOMSnapshot, Page, Network, Runtime |
+| `query-selector-shadow-dom` | ^1.0.1 | Pierces Shadow DOM (legacy fallback only) |
 
 ---
 
@@ -2042,27 +1941,30 @@ interface MutationEntry {
 
 ## Appendix: Debugging Tips
 
-### Check If Tagger Is Working
+### Check CDP Extraction Is Working
 
-In DevTools console on the target page:
+In the extension's background service worker console:
 
 ```javascript
-// Count tagged elements
-document.querySelectorAll('[data-llm-id]').length
-
-// See all tagged elements
-document.querySelectorAll('[data-llm-id]').forEach(el => {
-  console.log(el.getAttribute('data-llm-id'), el.tagName, el.innerText?.slice(0,30));
+// Test CDP extraction manually
+const tabId = /* your target tab ID */;
+const result = await extractDomViaCDP(tabId);
+console.log('Extraction result:', {
+  nodeCount: result.meta.nodeCount,
+  axNodeCount: result.meta.axNodeCount,
+  extractionTimeMs: result.meta.extractionTimeMs,
+  estimatedTokens: result.meta.estimatedTokens,
 });
+console.log('Sample nodes:', result.interactiveTree.slice(0, 5));
+```
 
-// Check viewport pruning stats
-const viewportHeight = window.innerHeight;
-const allElements = document.querySelectorAll('[data-llm-id]');
-const visibleElements = [...allElements].filter(el => {
-  const rect = el.getBoundingClientRect();
-  return rect.top <= viewportHeight && rect.bottom >= 0;
-});
-console.log(`Total: ${allElements.length}, Visible: ${visibleElements.length}, Pruned: ${allElements.length - visibleElements.length}`);
+### Check CDP Domains Are Enabled
+
+```javascript
+// Verify debugger is attached and domains are enabled
+const targets = await chrome.debugger.getTargets();
+const attached = targets.filter(t => t.attached);
+console.log('Attached targets:', attached);
 ```
 
 ### Force Specific Mode
@@ -2070,66 +1972,96 @@ console.log(`Total: ${allElements.length}, Visible: ${visibleElements.length}, P
 In `src/state/currentTask.ts`:
 
 ```typescript
-// Enable semantic extraction (default)
+// Enable CDP extraction (default)
 const USE_SEMANTIC_EXTRACTION = true;
 
-// Force legacy mode (skeleton/hybrid) - disable semantic
+// Force legacy mode (skeleton/hybrid) - disable CDP
 const USE_SEMANTIC_EXTRACTION = false;
 ```
 
 ### View Extracted Data
 
-Enable debug logging:
+Enable debug logging in `cdpDomExtractor.ts`:
 
 ```typescript
-console.log('[CurrentTask] SEMANTIC extraction:', {
-  nodeCount: result.interactive_tree.length,
+console.log('[extractDomViaCDP] Result:', {
+  nodeCount: result.meta.nodeCount,
   viewport: result.viewport,
-  prunedElements: result.meta.prunedElements,
-  estimatedTokens: result.meta.estimatedTokens,
   extractionTimeMs: result.meta.extractionTimeMs,
+  estimatedTokens: result.meta.estimatedTokens,
 });
 ```
 
-### Test Extraction Directly
-
-In content script context:
+### Test backendNodeId Resolution
 
 ```javascript
-// Get semantic extraction result
-const result = await extractSemanticTree({ viewportOnly: true, minified: true });
-console.log('Result:', result);
-console.log('Token estimate:', result.meta.estimatedTokens);
-console.log('Sample nodes:', result.interactive_tree.slice(0, 5));
+// Test if a backendNodeId can be resolved to objectId
+const backendNodeId = 123; // From interactiveTree[n].i
+const tabId = /* your target tab ID */;
+
+const result = await chrome.debugger.sendCommand(
+  { tabId },
+  'DOM.resolveNode',
+  { backendNodeId }
+);
+
+console.log('Resolved objectId:', result.object?.objectId);
 ```
 
 ### Common Issues
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| "Element not found" | ID drift after framework re-render | Self-Healing will attempt ghost match; check MutationObserver is running |
-| Empty extraction | Page not ready | Increase stability timeout |
-| Huge payload | Full mode triggered | Check fallback conditions |
-| Missing elements | Not tagged as interactive | Add role/tabindex to elements |
-| Elements pruned | Below viewport | Scroll page or disable viewportOnly |
-| Extraction fails | Library issue | Falls back to skeleton automatically |
-| IDs lost after navigation | Framework destroyed DOM nodes | MutationObserver will re-tag; Self-Healing recovers by role/name/coordinates |
-| React/Vue elements not detected | Hidden event listeners | Use `detectHiddenClickListeners()` via CDP (requires debugger) |
+| "Element not found" | backendNodeId stale (node destroyed) | Element truly gone; ghost match will attempt recovery |
+| Empty extraction | Debugger not attached | Ensure `chrome.debugger.attach()` was called |
+| Empty extraction | AXTree not ready | Increase page readiness timeout |
+| Missing elements | Not in accessibility tree | Element may lack proper ARIA role |
+| Elements pruned | Below viewport | Scroll page or check viewport detection |
+| CDP command fails | Debugger session lost | Re-attach debugger |
+| "Cannot resolve node" | Node destroyed between extraction and action | Rare with backendNodeId; ghost match fallback |
 
-### ID Strategy Debugging
+### CDP Debugging
 
-If elements are frequently losing their `data-llm-id`:
+```javascript
+// Check if debugger is attached to tab
+const targets = await chrome.debugger.getTargets();
+const isAttached = targets.some(t => t.tabId === tabId && t.attached);
+console.log('Debugger attached:', isAttached);
 
-1. **Check MutationObserver is active:**
-   ```javascript
-   // In DevTools console
-   console.log('[Tagger] Observer active:', !!window.__llmTaggerObserver);
-   ```
+// Check page lifecycle state
+chrome.debugger.sendCommand({ tabId }, 'Page.getFrameTree', {}, (result) => {
+  console.log('Frame tree:', result);
+});
 
-2. **Verify Self-Healing is working:**
-   ```javascript
-   // Check ghost match confidence scores in console logs
-   // Look for: "[DomActions] Ghost match found with confidence: 0.7"
-   ```
+// Get accessibility tree stats
+chrome.debugger.sendCommand({ tabId }, 'Accessibility.getFullAXTree', {}, (result) => {
+  console.log('AX nodes:', result.nodes.length);
+  console.log('Interactive:', result.nodes.filter(n => !n.ignored).length);
+});
+```
 
-3. **Consider hybrid ID approach:** For CDP-heavy operations, the `backendNodeId` from `Accessibility.getFullAXTree` is more stable. See §2.7 for details.
+### Migration Notes
+
+**Migration Status: COMPLETE**
+
+The migration from content script RPC to CDP-first architecture is complete:
+- `src/helpers/pageRPC.ts` has been **removed**
+- All DOM extraction now uses `extractDomViaCDP(tabId)` from `cdpDomExtractor.ts`
+- Page readiness detection uses `waitForPageReady()` from `cdpLifecycle.ts`
+- The content script (`src/pages/Content/index.ts`) is still present but only handles:
+  - Task resume after navigation
+  - Auto-tagger initialization
+  - Mutation logging
+  - Background handshake (for legacy compatibility)
+
+**From Content Scripts to CDP:**
+
+| Old (Content Script) | New (CDP) | Status |
+|---------------------|-----------|--------|
+| `callRPC('getSemanticDomV3', ...)` | `extractDomViaCDP(tabId)` | Migrated |
+| `data-llm-id="123"` | `backendNodeId: 123` | Migrated |
+| `waitForContentScriptReady()` | `waitForPageReady()` | Migrated |
+| `getAnnotatedDOM()` | Not needed (CDP provides structure) | Removed |
+| MutationObserver in page | CDP DOM events (optional) | N/A |
+| `ensureStableIds()` | Not needed (backendNodeId is stable) | Removed |
+| `src/helpers/pageRPC.ts` | Deleted | Removed |

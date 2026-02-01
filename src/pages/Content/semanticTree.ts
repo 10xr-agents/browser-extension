@@ -461,36 +461,43 @@ const ATOMIC_ROLES = new Set([
  * @returns true if element is inside an atomic parent that should handle extraction
  */
 function isInsideAtomicParent(element: HTMLElement): boolean {
-  let parent = element.parentElement;
-  let depth = 0;
-  const maxDepth = 5; // Don't search too deep
+  try {
+    let parent = element.parentElement;
+    let depth = 0;
+    const maxDepth = 5; // Don't search too deep
 
-  while (parent && depth < maxDepth) {
-    const tagLower = parent.tagName.toLowerCase();
+    while (parent && depth < maxDepth) {
+      const tagLower = parent.tagName?.toLowerCase();
+      if (!tagLower) break;
 
-    // Check if parent is an atomic interactive element
-    if (['button', 'a', 'select', 'option'].includes(tagLower)) {
-      return true;
+      // Check if parent is an atomic interactive element
+      if (['button', 'a', 'select', 'option'].includes(tagLower)) {
+        return true;
+      }
+
+      // Check for atomic ARIA roles
+      const role = parent.getAttribute('role');
+      if (role && ATOMIC_ROLES.has(role)) {
+        return true;
+      }
+
+      // Check for common interactive attributes
+      if (parent.hasAttribute('onclick') ||
+          parent.getAttribute('tabindex') === '0' ||
+          parent.getAttribute('role') === 'button') {
+        return true;
+      }
+
+      parent = parent.parentElement;
+      depth++;
     }
 
-    // Check for atomic ARIA roles
-    const role = parent.getAttribute('role');
-    if (role && ATOMIC_ROLES.has(role)) {
-      return true;
-    }
-
-    // Check for common interactive attributes
-    if (parent.hasAttribute('onclick') ||
-        parent.getAttribute('tabindex') === '0' ||
-        parent.getAttribute('role') === 'button') {
-      return true;
-    }
-
-    parent = parent.parentElement;
-    depth++;
+    return false;
+  } catch {
+    // If we can't check parent hierarchy, assume NOT inside atomic parent
+    // This ensures the element still gets processed
+    return false;
   }
-
-  return false;
 }
 
 /**
@@ -540,29 +547,45 @@ function getAtomicElementText(element: HTMLElement): string {
  * @returns true if element meets visibility threshold
  */
 export function isReliablyVisible(element: HTMLElement, minVisibleRatio = 0.66): boolean {
-  const rect = element.getBoundingClientRect();
-  const viewportHeight = window.innerHeight;
-  const viewportWidth = window.innerWidth;
+  try {
+    const rect = element.getBoundingClientRect();
 
-  // Zero-size elements are not visible
-  if (rect.width <= 0 || rect.height <= 0) return false;
+    // Guard against invalid rect
+    if (!rect || typeof rect.width !== 'number' || typeof rect.height !== 'number') {
+      return true; // Fail-safe: assume visible if we can't check
+    }
 
-  // Calculate intersection with viewport
-  const visibleTop = Math.max(rect.top, 0);
-  const visibleBottom = Math.min(rect.bottom, viewportHeight);
-  const visibleLeft = Math.max(rect.left, 0);
-  const visibleRight = Math.min(rect.right, viewportWidth);
+    const viewportHeight = window.innerHeight || 1080; // Fallback to common resolution
+    const viewportWidth = window.innerWidth || 1920;
 
-  const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-  const visibleWidth = Math.max(0, visibleRight - visibleLeft);
+    // Zero-size elements are not visible
+    if (rect.width <= 0 || rect.height <= 0) return false;
 
-  if (visibleHeight <= 0 || visibleWidth <= 0) return false;
+    // Calculate intersection with viewport
+    const visibleTop = Math.max(rect.top, 0);
+    const visibleBottom = Math.min(rect.bottom, viewportHeight);
+    const visibleLeft = Math.max(rect.left, 0);
+    const visibleRight = Math.min(rect.right, viewportWidth);
 
-  const visibleArea = visibleHeight * visibleWidth;
-  const totalArea = rect.width * rect.height;
+    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+    const visibleWidth = Math.max(0, visibleRight - visibleLeft);
 
-  // Midscene Rule: Must be >= 66% visible
-  return (visibleArea / totalArea) >= minVisibleRatio;
+    if (visibleHeight <= 0 || visibleWidth <= 0) return false;
+
+    const visibleArea = visibleHeight * visibleWidth;
+    const totalArea = rect.width * rect.height;
+
+    // Guard against division by zero
+    if (totalArea <= 0) return false;
+
+    // Midscene Rule: Must be >= 66% visible
+    return (visibleArea / totalArea) >= minVisibleRatio;
+  } catch (error) {
+    // FAIL-SAFE: If visibility check throws, assume element IS visible
+    // This prevents filtering out elements due to browser quirks
+    console.debug('[SemanticTree] isReliablyVisible error, assuming visible:', error);
+    return true;
+  }
 }
 
 // =============================================================================
@@ -648,8 +671,16 @@ export function getVisibilityScore(element: HTMLElement): number {
   try {
     const rect = element.getBoundingClientRect();
 
+    // Guard against invalid rect
+    if (!rect || typeof rect.width !== 'number' || typeof rect.height !== 'number') {
+      return 0.5; // Fail-safe: assume partially visible
+    }
+
     // Zero-size elements are not visible
     if (rect.width === 0 || rect.height === 0) return 0;
+
+    const viewportWidth = window.innerWidth || 1920;
+    const viewportHeight = window.innerHeight || 1080;
 
     // Sample 5 points: center + 4 corners (with 2px inset to avoid edge issues)
     const inset = 2;
@@ -666,30 +697,35 @@ export function getVisibilityScore(element: HTMLElement): number {
 
     for (const p of points) {
       // Skip points outside viewport
-      if (p.x < 0 || p.y < 0 || p.x > window.innerWidth || p.y > window.innerHeight) {
+      if (p.x < 0 || p.y < 0 || p.x > viewportWidth || p.y > viewportHeight) {
         continue;
       }
 
       sampledPoints++;
 
       // Ask browser: "What is the top-most element at this point?"
-      const topElement = document.elementFromPoint(p.x, p.y);
+      try {
+        const topElement = document.elementFromPoint(p.x, p.y);
 
-      // Element is visible at this point if:
-      // 1. The top element IS this element, OR
-      // 2. The top element is a CHILD of this element, OR
-      // 3. This element CONTAINS the top element
-      if (topElement && (
-        element === topElement ||
-        element.contains(topElement) ||
-        topElement.contains(element)
-      )) {
-        visiblePoints++;
+        // Element is visible at this point if:
+        // 1. The top element IS this element, OR
+        // 2. The top element is a CHILD of this element, OR
+        // 3. This element CONTAINS the top element
+        if (topElement && (
+          element === topElement ||
+          element.contains(topElement) ||
+          topElement.contains(element)
+        )) {
+          visiblePoints++;
+        }
+      } catch {
+        // If elementFromPoint fails for this point, skip it
+        continue;
       }
     }
 
-    // Return ratio of visible points (0 if no points sampled)
-    return sampledPoints > 0 ? visiblePoints / sampledPoints : 0;
+    // Return ratio of visible points (0.5 if no points sampled - fail-safe)
+    return sampledPoints > 0 ? visiblePoints / sampledPoints : 0.5;
   } catch {
     // If raycasting fails, assume partially visible (fail-safe)
     return 0.5;
@@ -1255,26 +1291,47 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
     minVisibleRatio = 0.66,
     pruneEmptyContainers = true,
   } = options;
-  
-  // Ensure all interactive elements are tagged first
-  ensureStableIds();
-  
+
+  // CRITICAL FIX: Ensure all interactive elements are tagged first
+  // Call ensureStableIds multiple times in case DOM changed
+  let taggedCount = ensureStableIds();
+  console.log(`[SemanticTreeV3] Initial tagging: ${taggedCount} elements`);
+
   // Get viewport dimensions
-  const viewportWidth = window.innerWidth;
-  const actualViewportHeight = viewportHeight || window.innerHeight;
-  
+  const viewportWidth = window.innerWidth || 1920;
+  const actualViewportHeight = viewportHeight || window.innerHeight || 1080;
+
   // Calculate page scroll position
-  const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-  const scrollPosition = maxScroll > 0 
-    ? `${Math.round((window.scrollY / maxScroll) * 100)}%` 
+  const docScrollHeight = document.documentElement?.scrollHeight || window.innerHeight;
+  const maxScroll = Math.max(0, docScrollHeight - window.innerHeight);
+  const scrollPosition = maxScroll > 0
+    ? `${Math.round((window.scrollY / maxScroll) * 100)}%`
     : '0%';
-  
+
   // Query all tagged elements (piercing Shadow DOM)
   let elements: NodeListOf<Element> | Element[];
   try {
     elements = querySelectorAllDeep(`[${LLM_ID_ATTR}]`);
-  } catch {
+    console.log(`[SemanticTreeV3] querySelectorAllDeep found ${elements.length} elements`);
+  } catch (e) {
+    console.warn('[SemanticTreeV3] querySelectorAllDeep failed, using fallback:', e);
     elements = document.querySelectorAll(`[${LLM_ID_ATTR}]`);
+    console.log(`[SemanticTreeV3] querySelectorAll fallback found ${elements.length} elements`);
+  }
+
+  // CRITICAL FIX: If no elements found, try re-tagging and querying again
+  if (elements.length === 0) {
+    console.warn('[SemanticTreeV3] No tagged elements found, re-tagging...');
+    taggedCount = ensureStableIds(document);
+    console.log(`[SemanticTreeV3] Re-tagged ${taggedCount} elements`);
+
+    // Query again
+    try {
+      elements = querySelectorAllDeep(`[${LLM_ID_ATTR}]`);
+    } catch {
+      elements = document.querySelectorAll(`[${LLM_ID_ATTR}]`);
+    }
+    console.log(`[SemanticTreeV3] After re-tag: ${elements.length} elements`);
   }
   
   const nodes: SemanticNodeV3[] = [];
@@ -1451,11 +1508,171 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
 
   // V4: Enhanced logging with Midscene metrics
   console.log(`[SemanticTreeV4] Extracted ${nodes.length} nodes in ${extractionTimeMs}ms (~${estimatedTokens} tokens)`);
+  console.log(`  Total elements queried: ${totalElements}`);
   console.log(`  Pruned: ${prunedElements} (atomic: ${atomicSkipped}, containers: ${containersPruned}, visibility: ${prunedElements - atomicSkipped - containersPruned})`);
   if (occludedElements > 0) {
     console.log(`  Occluded (modal): ${occludedElements}`);
   }
-  
+
+  // CRITICAL FIX: If all elements were filtered out, retry with relaxed settings
+  if (nodes.length === 0 && totalElements > 0) {
+    console.warn(`[SemanticTreeV4] WARNING: All ${totalElements} elements were filtered out! Retrying with relaxed settings...`);
+
+    // Retry extraction with relaxed settings
+    const relaxedNodes: SemanticNodeV3[] = [];
+    elements.forEach(el => {
+      if (!(el instanceof HTMLElement)) return;
+
+      const id = el.getAttribute(LLM_ID_ATTR);
+      if (!id) return;
+
+      // Skip only truly hidden elements
+      try {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none') return;
+      } catch {
+        // Ignore style errors
+      }
+
+      const rect = el.getBoundingClientRect();
+
+      // Skip only zero-size elements
+      if (rect.width === 0 && rect.height === 0) return;
+
+      const role = getElementRole(el);
+      const minifiedRole = ROLE_MINIFY_MAP[role] || role.substring(0, 4);
+      const name = getElementName(el) || el.getAttribute('aria-label') || el.getAttribute('title') || '';
+
+      const node: SemanticNodeV3 = {
+        i: id,
+        r: minified ? minifiedRole : role,
+        n: (name || '').substring(0, 50),
+      };
+
+      // Add value for inputs
+      const value = getElementValue(el);
+      if (value !== undefined && value !== '') {
+        node.v = String(value).substring(0, 50);
+      }
+
+      // Add coordinates
+      if (includeCoordinates && rect.width > 0 && rect.height > 0) {
+        const centerX = Math.round(rect.left + rect.width / 2);
+        const centerY = Math.round(rect.top + rect.height / 2);
+        node.xy = [centerX, centerY];
+      }
+
+      relaxedNodes.push(node);
+    });
+
+    console.log(`[SemanticTreeV4] Relaxed extraction recovered ${relaxedNodes.length} nodes`);
+
+    if (relaxedNodes.length > 0) {
+      const relaxedResult: SemanticTreeResultV3 = {
+        mode: 'semantic',
+        url: window.location.href,
+        title: document.title,
+        viewport: { width: viewportWidth, height: actualViewportHeight },
+        scroll_position: scrollPosition,
+        interactive_tree: relaxedNodes,
+        meta: {
+          totalElements,
+          viewportElements: relaxedNodes.length,
+          prunedElements: totalElements - relaxedNodes.length,
+          occludedElements: 0,
+          extractionTimeMs: Math.round(performance.now() - startTime),
+          estimatedTokens: Math.round(JSON.stringify(relaxedNodes).length / 4),
+        },
+      };
+      return relaxedResult;
+    }
+  }
+
+  // LAST-RESORT FALLBACK: Query interactive elements directly if everything else failed
+  if (nodes.length === 0) {
+    console.warn('[SemanticTreeV4] LAST RESORT: Querying interactive elements directly...');
+
+    const INTERACTIVE_SELECTORS = 'a[href], button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [onclick], [tabindex]:not([tabindex="-1"])';
+    const lastResortNodes: SemanticNodeV3[] = [];
+    let lastResortId = 1;
+
+    try {
+      // Try deep query first, fallback to standard query
+      let interactiveElements: NodeListOf<Element> | Element[];
+      try {
+        interactiveElements = querySelectorAllDeep(INTERACTIVE_SELECTORS);
+      } catch {
+        interactiveElements = document.querySelectorAll(INTERACTIVE_SELECTORS);
+      }
+
+      console.log(`[SemanticTreeV4] Last resort found ${interactiveElements.length} interactive elements`);
+
+      interactiveElements.forEach(el => {
+        if (!(el instanceof HTMLElement)) return;
+
+        // Skip hidden elements
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return;
+        } catch {
+          return;
+        }
+
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+
+        // Generate or use existing ID
+        let id = el.getAttribute(LLM_ID_ATTR);
+        if (!id) {
+          id = `lr-${lastResortId++}`;
+          el.setAttribute(LLM_ID_ATTR, id);
+        }
+
+        const role = getElementRole(el);
+        const minifiedRole = ROLE_MINIFY_MAP[role] || role.substring(0, 4);
+        const name = getElementName(el) || el.getAttribute('aria-label') || el.tagName.toLowerCase();
+
+        const node: SemanticNodeV3 = {
+          i: id,
+          r: minified ? minifiedRole : role,
+          n: (name || '').substring(0, 50),
+        };
+
+        // Add coordinates
+        if (includeCoordinates && rect.width > 0 && rect.height > 0) {
+          const centerX = Math.round(rect.left + rect.width / 2);
+          const centerY = Math.round(rect.top + rect.height / 2);
+          node.xy = [centerX, centerY];
+        }
+
+        lastResortNodes.push(node);
+      });
+
+      console.log(`[SemanticTreeV4] Last resort recovered ${lastResortNodes.length} nodes`);
+
+      if (lastResortNodes.length > 0) {
+        return {
+          mode: 'semantic',
+          url: window.location.href,
+          title: document.title,
+          viewport: { width: viewportWidth, height: actualViewportHeight },
+          scroll_position: scrollPosition,
+          interactive_tree: lastResortNodes,
+          meta: {
+            totalElements: lastResortNodes.length,
+            viewportElements: lastResortNodes.length,
+            prunedElements: 0,
+            occludedElements: 0,
+            extractionTimeMs: Math.round(performance.now() - startTime),
+            estimatedTokens: Math.round(JSON.stringify(lastResortNodes).length / 4),
+          },
+        } as SemanticTreeResultV3;
+      }
+    } catch (error) {
+      console.error('[SemanticTreeV4] Last resort fallback failed:', error);
+    }
+  }
+
   const result: SemanticTreeResultV3 = {
     mode: 'semantic',
     url: window.location.href,
@@ -1472,12 +1689,12 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
       estimatedTokens,
     },
   };
-  
+
   // Add scrollable containers if any were found
   if (scrollableContainers.length > 0) {
     result.scrollable_containers = scrollableContainers;
   }
-  
+
   return result;
 }
 

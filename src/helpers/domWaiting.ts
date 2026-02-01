@@ -8,8 +8,9 @@
  * DOM changes after actions (like dropdown menus appearing).
  */
 
-import { callRPC } from './pageRPC';
 import { sleep } from './utils';
+import { extractDomViaCDP, SemanticNodeV3 } from './cdpDomExtractor';
+import { getDidNetworkOccurSinceMark, setNetworkObservationMark } from './cdpLifecycle';
 
 /**
  * Configuration for DOM waiting
@@ -78,35 +79,46 @@ export interface DropdownItem {
 }
 
 /**
- * Get a snapshot of current interactive elements
+ * Get a snapshot of current interactive elements using CDP extraction
  * Used for tracking what changed after an action
- * @param tabId - Optional tab ID to target (uses active tab if not provided)
+ * @param tabId - Tab ID to target (required for CDP)
  */
 export async function getInteractiveElementSnapshot(tabId?: number): Promise<Map<string, ElementInfo>> {
   try {
-    // CRITICAL FIX: Pass tabId to ensure we target the correct tab when switching tabs
-    const snapshot = await callRPC('getInteractiveElementSnapshot', [], 3, tabId);
-    if (!snapshot || !Array.isArray(snapshot)) {
+    if (typeof tabId !== 'number') {
+      // Try to get active tab
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) {
+        console.warn('No active tab found for CDP extraction');
+        return new Map();
+      }
+      tabId = tab.id;
+    }
+
+    // Use CDP extraction instead of content script RPC
+    const cdpResult = await extractDomViaCDP(tabId);
+    if (!cdpResult?.interactiveTree?.length) {
       return new Map();
     }
-    
+
     const map = new Map<string, ElementInfo>();
-    for (const el of snapshot) {
-      const key = el.id || `${el.tagName}-${el.text?.substring(0, 20)}`;
+    for (const node of cdpResult.interactiveTree) {
+      // Convert SemanticNodeV3 to ElementInfo
+      const key = node.i || `${node.r}-${node.n?.substring(0, 20)}`;
       map.set(key, {
-        id: el.id,
-        tagName: el.tagName,
-        role: el.role,
-        name: el.name,
-        text: el.text,
-        interactive: el.interactive,
-        virtualCoordinates: el.virtualCoordinates,
-        isVirtual: el.isVirtual,
+        id: node.i,
+        tagName: node.r, // Role as tagName approximation
+        role: node.r,
+        name: node.n,
+        text: node.n, // Name serves as text
+        interactive: true, // All nodes from interactiveTree are interactive
+        virtualCoordinates: node.xy ? { x: node.xy[0], y: node.xy[1] } : undefined,
+        isVirtual: false,
       });
     }
     return map;
   } catch (error) {
-    console.warn('Failed to get interactive element snapshot:', error);
+    console.warn('Failed to get interactive element snapshot via CDP:', error);
     return new Map();
   }
 }
@@ -266,25 +278,28 @@ export async function waitForDOMStabilization(
   let previousSnapshot: Map<string, ElementInfo> | null = null;
   let mutationCount = 0;
   
-  // CRITICAL FIX: Track network activity for dynamic stability check
-  // Monitor network requests (if available via Performance API)
+  // CRITICAL FIX: Track network activity using CDP lifecycle tracking
+  // Uses cdpLifecycle.ts network observation instead of content script RPC
   const checkNetworkIdle = async (): Promise<boolean> => {
     try {
-      // Use RPC to check network activity in content script context
-      // Performance API is only available in content script, not background
-      // CRITICAL FIX: Pass tabId to ensure we target the correct tab
-      const networkStatus = await callRPC('checkNetworkIdle', [], 1, tabId);
-      if (typeof networkStatus === 'boolean') {
-        return networkStatus;
+      if (typeof tabId !== 'number') {
+        return true; // Can't check without tabId
       }
-      // Fallback: assume idle if we can't check
-      return true;
+      // Check if network activity occurred since last mark
+      // If no activity, network is considered idle
+      const didNetworkOccur = getDidNetworkOccurSinceMark(tabId);
+      return !didNetworkOccur;
     } catch (error) {
-      // If RPC fails, assume network is idle (don't block on network check failures)
+      // If check fails, assume network is idle (don't block on network check failures)
       console.warn('Network idle check failed, assuming idle:', error);
       return true;
     }
   };
+
+  // Set network observation mark at the start
+  if (typeof tabId === 'number') {
+    setNetworkObservationMark(tabId);
+  }
   
   // Initial wait
   await sleep(cfg.minWait);

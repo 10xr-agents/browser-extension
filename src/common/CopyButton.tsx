@@ -1,7 +1,6 @@
 import React from 'react';
 import { CopyIcon } from '@chakra-ui/icons';
 import { useColorModeValue } from '@chakra-ui/react';
-import { callRPC } from '../helpers/pageRPC';
 
 export default function CopyButton(props: { text: string }) {
   const iconColor = useColorModeValue('gray.500', 'gray.400');
@@ -15,7 +14,8 @@ export default function CopyButton(props: { text: string }) {
       onClick={async (event) => {
         try {
           event.preventDefault();
-          await callRPC('copyToClipboard', [props.text]);
+          // Use native clipboard API directly (works in side panel context)
+          await navigator.clipboard.writeText(props.text);
         } catch (e) {
           console.error('Failed to copy to clipboard:', e);
         }
