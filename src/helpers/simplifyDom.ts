@@ -36,6 +36,11 @@ import {
  * Result of DOM extraction
  */
 export interface SimplifiedDomResult {
+  /**
+   * Raw annotated DOM HTML returned by the content script (`getAnnotatedDOM`).
+   * IMPORTANT: This is the correct source for skeleton extraction (it preserves real element IDs).
+   */
+  annotatedDomHtml: string;
   dom: HTMLElement;
   accessibilityTree?: AccessibilityTree;
   usedAccessibility: boolean;
@@ -238,6 +243,7 @@ export async function getSimplifiedDom(tabId?: number): Promise<SimplifiedDomRes
   }
 
   return {
+    annotatedDomHtml: fullDom,
     dom: simplifiedDom,
     accessibilityTree,
     usedAccessibility,

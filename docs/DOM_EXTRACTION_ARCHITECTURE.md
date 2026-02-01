@@ -1504,63 +1504,44 @@ interface AgentInteractRequest {
 
 ---
 
-## 14. Mode Selection Logic (V3)
+## 14. Mode Selection Logic (Backend-Driven Negotiation)
 
-**File:** `src/helpers/hybridCapture.ts` and `src/state/currentTask.ts`
+**File:** `src/state/currentTask.ts` and `src/api/client.ts`
 
-**Key Principle:** V3 Semantic is PRIMARY. Full DOM should NEVER be sent proactively.
+**Key Principle:** The extension **always sends semantic_v3 first** and the **backend decides** if it needs additional artifacts (skeleton, screenshot, or full DOM).
 
-### Priority Order
+### Default Mode (Client)
 
-| Priority | Mode | Tokens | When Used |
-|----------|------|--------|-----------|
-| **1** | `semantic_v3` | 25-75 | Default (viewport pruning + minified keys) |
-| 2 | `semantic` | 50-125 | V3 fails or empty |
-| 3 | `skeleton` | 500-1500 | Semantic fails |
-| 4 | `hybrid` | 2000-3000 | Visual/spatial query detected |
-| **5** | `full` | 10k-50k | **ONLY on explicit backend `needs_full_dom` request** |
+The extension ALWAYS starts with:
+- `domMode: "semantic_v3"`
+- `interactiveTree`, `viewport`, `pageTitle` (+ V3 advanced fields)
+- No `dom`, no `skeletonDom`, no `screenshot`
 
-### Decision Tree
+### Backend Requests (Negotiation)
+
+If the backend cannot plan/verify using semantic JSON alone, it responds requesting additional artifacts:
+
+**Signals (supported):**
+- `requestedDomMode: "skeleton" | "hybrid" | "full"`
+- `needsSkeletonDom: true`
+- `needsScreenshot: true`
+- legacy: `status: "needs_full_dom"`
+
+### Negotiation Flow
 
 ```
-┌────────────────────────────────────────────────────┐
-│         V3 MODE SELECTION ALGORITHM                 │
-├────────────────────────────────────────────────────┤
-│                                                     │
-│  1. USE_V3_EXTRACTION enabled? (default: true)     │
-│     │                                               │
-│     ├─ YES ─▶ Try V3 extraction (viewport pruning)│
-│     │         │                                     │
-│     │         ├─ Success? ─▶ MODE = "semantic_v3" │
-│     │         │                                     │
-│     │         └─ Failure? ─▶ Step 2               │
-│     │                                               │
-│     └─ NO ──▶ Step 2                               │
-│                                                     │
-│  2. USE_SEMANTIC_EXTRACTION enabled?               │
-│     │                                               │
-│     ├─ YES ─▶ Try V2 semantic extraction          │
-│     │         │                                     │
-│     │         ├─ Success? ─▶ MODE = "semantic"    │
-│     │         │                                     │
-│     │         └─ Failure? ─▶ Step 3               │
-│     │                                               │
-│     └─ NO ──▶ Step 3                               │
-│                                                     │
-│  3. Visual/spatial query detected?                 │
-│     │                                               │
-│     ├─ YES ─▶ MODE = "hybrid" (screenshot + skel) │
-│     │                                               │
-│     └─ NO ──▶ MODE = "skeleton"                    │
-│                                                     │
-│  4. Server returns "needs_full_dom"?               │
-│     │                                               │
-│     └─ YES ─▶ Retry with MODE = "full"            │
-│                                                     │
-│  ⚠️ NEVER proactively send full DOM               │
-│                                                     │
-└────────────────────────────────────────────────────┘
+1) Client sends semantic_v3 only
+2) Backend responds:
+   - normal action → proceed
+   - OR requests additional context → client retries with only what was requested
+3) Backend receives retry payload and returns final action
 ```
+
+### Why Backend-Driven?
+
+- Keeps client simple (no keyword heuristics)
+- Avoids sending heavy payloads “just in case”
+- Guarantees the backend controls what it needs for verification
 
 ### Visual/Spatial Keywords
 

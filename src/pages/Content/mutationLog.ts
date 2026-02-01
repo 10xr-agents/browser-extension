@@ -146,8 +146,12 @@ function isMeaningfulNode(node: Node): boolean {
 /**
  * Check if element looks like a toast/notification/alert
  */
-function looksLikeNotification(el: Element): boolean {
-  const className = el.className?.toLowerCase() || '';
+function looksLikeNotification(el: unknown): boolean {
+  // Guard: MutationObserver can hand us Text nodes or other non-Elements.
+  if (!(el instanceof Element)) return false;
+
+  const className =
+    typeof (el as any).className === 'string' ? ((el as any).className as string).toLowerCase() : '';
   const role = el.getAttribute('role')?.toLowerCase() || '';
   const ariaLive = el.getAttribute('aria-live');
   
@@ -222,7 +226,7 @@ function processMutations(mutations: MutationRecord[]): void {
           const desc = text.length > 50 ? text.substring(0, 47) + '...' : text;
           
           // Only log meaningful changes (errors, success, form-related)
-          if (category !== 'text' || looksLikeNotification(node as Element)) {
+          if (category !== 'text' || looksLikeNotification(node)) {
             addEntry({
               type: 'added',
               category,

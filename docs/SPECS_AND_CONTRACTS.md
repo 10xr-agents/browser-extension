@@ -140,7 +140,7 @@ Session titles typically follow (based on the URL at session creation time):
 No backend changes are required for tab-scoped sessions because:
 
 - The backend already keys message history and task state by `sessionId`.
-- `tabId` is a **client-only** identifier and should not be modeled server-side for long-term storage.
+- `tabId` is a **client-only** identifier and is **not stable across browser restarts**. The backend may store it as **debug metadata**, but must not treat it as a stable identifier/primary key.
 
 ### Backend Endpoints (Used)
 

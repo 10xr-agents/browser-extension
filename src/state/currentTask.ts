@@ -1227,9 +1227,13 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           // 3. HYBRID mode: Screenshot + skeleton for visual tasks
           // 4. FULL mode: Full HTML (fallback)
           
-          // Extract skeleton for backward compatibility and fallback
-          const skeletonDom = extractSkeletonDom(currentDom);
-          const skeletonStats = getSkeletonStats(currentDom.length, skeletonDom);
+          // Extract skeleton from the RAW annotated DOM, not the templatized HTML.
+          // Templatization injects `{T1(...)}`-style placeholders that DOMParser treats as text,
+          // which can drop interactive elements/IDs (e.g. nav links like id=241) and break element mapping.
+          const annotatedDomHtml =
+            typeof domResult.annotatedDomHtml === 'string' ? domResult.annotatedDomHtml : html;
+          const skeletonDom = extractSkeletonDom(annotatedDomHtml);
+          const skeletonStats = getSkeletonStats(annotatedDomHtml.length, skeletonDom);
           
           // Variables for semantic extraction
           let semanticNodes: SemanticNode[] | undefined;
@@ -1474,7 +1478,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   // Semantic JSON Protocol fields (only sent when domMode === 'semantic')
                   semanticNodes: domMode === 'semantic' ? semanticNodes : undefined,
                   pageTitle: domMode === 'semantic' ? pageTitle : undefined,
-                }
+                },
+                tabId
               );
             } finally {
               // CRITICAL: Stop keep-alive as soon as API response is received
@@ -1526,7 +1531,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     skeletonDom,
                     domMode: 'full', // Override to full mode
                     screenshotHash: screenshotHash || undefined,
-                  }
+                  },
+                  tabId
                 );
               } finally {
                 await stopKeepAlive();

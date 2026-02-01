@@ -117,7 +117,21 @@ export interface ClientObservations {
 interface AgentInteractRequest {
   url: string;
   query: string;
-  dom: string;
+  /**
+   * Chrome tab id that originated this request/session.
+   * NOTE: tab IDs are client-only and not stable across browser restarts.
+   * Backend may store this as debugging/analytics metadata, but MUST NOT treat it as a stable identifier.
+   */
+  tabId?: number;
+  /**
+   * Optional DOM payload.
+   *
+   * NEW CONTRACT (development): the extension sends semantic JSON first and only
+   * sends skeleton/full DOM (or screenshot) when the backend explicitly requests it.
+   *
+   * For backward compatibility, backend may still accept dom for verification/fallback.
+   */
+  dom?: string;
   taskId?: string | null;
   sessionId?: string | null; // New: Session ID (replaces taskId for new structure)
   // New fields for error reporting
@@ -153,9 +167,10 @@ interface AgentInteractRequest {
    * - "skeleton": Use skeletonDom only (fast, low tokens)
    * - "full": Use full dom only (backward compatible)
    * - "hybrid": Use screenshot + skeletonDom (best for visual tasks)
-   * - "semantic": Use semanticNodes JSON (new, recommended - ~95% token reduction)
+   * - "semantic_v3": Use minified semantic JSON (primary)
+   * - "semantic": Use semanticNodes JSON (v2 fallback)
    */
-  domMode?: 'skeleton' | 'full' | 'hybrid' | 'semantic';
+  domMode?: 'semantic_v3' | 'semantic' | 'skeleton' | 'hybrid' | 'full';
   
   /**
    * Skeleton DOM containing only interactive elements.
@@ -194,6 +209,30 @@ interface AgentInteractRequest {
     placeholder?: string;
     href?: string;
   }>;
+
+  // === SEMANTIC JSON PROTOCOL (V3) ===
+  // Reference: docs/DOM_EXTRACTION_ARCHITECTURE.md (V3)
+  interactiveTree?: Array<{
+    i: string;
+    r: string;
+    n: string;
+    v?: string;
+    s?: string;
+    xy?: [number, number];
+    f?: number;
+    // V3 advanced optional fields
+    box?: [number, number, number, number];
+    scr?: { depth: string; h: boolean };
+    occ?: boolean;
+  }>;
+
+  viewport?: { width: number; height: number };
+
+  scrollPosition?: string;
+  scrollableContainers?: Array<{ id: string; depth: string; hasMore: boolean }>;
+  recentEvents?: string[];
+  hasErrors?: boolean;
+  hasSuccess?: boolean;
   
   /**
    * Page title for context
@@ -336,7 +375,19 @@ interface NextActionResponse {
   plan?: ActionPlan; // Action plan from orchestrator
   currentStep?: number; // Current step number (1-indexed)
   totalSteps?: number; // Total steps in plan
-  status?: 'planning' | 'executing' | 'verifying' | 'correcting' | 'completed' | 'failed' | 'needs_user_input' | 'needs_full_dom'; // Orchestrator status
+  status?:
+    | 'planning'
+    | 'executing'
+    | 'verifying'
+    | 'correcting'
+    | 'completed'
+    | 'failed'
+    | 'needs_user_input'
+    | 'needs_full_dom'
+    // NEW (development): backend-driven artifact negotiation
+    | 'needs_skeleton_dom'
+    | 'needs_screenshot'
+    | 'needs_context'; // Orchestrator status
   verification?: VerificationResult; // Verification result for previous step (Task 7)
   correction?: CorrectionResult; // Self-correction result for current step (Task 8)
   expectedOutcome?: string; // Expected outcome for next verification (Task 9)
@@ -354,6 +405,17 @@ interface NextActionResponse {
   // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §6 (Fallback Handling)
   needsFullDomReason?: string; // Reason why full DOM is needed (e.g., "Element not found in skeleton")
   requestedElement?: string; // What element we're looking for (for debugging)
+
+  /**
+   * NEW CONTRACT (development): backend-driven payload negotiation.
+   * Backend can request additional artifacts for the *next* call.
+   *
+   * Client should always send semantic_v3 first; only send requested artifacts
+   * on retry.
+   */
+  requestedDomMode?: 'semantic_v3' | 'semantic' | 'skeleton' | 'hybrid' | 'full';
+  needsScreenshot?: boolean;
+  needsSkeletonDom?: boolean;
 }
 
 // Get API base URL from environment or use default
@@ -816,7 +878,7 @@ class ApiClient {
   async agentInteract(
     url: string,
     query: string,
-    dom: string,
+    dom: string | undefined,
     taskId?: string | null,
     sessionId?: string | null,
     lastActionStatus?: 'success' | 'failure' | 'pending',
@@ -846,7 +908,7 @@ class ApiClient {
     hybridParams?: {
       screenshot?: string | null;
       skeletonDom?: string;
-      domMode?: 'skeleton' | 'full' | 'hybrid' | 'semantic';
+      domMode?: 'semantic_v3' | 'semantic' | 'skeleton' | 'full' | 'hybrid';
       screenshotHash?: string;
       // Semantic JSON Protocol fields (new, recommended)
       semanticNodes?: Array<{
@@ -860,7 +922,17 @@ class ApiClient {
         href?: string;
       }>;
       pageTitle?: string;
+      // V3 semantic fields
+      interactiveTree?: AgentInteractRequest['interactiveTree'];
+      viewport?: AgentInteractRequest['viewport'];
+      scrollPosition?: string;
+      scrollableContainers?: AgentInteractRequest['scrollableContainers'];
+      recentEvents?: string[];
+      hasErrors?: boolean;
+      hasSuccess?: boolean;
     }
+    ,
+    tabId?: number
   ): Promise<NextActionResponse> {
     // Adaptive DOM size limits:
     // - Default: 50k chars (sufficient for most pages)
@@ -870,40 +942,50 @@ class ApiClient {
     const DEFAULT_DOM_LIMIT = 50000;
     const EXTENDED_DOM_LIMIT = 200000;
     
-    // Determine which DOM to use based on mode
+    // Determine which mode to use
     const domMode = hybridParams?.domMode || 'full';
     
     // Log mode-specific info
-    if (domMode === 'semantic' && hybridParams?.semanticNodes) {
+    if (domMode === 'semantic_v3' && hybridParams?.interactiveTree) {
+      console.log(
+        `[ApiClient] Using SEMANTIC_V3 mode - ${hybridParams.interactiveTree.length} nodes (~${Math.round(
+          JSON.stringify(hybridParams.interactiveTree).length / 4
+        )} tokens)`
+      );
+    } else if (domMode === 'semantic' && hybridParams?.semanticNodes) {
       // SEMANTIC MODE: JSON-based representation (~95% token reduction)
       // The semanticNodes array contains stable IDs that don't drift
       console.log(`[ApiClient] Using SEMANTIC mode - ${hybridParams.semanticNodes.length} nodes (~${Math.round(JSON.stringify(hybridParams.semanticNodes).length / 4)} tokens)`);
     } else if ((domMode === 'skeleton' || domMode === 'hybrid') && hybridParams?.skeletonDom) {
       // Skeleton DOM is typically 500-2000 chars, no truncation needed
-      console.log(`[ApiClient] Using ${domMode} mode - skeleton: ${hybridParams.skeletonDom.length} chars, full: ${dom.length} chars`);
+      console.log(`[ApiClient] Using ${domMode} mode - skeleton: ${hybridParams.skeletonDom.length} chars, full: ${(dom || '').length} chars`);
     }
     
-    // For semantic mode, we can use a much smaller DOM (or even empty string) as fallback
-    // The semanticNodes array is the primary data source
+    // For semantic modes, we should not send DOM unless explicitly requested.
+    // For non-semantic modes, apply truncation to protect payload size.
     let domLimit = DEFAULT_DOM_LIMIT;
-    if (domMode === 'semantic') {
-      // In semantic mode, full DOM is only a fallback - use minimal limit
-      domLimit = 10000; // Just enough for context if needed
-    } else if (dom.length > DEFAULT_DOM_LIMIT) {
+    const domString = typeof dom === 'string' ? dom : '';
+    if (domString.length > DEFAULT_DOM_LIMIT) {
       // Complex page detected - use extended limit to capture all interactive elements
       // This ensures a "Save" button at character 65,000 on Salesforce won't be lost
       domLimit = EXTENDED_DOM_LIMIT;
-      console.log(`[ApiClient] DOM exceeds 50k (${dom.length} chars), using extended 200k limit`);
+      console.log(`[ApiClient] DOM exceeds 50k (${domString.length} chars), using extended 200k limit`);
     }
     
-    const truncatedDom = dom.substring(0, domLimit);
-    if (dom.length > domLimit && domMode !== 'semantic') {
-      console.warn(`[ApiClient] DOM truncated from ${dom.length} to ${domLimit} chars (extended limit)`);
+    const shouldSendDom =
+      domMode === 'full' ||
+      domMode === 'skeleton' ||
+      domMode === 'hybrid';
+
+    const truncatedDom = shouldSendDom ? domString.substring(0, domLimit) : undefined;
+    if (shouldSendDom && domString.length > domLimit) {
+      console.warn(`[ApiClient] DOM truncated from ${domString.length} to ${domLimit} chars`);
     }
     
     const body: AgentInteractRequest = {
       url,
       query,
+      tabId: typeof tabId === 'number' ? tabId : undefined,
       dom: truncatedDom,
       taskId: taskId || undefined,
       sessionId: sessionId || undefined,
@@ -919,6 +1001,13 @@ class ApiClient {
       screenshotHash: hybridParams?.screenshotHash,
       // Semantic JSON Protocol fields
       semanticNodes: hybridParams?.semanticNodes,
+      interactiveTree: hybridParams?.interactiveTree,
+      viewport: hybridParams?.viewport,
+      scrollPosition: hybridParams?.scrollPosition,
+      scrollableContainers: hybridParams?.scrollableContainers,
+      recentEvents: hybridParams?.recentEvents,
+      hasErrors: hybridParams?.hasErrors,
+      hasSuccess: hybridParams?.hasSuccess,
       pageTitle: hybridParams?.pageTitle,
     };
 
@@ -1136,6 +1225,5 @@ export type {
   PreferencesResponse,
   PreferencesRequest,
   DOMChangeInfo,
-  ClientObservations,
   ActionDetails
 };
