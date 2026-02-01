@@ -38,58 +38,80 @@ function stripHeavyElements(clone: HTMLElement | null | undefined): void {
     return;
   }
   
+  // CRITICAL FIX: Guard against document being unavailable (navigation edge case)
+  if (typeof document === 'undefined' || !document) {
+    console.warn('[stripHeavyElements] document is unavailable, skipping');
+    return;
+  }
+  
   try {
     // 1. Remove all heavy elements
     const elementsToRemove = clone.querySelectorAll(HEAVY_ELEMENT_SELECTORS.join(','));
-    elementsToRemove.forEach((el) => {
-      try {
-        el.remove();
-      } catch (error) {
-        // Element may have already been removed (nested), ignore
-      }
-    });
+    if (elementsToRemove && elementsToRemove.length > 0) {
+      elementsToRemove.forEach((el) => {
+        try {
+          el.remove();
+        } catch (error) {
+          // Element may have already been removed (nested), ignore
+        }
+      });
+    }
 
     // 2. Remove HTML comments using TreeWalker (more efficient than NodeIterator)
-    const commentWalker = document.createTreeWalker(
-      clone,
-      NodeFilter.SHOW_COMMENT,
-      null
-    );
-    
-    const commentsToRemove: Comment[] = [];
-    let currentComment: Comment | null;
-    while ((currentComment = commentWalker.nextNode() as Comment | null)) {
-      commentsToRemove.push(currentComment);
-    }
-    
-    commentsToRemove.forEach((comment) => {
+    // Guard: Ensure document.createTreeWalker is available
+    if (typeof document.createTreeWalker === 'function') {
       try {
-        comment.parentNode?.removeChild(comment);
-      } catch (error) {
-        // Comment may have already been removed, ignore
+        const commentWalker = document.createTreeWalker(
+          clone,
+          NodeFilter.SHOW_COMMENT,
+          null
+        );
+        
+        const commentsToRemove: Comment[] = [];
+        let currentComment: Comment | null;
+        while ((currentComment = commentWalker.nextNode() as Comment | null)) {
+          commentsToRemove.push(currentComment);
+        }
+        
+        commentsToRemove.forEach((comment) => {
+          try {
+            comment.parentNode?.removeChild(comment);
+          } catch (error) {
+            // Comment may have already been removed, ignore
+          }
+        });
+      } catch (treeWalkerError) {
+        // TreeWalker failed, continue without comment removal
+        console.debug('[stripHeavyElements] TreeWalker failed, skipping comment removal');
       }
-    });
+    }
 
     // 3. Remove data attributes that are not needed for automation
     // Keep only essential attributes: data-id, data-interactive, data-visible, data-frame-id
     const allElements = clone.querySelectorAll('*');
-    allElements.forEach((el) => {
-      const element = el as HTMLElement;
-      // Get all data-* attributes
-      const attributesToRemove: string[] = [];
-      for (const attr of Array.from(element.attributes)) {
-        if (
-          attr.name.startsWith('data-') &&
-          !['data-id', 'data-interactive', 'data-visible', 'data-frame-id'].includes(attr.name)
-        ) {
-          attributesToRemove.push(attr.name);
+    if (allElements && allElements.length > 0) {
+      allElements.forEach((el) => {
+        try {
+          const element = el as HTMLElement;
+          // Get all data-* attributes
+          const attributesToRemove: string[] = [];
+          for (const attr of Array.from(element.attributes)) {
+            if (
+              attr.name.startsWith('data-') &&
+              !['data-id', 'data-interactive', 'data-visible', 'data-frame-id'].includes(attr.name)
+            ) {
+              attributesToRemove.push(attr.name);
+            }
+          }
+          // Remove non-essential data attributes
+          attributesToRemove.forEach((attrName) => {
+            element.removeAttribute(attrName);
+          });
+        } catch (attrError) {
+          // Individual element processing failed, continue with others
         }
-      }
-      // Remove non-essential data attributes
-      attributesToRemove.forEach((attrName) => {
-        element.removeAttribute(attrName);
       });
-    });
+    }
 
     console.debug('[stripHeavyElements] Removed heavy elements and comments');
   } catch (error) {
@@ -174,38 +196,89 @@ function traverseDOM(node: Node, pageElements: HTMLElement[], frameId?: string):
   pageElements: HTMLElement[];
   clonedDOM: Node;
 } {
-  const clonedNode = node.cloneNode(false) as Node;
+  // CRITICAL FIX: Guard against null/undefined node (can happen during navigation or iframe access)
+  if (!node) {
+    console.warn('[traverseDOM] Received null/undefined node, returning empty text node');
+    return {
+      pageElements,
+      clonedDOM: document.createTextNode(''),
+    };
+  }
+  
+  // CRITICAL FIX: Guard against cloneNode failing (can happen on detached/transitional elements)
+  let clonedNode: Node;
+  try {
+    clonedNode = node.cloneNode(false) as Node;
+  } catch (cloneError) {
+    console.debug('[traverseDOM] cloneNode failed:', cloneError);
+    return {
+      pageElements,
+      clonedDOM: document.createTextNode(''),
+    };
+  }
+  
   const currentFrameId = frameId || getFrameId();
 
   if (node.nodeType === Node.ELEMENT_NODE) {
     const element = node as HTMLElement;
-    const style = window.getComputedStyle(element);
+    
+    // CRITICAL FIX: Wrap getComputedStyle in try-catch
+    // This can throw on detached elements or during page transitions
+    let style: CSSStyleDeclaration;
+    try {
+      style = window.getComputedStyle(element);
+    } catch (styleError) {
+      console.debug('[traverseDOM] getComputedStyle failed, using default styles:', styleError);
+      // Create a mock style object with safe defaults
+      // This allows traversal to continue even if style computation fails
+      style = {
+        opacity: '1',
+        display: 'block',
+        visibility: 'visible',
+        cursor: 'auto',
+      } as CSSStyleDeclaration;
+    }
 
     const clonedElement = clonedNode as HTMLElement;
 
     pageElements.push(element);
-    clonedElement.setAttribute('data-id', (pageElements.length - 1).toString());
-    clonedElement.setAttribute(
-      'data-interactive',
-      isInteractive(element, style).toString()
-    );
-    clonedElement.setAttribute(
-      'data-visible',
-      isVisible(element, style).toString()
-    );
-    // CRITICAL FIX: Tag element with frameId for iframe support
-    clonedElement.setAttribute('data-frame-id', currentFrameId);
+    
+    // CRITICAL FIX: Guard against setAttribute failing on invalid elements
+    try {
+      clonedElement.setAttribute('data-id', (pageElements.length - 1).toString());
+      clonedElement.setAttribute(
+        'data-interactive',
+        isInteractive(element, style).toString()
+      );
+      clonedElement.setAttribute(
+        'data-visible',
+        isVisible(element, style).toString()
+      );
+      // CRITICAL FIX: Tag element with frameId for iframe support
+      clonedElement.setAttribute('data-frame-id', currentFrameId);
+    } catch (attrError) {
+      console.debug('[traverseDOM] setAttribute failed:', attrError);
+      // Continue traversal even if we can't set attributes
+    }
 
     // CRITICAL FIX: Check for Shadow Root and Dive In
     // Shadow DOM elements are encapsulated and invisible to standard querySelector
-    if (element.shadowRoot) {
-      // Recursively traverse shadow root children
-      Array.from(element.shadowRoot.children).forEach((child) => {
-        if (child instanceof HTMLElement) {
-          const shadowResult = traverseDOM(child, pageElements, currentFrameId);
-          clonedNode.appendChild(shadowResult.clonedDOM);
-        }
-      });
+    try {
+      if (element.shadowRoot) {
+        // Recursively traverse shadow root children
+        Array.from(element.shadowRoot.children).forEach((child) => {
+          if (child instanceof HTMLElement) {
+            try {
+              const shadowResult = traverseDOM(child, pageElements, currentFrameId);
+              clonedNode.appendChild(shadowResult.clonedDOM);
+            } catch (shadowChildError) {
+              console.debug('[traverseDOM] Shadow child traversal failed:', shadowChildError);
+            }
+          }
+        });
+      }
+    } catch (shadowError) {
+      console.debug('[traverseDOM] Shadow root access failed:', shadowError);
     }
     
     // CRITICAL FIX: Handle iframe elements - traverse into iframe content if accessible
@@ -214,7 +287,9 @@ function traverseDOM(node: Node, pageElements: HTMLElement[], frameId?: string):
         // Try to access iframe content (only works for same-origin iframes)
         const iframe = element as HTMLIFrameElement;
         const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-        if (iframeDoc) {
+        // CRITICAL FIX: Check both iframeDoc AND iframeDoc.documentElement
+        // iframeDoc can exist but documentElement can be null during iframe loading
+        if (iframeDoc && iframeDoc.documentElement) {
           const iframeFrameId = `${currentFrameId}-iframe-${pageElements.length}`;
           const iframeResult = traverseDOM(iframeDoc.documentElement, pageElements, iframeFrameId);
           // Note: We don't append iframe content to cloned DOM (it's a separate document)
@@ -228,10 +303,23 @@ function traverseDOM(node: Node, pageElements: HTMLElement[], frameId?: string):
   }
 
   // Process regular children (non-shadow)
-  node.childNodes.forEach((child) => {
-    const result = traverseDOM(child, pageElements, currentFrameId);
-    clonedNode.appendChild(result.clonedDOM);
-  });
+  // CRITICAL FIX: Guard against childNodes being null or iteration failing
+  try {
+    if (node.childNodes && node.childNodes.length > 0) {
+      Array.from(node.childNodes).forEach((child) => {
+        try {
+          const result = traverseDOM(child, pageElements, currentFrameId);
+          if (result.clonedDOM) {
+            clonedNode.appendChild(result.clonedDOM);
+          }
+        } catch (childError) {
+          console.debug('[traverseDOM] Child traversal failed:', childError);
+        }
+      });
+    }
+  } catch (childNodesError) {
+    console.debug('[traverseDOM] childNodes access failed:', childNodesError);
+  }
 
   return {
     pageElements,
@@ -255,34 +343,73 @@ export default function getAnnotatedDOM() {
   // before the new page's DOM is ready. Return null to signal retry.
   
   try {
-    // Check 1: document must exist and be accessible
-    if (!document || typeof document.documentElement === 'undefined') {
-      console.warn('[getAnnotatedDOM] document is not accessible - page may be loading');
+    // Check 1: window and document must exist
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      console.warn('[getAnnotatedDOM] window or document is undefined - not in browser context');
       return null;
     }
     
-    // Check 2: document.documentElement must exist
+    // Check 2: document must be accessible (not destroyed during navigation)
+    if (!document) {
+      console.warn('[getAnnotatedDOM] document is null - page may be unloading');
+      return null;
+    }
+    
+    // Check 3: document.documentElement must exist
     if (!document.documentElement) {
       console.warn('[getAnnotatedDOM] document.documentElement is null - page may be loading');
       return null;
     }
     
-    // Check 3: document.readyState should be 'interactive' or 'complete'
-    // 'loading' means the document is still being parsed
+    // Check 4: document.readyState should be 'complete' for most reliable extraction
+    // 'interactive' can still have scripts modifying the DOM
+    // Allow 'interactive' but log it for debugging
     if (document.readyState === 'loading') {
       console.warn('[getAnnotatedDOM] document.readyState is "loading" - page not ready yet');
       return null;
     }
     
-    // Check 4: document.documentElement should have basic HTML structure
-    if (!document.documentElement.tagName || document.documentElement.tagName.toLowerCase() !== 'html') {
-      console.warn('[getAnnotatedDOM] document.documentElement is not HTML element - page may be in invalid state');
+    if (document.readyState === 'interactive') {
+      console.debug('[getAnnotatedDOM] document.readyState is "interactive" - DOM ready but resources may still be loading');
+      // Continue - DOM is ready enough for extraction
+    }
+    
+    // Check 5: document.documentElement should have basic HTML structure
+    try {
+      if (!document.documentElement.tagName || document.documentElement.tagName.toLowerCase() !== 'html') {
+        console.warn('[getAnnotatedDOM] document.documentElement is not HTML element - page may be in invalid state');
+        return null;
+      }
+    } catch (tagNameError) {
+      console.warn('[getAnnotatedDOM] Error accessing tagName:', tagNameError);
+      return null;
+    }
+    
+    // Check 6: Verify we can actually traverse the DOM
+    // This catches cases where document.documentElement exists but is detached
+    try {
+      // Try accessing childNodes to verify DOM is accessible
+      const testChildNodes = document.documentElement.childNodes;
+      if (!testChildNodes) {
+        console.warn('[getAnnotatedDOM] document.documentElement.childNodes is null - DOM may be detached');
+        return null;
+      }
+    } catch (childNodesError) {
+      console.warn('[getAnnotatedDOM] Error accessing childNodes:', childNodesError);
       return null;
     }
     
     currentElements = [];
     const frameId = getFrameId();
-    const result = traverseDOM(document.documentElement, currentElements, frameId);
+    
+    // CRITICAL FIX: Wrap traverseDOM in try-catch
+    let result: { pageElements: HTMLElement[]; clonedDOM: Node } | null = null;
+    try {
+      result = traverseDOM(document.documentElement, currentElements, frameId);
+    } catch (traverseError) {
+      console.error('[getAnnotatedDOM] traverseDOM threw an error:', traverseError);
+      return null;
+    }
     
     // CRITICAL FIX: Guard against null clonedDOM (defensive)
     if (!result || !result.clonedDOM) {
@@ -292,16 +419,41 @@ export default function getAnnotatedDOM() {
     
     // CRITICAL FIX: Verify clonedDOM is actually an HTMLElement with necessary methods
     const clonedElement = result.clonedDOM as HTMLElement;
-    if (!clonedElement || typeof clonedElement.outerHTML !== 'string') {
-      console.warn('[getAnnotatedDOM] clonedDOM does not have outerHTML - invalid element type');
+    
+    // Check that clonedElement is valid
+    if (!clonedElement) {
+      console.warn('[getAnnotatedDOM] clonedElement is null');
+      return null;
+    }
+    
+    // Check for outerHTML property
+    try {
+      if (typeof clonedElement.outerHTML !== 'string') {
+        console.warn('[getAnnotatedDOM] clonedDOM does not have outerHTML - invalid element type');
+        return null;
+      }
+    } catch (outerHTMLError) {
+      console.warn('[getAnnotatedDOM] Error accessing outerHTML:', outerHTMLError);
       return null;
     }
     
     // CRITICAL FIX: Strip heavy elements before serialization
     // This can reduce payload size by 80-90% on complex pages
-    stripHeavyElements(clonedElement);
+    // Wrap in try-catch to ensure we return something even if stripping fails
+    try {
+      stripHeavyElements(clonedElement);
+    } catch (stripError) {
+      console.warn('[getAnnotatedDOM] stripHeavyElements failed, continuing with unstripped DOM:', stripError);
+      // Continue with unstripped DOM rather than failing completely
+    }
     
-    return clonedElement.outerHTML;
+    // Final safety check: try to access outerHTML
+    try {
+      return clonedElement.outerHTML;
+    } catch (serializeError) {
+      console.error('[getAnnotatedDOM] Failed to serialize DOM:', serializeError);
+      return null;
+    }
   } catch (error) {
     // Catch any unexpected errors during DOM extraction
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -313,12 +465,31 @@ export default function getAnnotatedDOM() {
 // idempotent function to get a unique id for an element
 export function getUniqueElementSelectorId(id: number): string {
   const element = currentElements[id];
+  
+  // Guard: Check if element exists before accessing properties
+  if (!element) {
+    console.warn(`[getUniqueElementSelectorId] Element with id ${id} not found in currentElements (length: ${currentElements.length})`);
+    // Return a placeholder ID that indicates the element wasn't found
+    return `__missing_element_${id}__`;
+  }
+  
+  // Guard: Check if element has getAttribute method (might be a text node or detached)
+  if (typeof element.getAttribute !== 'function') {
+    console.warn(`[getUniqueElementSelectorId] Element ${id} doesn't have getAttribute method (nodeType: ${element.nodeType})`);
+    return `__invalid_element_${id}__`;
+  }
+  
   // element may already have a unique id
-  let uniqueId = element.getAttribute(SPADEWORKS_ELEMENT_SELECTOR);
-  if (uniqueId) return uniqueId;
-  uniqueId = Math.random().toString(36).substring(2, 10);
-  element.setAttribute(SPADEWORKS_ELEMENT_SELECTOR, uniqueId);
-  return uniqueId;
+  try {
+    let uniqueId = element.getAttribute(SPADEWORKS_ELEMENT_SELECTOR);
+    if (uniqueId) return uniqueId;
+    uniqueId = Math.random().toString(36).substring(2, 10);
+    element.setAttribute(SPADEWORKS_ELEMENT_SELECTOR, uniqueId);
+    return uniqueId;
+  } catch (error) {
+    console.warn(`[getUniqueElementSelectorId] Error getting/setting selector for element ${id}:`, error);
+    return `__error_element_${id}__`;
+  }
 }
 
 /**
@@ -352,8 +523,27 @@ function traverseWithShadowDOM(
   seenElements: Set<string>,
   frameId?: string
 ): void {
+  // CRITICAL FIX: Guard against null/undefined element (can happen during navigation)
+  if (!element) {
+    return;
+  }
+  
   const currentFrameId = frameId || getFrameId();
-  const style = window.getComputedStyle(element);
+  
+  // CRITICAL FIX: Guard against getComputedStyle failing on detached elements
+  let style: CSSStyleDeclaration;
+  try {
+    style = window.getComputedStyle(element);
+  } catch (styleError) {
+    // Element may be detached or in invalid state - use default style
+    console.debug('[traverseWithShadowDOM] getComputedStyle failed:', styleError);
+    style = {
+      opacity: '1',
+      display: 'block',
+      visibility: 'visible',
+      cursor: 'auto',
+    } as CSSStyleDeclaration;
+  }
   
   // Skip hidden elements
   if (style.display === 'none' || 
@@ -363,36 +553,56 @@ function traverseWithShadowDOM(
     // Still traverse children (they might be visible)
   } else if (isInteractive(element, style)) {
     // Process the current element (Add to snapshot if interactive)
-    const id = element.getAttribute('data-id') || element.getAttribute('id') || undefined;
-    const role = element.getAttribute('role') || undefined;
-    const name = element.getAttribute('aria-label') || 
-                 element.getAttribute('name') || 
-                 element.getAttribute('placeholder') || 
-                 undefined;
-    const text = element.textContent?.trim().substring(0, 100) || undefined;
-    
-    const uniqueKey = id || `${element.tagName}-${role || 'no-role'}-${text || 'no-text'}-${element.getBoundingClientRect().top}-${element.getBoundingClientRect().left}`;
-    
-    if (!seenElements.has(uniqueKey)) {
-      seenElements.add(uniqueKey);
-      elements.push({
-        id,
-        tagName: element.tagName,
-        role,
-        name,
-        text,
-        interactive: true,
-      });
+    try {
+      const id = element.getAttribute('data-id') || element.getAttribute('id') || undefined;
+      const role = element.getAttribute('role') || undefined;
+      const name = element.getAttribute('aria-label') || 
+                   element.getAttribute('name') || 
+                   element.getAttribute('placeholder') || 
+                   undefined;
+      const text = element.textContent?.trim().substring(0, 100) || undefined;
+      
+      // CRITICAL FIX: Wrap getBoundingClientRect in try-catch
+      let boundingRect = { top: 0, left: 0 };
+      try {
+        boundingRect = element.getBoundingClientRect();
+      } catch (rectError) {
+        console.debug('[traverseWithShadowDOM] getBoundingClientRect failed:', rectError);
+      }
+      
+      const uniqueKey = id || `${element.tagName}-${role || 'no-role'}-${text || 'no-text'}-${boundingRect.top}-${boundingRect.left}`;
+      
+      if (!seenElements.has(uniqueKey)) {
+        seenElements.add(uniqueKey);
+        elements.push({
+          id,
+          tagName: element.tagName,
+          role,
+          name,
+          text,
+          interactive: true,
+        });
+      }
+    } catch (snapshotError) {
+      console.debug('[traverseWithShadowDOM] Error creating element snapshot:', snapshotError);
     }
   }
   
   // CRITICAL FIX: Check for Shadow Root and Dive In
-  if (element.shadowRoot) {
-    Array.from(element.shadowRoot.children).forEach((child) => {
-      if (child instanceof HTMLElement) {
-        traverseWithShadowDOM(child, elements, seenElements, currentFrameId); // Recursive call
-      }
-    });
+  try {
+    if (element.shadowRoot) {
+      Array.from(element.shadowRoot.children).forEach((child) => {
+        if (child instanceof HTMLElement) {
+          try {
+            traverseWithShadowDOM(child, elements, seenElements, currentFrameId);
+          } catch (childError) {
+            console.debug('[traverseWithShadowDOM] Shadow child traversal failed:', childError);
+          }
+        }
+      });
+    }
+  } catch (shadowError) {
+    console.debug('[traverseWithShadowDOM] Shadow root access failed:', shadowError);
   }
   
   // CRITICAL FIX: Handle iframe elements - traverse into iframe content if accessible
@@ -411,16 +621,33 @@ function traverseWithShadowDOM(
   }
   
   // Process regular children
-  Array.from(element.children).forEach((child) => {
-    if (child instanceof HTMLElement) {
-      traverseWithShadowDOM(child, elements, seenElements, currentFrameId);
+  // CRITICAL FIX: Guard against children access failing
+  try {
+    if (element.children && element.children.length > 0) {
+      Array.from(element.children).forEach((child) => {
+        if (child instanceof HTMLElement) {
+          try {
+            traverseWithShadowDOM(child, elements, seenElements, currentFrameId);
+          } catch (childError) {
+            console.debug('[traverseWithShadowDOM] Child traversal failed:', childError);
+          }
+        }
+      });
     }
-  });
+  } catch (childrenError) {
+    console.debug('[traverseWithShadowDOM] Error accessing children:', childrenError);
+  }
 }
 
 export function getInteractiveElementSnapshot(): ElementSnapshotInfo[] {
   const elements: ElementSnapshotInfo[] = [];
   const seenElements = new Set<string>(); // Track elements we've already added
+  
+  // CRITICAL FIX: Guard against document being unavailable (navigation edge case)
+  if (typeof document === 'undefined' || !document) {
+    console.warn('[getInteractiveElementSnapshot] document is unavailable');
+    return elements;
+  }
   
   // CRITICAL FIX: Start traversal from document.body to include Shadow DOM
   // Standard querySelectorAll doesn't see inside shadow roots
@@ -450,14 +677,28 @@ export function getInteractiveElementSnapshot(): ElementSnapshotInfo[] {
     '[style*="cursor: pointer"]',
   ].join(', ');
   
-  const interactiveElements = document.querySelectorAll(selectors);
+  // CRITICAL FIX: Guard querySelectorAll call
+  let interactiveElements: NodeListOf<Element>;
+  try {
+    interactiveElements = document.querySelectorAll(selectors);
+  } catch (error) {
+    console.warn('[getInteractiveElementSnapshot] querySelectorAll failed:', error);
+    return elements;
+  }
   
   // Fallback: Process elements found by querySelectorAll that weren't caught by traversal
   // (Note: querySelectorAll doesn't see Shadow DOM, but traversal above should have caught them)
   interactiveElements.forEach((el) => {
     if (!(el instanceof HTMLElement)) return;
     
-    const style = window.getComputedStyle(el);
+    // CRITICAL FIX: Wrap getComputedStyle in try-catch
+    let style: CSSStyleDeclaration;
+    try {
+      style = window.getComputedStyle(el);
+    } catch (styleError) {
+      console.debug('[getInteractiveElementSnapshot] getComputedStyle failed for element:', styleError);
+      return; // Skip this element if we can't get its style
+    }
     
     // Skip hidden elements
     if (style.display === 'none' || 
@@ -477,7 +718,14 @@ export function getInteractiveElementSnapshot(): ElementSnapshotInfo[] {
     
     // Create a unique key for this element to avoid duplicates
     // Use data-id if available, otherwise use a combination of tag, role, text, and position
-    const uniqueKey = id || `${el.tagName}-${role || 'no-role'}-${text || 'no-text'}-${el.getBoundingClientRect().top}-${el.getBoundingClientRect().left}`;
+    // CRITICAL FIX: Wrap getBoundingClientRect in try-catch
+    let boundingRect = { top: 0, left: 0 };
+    try {
+      boundingRect = el.getBoundingClientRect();
+    } catch (rectError) {
+      console.debug('[getInteractiveElementSnapshot] getBoundingClientRect failed:', rectError);
+    }
+    const uniqueKey = id || `${el.tagName}-${role || 'no-role'}-${text || 'no-text'}-${boundingRect.top}-${boundingRect.left}`;
     
     if (seenElements.has(uniqueKey)) {
       return; // Skip duplicates (already added by traversal)
@@ -496,12 +744,25 @@ export function getInteractiveElementSnapshot(): ElementSnapshotInfo[] {
   
   // Also look for menu items inside dropdown menus that might not have explicit roles
   // Check for elements inside <ul name="menuEntries"> or similar menu containers
-  const menuContainers = document.querySelectorAll('ul[name="menuEntries"], ul[role="menu"], div[role="menu"], ul[aria-label*="menu" i]');
+  let menuContainers: NodeListOf<Element>;
+  try {
+    menuContainers = document.querySelectorAll('ul[name="menuEntries"], ul[role="menu"], div[role="menu"], ul[aria-label*="menu" i]');
+  } catch (error) {
+    console.warn('[getInteractiveElementSnapshot] menuContainers querySelectorAll failed:', error);
+    return elements;
+  }
   
   menuContainers.forEach((container) => {
     if (!(container instanceof HTMLElement)) return;
     
-    const containerStyle = window.getComputedStyle(container);
+    // CRITICAL FIX: Wrap getComputedStyle in try-catch
+    let containerStyle: CSSStyleDeclaration;
+    try {
+      containerStyle = window.getComputedStyle(container);
+    } catch (styleError) {
+      console.debug('[getInteractiveElementSnapshot] getComputedStyle failed for menu container:', styleError);
+      return; // Skip this container if we can't get its style
+    }
     
     // Skip hidden containers
     if (containerStyle.display === 'none' || 
@@ -527,16 +788,27 @@ export function getInteractiveElementSnapshot(): ElementSnapshotInfo[] {
       }
       
       // Also check for nested clickable elements (e.g., <li><a>New/Search</a></li>)
-      const nestedClickable = child.querySelectorAll('a, button, [onclick], [role="menuitem"], [role="option"]');
-      nestedClickable.forEach((el) => {
-        if (el instanceof HTMLElement && !menuItems.includes(el)) {
-          menuItems.push(el);
-        }
-      });
+      try {
+        const nestedClickable = child.querySelectorAll('a, button, [onclick], [role="menuitem"], [role="option"]');
+        nestedClickable.forEach((el) => {
+          if (el instanceof HTMLElement && !menuItems.includes(el)) {
+            menuItems.push(el);
+          }
+        });
+      } catch (nestedError) {
+        // Element might have been removed during iteration, continue
+      }
     });
     
     menuItems.forEach((item) => {
-      const style = window.getComputedStyle(item);
+      // CRITICAL FIX: Wrap getComputedStyle in try-catch
+      let style: CSSStyleDeclaration;
+      try {
+        style = window.getComputedStyle(item);
+      } catch (styleError) {
+        console.debug('[getInteractiveElementSnapshot] getComputedStyle failed for menu item:', styleError);
+        return; // Skip this menu item if we can't get its style
+      }
       
       // Skip hidden menu items
       if (style.display === 'none' || 
@@ -753,22 +1025,46 @@ export function checkWaitCondition(condition: {
   pollInterval?: number;
 }): boolean {
   try {
+    // CRITICAL FIX: Guard against document being unavailable
+    if (typeof document === 'undefined' || !document) {
+      console.warn('[checkWaitCondition] document is unavailable');
+      return false;
+    }
+    
     switch (condition.type) {
       case 'text':
+        // Guard against document.body being null
+        if (!document.body) {
+          return false;
+        }
         return document.body.textContent?.includes(condition.value) || false;
       
       case 'selector':
-        return document.querySelector(condition.value) !== null;
+        try {
+          return document.querySelector(condition.value) !== null;
+        } catch (selectorError) {
+          console.warn('[checkWaitCondition] querySelector failed:', selectorError);
+          return false;
+        }
       
       case 'element_count': {
         const parts = condition.value.split(':');
         const selector = parts[0];
         const minCount = parseInt(parts[1] || '1');
-        const count = document.querySelectorAll(selector).length;
-        return count >= minCount;
+        try {
+          const count = document.querySelectorAll(selector).length;
+          return count >= minCount;
+        } catch (querySelectorError) {
+          console.warn('[checkWaitCondition] querySelectorAll failed:', querySelectorError);
+          return false;
+        }
       }
       
       case 'url_change':
+        // Guard against window being unavailable
+        if (typeof window === 'undefined' || !window.location) {
+          return false;
+        }
         return window.location.href.includes(condition.value);
       
       case 'custom':

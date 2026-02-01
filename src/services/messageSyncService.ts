@@ -27,6 +27,13 @@ class MessageSyncManager {
   private isInitialized = false;
   private getState: GetState | null = null;
   private setState: SetState | null = null;
+  
+  // === SYNC DEDUPLICATION ===
+  // Prevents multiple parallel sync starts and duplicate polling instances
+  private currentSyncSessionId: string | null = null;
+  private syncInProgress: Promise<void> | null = null;
+  private lastSyncStartTime = 0;
+  private readonly MIN_SYNC_INTERVAL = 2000; // 2 seconds minimum between sync starts
 
   initialize(getState: GetState, setState: SetState, options?: MessageSyncManagerInitOptions): void {
     if (this.isInitialized && !options?.forceReinit) return;
@@ -56,26 +63,72 @@ class MessageSyncManager {
   }
 
   async startSync(sessionId: string): Promise<void> {
-    pollingFallbackService.stopPolling();
-
-    try {
-      await pusherTransport.connect(sessionId);
-    } catch (error: unknown) {
-      console.warn('[MessageSyncManager] Pusher connect failed, using fallback:', error);
-      pollingFallbackService.startPolling(sessionId);
+    // === DEDUPLICATION: Check if already syncing for this session ===
+    if (this.currentSyncSessionId === sessionId) {
+      // If sync is in progress, wait for it
+      if (this.syncInProgress) {
+        console.debug('[MessageSyncManager] Sync already in progress for session:', sessionId);
+        return this.syncInProgress;
+      }
+      
+      // Check if we recently started sync (prevent rapid restarts)
+      const timeSinceLastSync = Date.now() - this.lastSyncStartTime;
+      if (timeSinceLastSync < this.MIN_SYNC_INTERVAL) {
+        console.debug(`[MessageSyncManager] Skipping sync - started ${timeSinceLastSync}ms ago`);
+        return;
+      }
     }
+
+    // Stop polling first (will be restarted if Pusher fails)
+    pollingFallbackService.stopPolling();
+    
+    // Track this sync
+    this.currentSyncSessionId = sessionId;
+    this.lastSyncStartTime = Date.now();
+
+    const syncPromise = (async () => {
+      try {
+        await pusherTransport.connect(sessionId);
+      } catch (error: unknown) {
+        console.warn('[MessageSyncManager] Pusher connect failed, using fallback:', error);
+        pollingFallbackService.startPolling(sessionId);
+      } finally {
+        this.syncInProgress = null;
+      }
+    })();
+    
+    this.syncInProgress = syncPromise;
+    return syncPromise;
   }
 
   async stopSync(): Promise<void> {
+    // Clear sync tracking
+    this.currentSyncSessionId = null;
+    this.syncInProgress = null;
+    
     pollingFallbackService.stopPolling();
     await pusherTransport.disconnect();
   }
 
+  // Track last interact_response to prevent duplicate refreshes
+  private lastInteractResponseTime = 0;
+  private readonly INTERACT_RESPONSE_DEBOUNCE = 1000; // 1 second debounce
+  
   /** On interact_response from server: refresh messages from REST (chosen behavior per roadmap). */
   private handleInteractResponse(): void {
+    const now = Date.now();
+    
+    // Debounce rapid interact_response events
+    if (now - this.lastInteractResponseTime < this.INTERACT_RESPONSE_DEBOUNCE) {
+      console.debug('[MessageSyncManager] Debouncing interact_response');
+      return;
+    }
+    this.lastInteractResponseTime = now;
+    
     const state = this.getState?.();
     if (state?.currentTask.sessionId) {
-      state.currentTask.actions.loadMessages(state.currentTask.sessionId);
+      // Use void to explicitly ignore the promise (fire and forget)
+      void state.currentTask.actions.loadMessages(state.currentTask.sessionId);
     }
   }
 
@@ -89,8 +142,10 @@ class MessageSyncManager {
       const existingIndex = messages.findIndex((m: ChatMessage) => m.id === message.id);
 
       if (existingIndex === -1) {
-        messages.push(message);
-        messages.sort((a: ChatMessage, b: ChatMessage) => {
+        // CRITICAL FIX: Create new array with message added, then sort
+        // Avoids push() mutation on potentially frozen arrays
+        const newMessages = [...messages, message];
+        const sortedMessages = newMessages.sort((a: ChatMessage, b: ChatMessage) => {
           if (a.sequenceNumber !== undefined && b.sequenceNumber !== undefined) {
             return a.sequenceNumber - b.sequenceNumber;
           }
@@ -100,9 +155,13 @@ class MessageSyncManager {
             b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp as unknown as string).getTime();
           return timeA - timeB;
         });
+        d.currentTask.messages = sortedMessages;
         console.log('[MessageSyncManager] Added new message:', message.id);
       } else {
-        messages[existingIndex] = { ...messages[existingIndex], ...message };
+        // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
+        d.currentTask.messages = messages.map((m, i) =>
+          i === existingIndex ? { ...m, ...message } : m
+        );
         console.log('[MessageSyncManager] Updated existing message:', message.id);
       }
     });
@@ -175,8 +234,13 @@ class MessageSyncManager {
     });
 
     const state = this.getState?.();
-    if (state?.currentTask.sessionId) {
-      pollingFallbackService.startPolling(state.currentTask.sessionId);
+    const sessionId = state?.currentTask.sessionId;
+    
+    // Only start polling if we have a session and aren't already polling
+    if (sessionId && !pollingFallbackService.isPolling()) {
+      pollingFallbackService.startPolling(sessionId);
+    } else if (sessionId) {
+      console.debug('[MessageSyncManager] Polling already active, skipping duplicate start');
     }
   }
 }

@@ -136,6 +136,69 @@ interface AgentInteractRequest {
   domChanges?: DOMChangeInfo;
   /** Optional: extension-witnessed observations (improves verification accuracy) */
   clientObservations?: ClientObservations;
+  
+  // === HYBRID VISION + SKELETON FIELDS ===
+  // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §3 (Payload Contract)
+  
+  /**
+   * Base64-encoded JPEG screenshot of visible viewport.
+   * - Max width: 1024px (aspect ratio maintained)
+   * - Quality: 0.7 (JPEG)
+   * - null if screenshot unchanged since last request (perceptual hash match)
+   */
+  screenshot?: string | null;
+  
+  /**
+   * Processing mode hint for server.
+   * - "skeleton": Use skeletonDom only (fast, low tokens)
+   * - "full": Use full dom only (backward compatible)
+   * - "hybrid": Use screenshot + skeletonDom (best for visual tasks)
+   * - "semantic": Use semanticNodes JSON (new, recommended - ~95% token reduction)
+   */
+  domMode?: 'skeleton' | 'full' | 'hybrid' | 'semantic';
+  
+  /**
+   * Skeleton DOM containing only interactive elements.
+   * Sent when domMode is "skeleton" or "hybrid".
+   * Server can also extract this from full DOM if not provided.
+   */
+  skeletonDom?: string;
+  
+  /**
+   * Hash of current screenshot for deduplication.
+   * If server has cached this hash, it can skip image processing.
+   */
+  screenshotHash?: string;
+  
+  // === SEMANTIC JSON PROTOCOL FIELDS (new, recommended) ===
+  // Reference: SEMANTIC_JSON_PROTOCOL.md
+  
+  /**
+   * Semantic nodes array - lightweight JSON representation of interactive elements.
+   * This is the recommended format for DOM data (~95% token reduction).
+   * 
+   * Each node has:
+   * - id: Stable ID that persists across re-renders (data-llm-id)
+   * - role: Semantic role (button, link, input, etc.)
+   * - name: Human-readable name/label
+   * - value?: Current value for inputs
+   * - state?: Element state (checked, disabled, etc.)
+   */
+  semanticNodes?: Array<{
+    id: string;
+    role: string;
+    name: string;
+    value?: string;
+    state?: string;
+    type?: string;
+    placeholder?: string;
+    href?: string;
+  }>;
+  
+  /**
+   * Page title for context
+   */
+  pageTitle?: string;
 }
 
 /**
@@ -233,15 +296,35 @@ export interface ReasoningData {
 }
 
 /**
+ * Structured action details with selector fallback
+ * Used for robust element finding when numeric IDs become stale (e.g., React re-renders)
+ * 
+ * Reference: ROBUST_ELEMENT_SELECTORS_SPEC.md
+ */
+interface ActionDetails {
+  /** Action name: click, setValue, press, navigate, finish, fail, etc. */
+  name: string;
+  /** Element ID for DOM actions */
+  elementId?: number;
+  /** CSS selector path for robust re-finding (from DOM extraction) */
+  selectorPath?: string;
+  /** Additional arguments (e.g., value for setValue, key for press) */
+  args?: Record<string, unknown>;
+}
+
+/**
  * Response from POST /api/agent/interact
  * Reference: THIN_CLIENT_ROADMAP.md §4.1 (Task 3: Server-Side Action Loop)
  * Reference: SERVER_SIDE_AGENT_ARCH.md §4.2 (POST /api/agent/interact)
  * Reference: MANUS_ORCHESTRATOR_ARCHITECTURE.md §7.2 (Response Format) - Orchestrator enhancements
  * Reference: REASONING_LAYER_IMPROVEMENTS.md - Reasoning layer enhancements
+ * Reference: ROBUST_ELEMENT_SELECTORS_SPEC.md - Selector fallback for stale elements
  */
 interface NextActionResponse {
   thought: string;
   action: string; // e.g. "click(123)", "setValue(123, \"x\")", "finish()", "fail()", "ask_user()"
+  /** Structured action with selectorPath for robust element finding (optional, backward compatible) */
+  actionDetails?: ActionDetails;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -253,7 +336,7 @@ interface NextActionResponse {
   plan?: ActionPlan; // Action plan from orchestrator
   currentStep?: number; // Current step number (1-indexed)
   totalSteps?: number; // Total steps in plan
-  status?: 'planning' | 'executing' | 'verifying' | 'correcting' | 'completed' | 'failed' | 'needs_user_input'; // Orchestrator status
+  status?: 'planning' | 'executing' | 'verifying' | 'correcting' | 'completed' | 'failed' | 'needs_user_input' | 'needs_full_dom'; // Orchestrator status
   verification?: VerificationResult; // Verification result for previous step (Task 7)
   correction?: CorrectionResult; // Self-correction result for current step (Task 8)
   expectedOutcome?: string; // Expected outcome for next verification (Task 9)
@@ -267,6 +350,10 @@ interface NextActionResponse {
     searchIterations?: number; // Number of search iterations performed
     finalQuery?: string; // Final refined query used
   };
+  // Hybrid Vision + Skeleton fallback (when skeleton DOM insufficient)
+  // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §6 (Fallback Handling)
+  needsFullDomReason?: string; // Reason why full DOM is needed (e.g., "Element not found in skeleton")
+  requestedElement?: string; // What element we're looking for (for debugging)
 }
 
 // Get API base URL from environment or use default
@@ -752,17 +839,57 @@ class ApiClient {
       error?: string;
     }) => void,
     domChanges?: DOMChangeInfo,
-    clientObservations?: ClientObservations
+    clientObservations?: ClientObservations,
+    // Hybrid Vision + Skeleton fields
+    // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §3 (Payload Contract)
+    // Reference: SEMANTIC_JSON_PROTOCOL.md (new semantic mode)
+    hybridParams?: {
+      screenshot?: string | null;
+      skeletonDom?: string;
+      domMode?: 'skeleton' | 'full' | 'hybrid' | 'semantic';
+      screenshotHash?: string;
+      // Semantic JSON Protocol fields (new, recommended)
+      semanticNodes?: Array<{
+        id: string;
+        role: string;
+        name: string;
+        value?: string;
+        state?: string;
+        type?: string;
+        placeholder?: string;
+        href?: string;
+      }>;
+      pageTitle?: string;
+    }
   ): Promise<NextActionResponse> {
     // Adaptive DOM size limits:
     // - Default: 50k chars (sufficient for most pages)
     // - Extended: 200k chars (for complex enterprise apps like Salesforce, HubSpot)
     // - Logic: If DOM exceeds 50k, extend to 200k to avoid cutting off interactive elements
+    // - With hybrid mode: skeleton is much smaller, so always use skeleton when available
     const DEFAULT_DOM_LIMIT = 50000;
     const EXTENDED_DOM_LIMIT = 200000;
     
+    // Determine which DOM to use based on mode
+    const domMode = hybridParams?.domMode || 'full';
+    
+    // Log mode-specific info
+    if (domMode === 'semantic' && hybridParams?.semanticNodes) {
+      // SEMANTIC MODE: JSON-based representation (~95% token reduction)
+      // The semanticNodes array contains stable IDs that don't drift
+      console.log(`[ApiClient] Using SEMANTIC mode - ${hybridParams.semanticNodes.length} nodes (~${Math.round(JSON.stringify(hybridParams.semanticNodes).length / 4)} tokens)`);
+    } else if ((domMode === 'skeleton' || domMode === 'hybrid') && hybridParams?.skeletonDom) {
+      // Skeleton DOM is typically 500-2000 chars, no truncation needed
+      console.log(`[ApiClient] Using ${domMode} mode - skeleton: ${hybridParams.skeletonDom.length} chars, full: ${dom.length} chars`);
+    }
+    
+    // For semantic mode, we can use a much smaller DOM (or even empty string) as fallback
+    // The semanticNodes array is the primary data source
     let domLimit = DEFAULT_DOM_LIMIT;
-    if (dom.length > DEFAULT_DOM_LIMIT) {
+    if (domMode === 'semantic') {
+      // In semantic mode, full DOM is only a fallback - use minimal limit
+      domLimit = 10000; // Just enough for context if needed
+    } else if (dom.length > DEFAULT_DOM_LIMIT) {
       // Complex page detected - use extended limit to capture all interactive elements
       // This ensures a "Save" button at character 65,000 on Salesforce won't be lost
       domLimit = EXTENDED_DOM_LIMIT;
@@ -770,7 +897,7 @@ class ApiClient {
     }
     
     const truncatedDom = dom.substring(0, domLimit);
-    if (dom.length > domLimit) {
+    if (dom.length > domLimit && domMode !== 'semantic') {
       console.warn(`[ApiClient] DOM truncated from ${dom.length} to ${domLimit} chars (extended limit)`);
     }
     
@@ -785,6 +912,14 @@ class ApiClient {
       lastActionResult,
       domChanges,
       clientObservations,
+      // Hybrid fields
+      screenshot: hybridParams?.screenshot,
+      skeletonDom: hybridParams?.skeletonDom,
+      domMode: hybridParams?.domMode,
+      screenshotHash: hybridParams?.screenshotHash,
+      // Semantic JSON Protocol fields
+      semanticNodes: hybridParams?.semanticNodes,
+      pageTitle: hybridParams?.pageTitle,
     };
 
     return this.request<NextActionResponse>('POST', '/api/agent/interact', body, logger);
@@ -1001,5 +1136,6 @@ export type {
   PreferencesResponse,
   PreferencesRequest,
   DOMChangeInfo,
-  ClientObservations
+  ClientObservations,
+  ActionDetails
 };

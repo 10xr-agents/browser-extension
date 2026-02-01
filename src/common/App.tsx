@@ -57,15 +57,63 @@ const App = () => {
     return () => window.removeEventListener('error', handler);
   }, []);
 
+  // Also suppress the same message when it surfaces as an unhandled promise rejection.
+  // Chakra UI docs note that extensions can cause confusing runtime/hydration noise; we keep this
+  // console-clean so real automation errors stand out.
+  useEffect(() => {
+    const handler = (event: PromiseRejectionEvent): void => {
+      const reason = event.reason;
+      const msg =
+        reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : String(reason ?? '');
+      if (
+        typeof msg === 'string' &&
+        msg.includes('WebSocket') &&
+        (msg.includes('CLOSING') || msg.includes('CLOSED'))
+      ) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener('unhandledrejection', handler);
+    return () => window.removeEventListener('unhandledrejection', handler);
+  }, []);
+
+  // Reconnect WebSocket when the extension panel becomes visible again
+  // This handles cases where the user switches tabs or minimizes the browser
+  // Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md (Known Issues & Troubleshooting)
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'visible') {
+        const currentSessionId = useAppState.getState().sessions.currentSessionId;
+        if (currentSessionId && user) {
+          try {
+            const { messageSyncManager } = await import('../services/messageSyncService');
+            const currentState = (await import('../services/pusherTransport')).pusherTransport.getConnectionState();
+            // Only reconnect if disconnected or in fallback mode
+            if (currentState === 'disconnected' || currentState === 'failed' || currentState === 'fallback') {
+              console.log('[App] Reconnecting WebSocket after visibility change, state was:', currentState);
+              void messageSyncManager.startSync(currentSessionId).catch((err: unknown) => {
+                console.debug('[App] WebSocket reconnect failed:', err);
+              });
+            }
+          } catch (err: unknown) {
+            console.debug('[App] Failed to reconnect WebSocket on visibility change:', err);
+          }
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [user]);
+
   const setUser = useAppState((state) => state.settings.actions.setUser);
   const setTenant = useAppState((state) => state.settings.actions.setTenant);
   const clearAuth = useAppState((state) => state.settings.actions.clearAuth);
   const addNetworkLog = useAppState((state) => state.debug.actions.addNetworkLog);
   const updateRAGContext = useAppState((state) => state.debug.actions.updateRAGContext);
-  // Domain-aware session management
+  // Tab-scoped session management (with domain awareness metadata)
   const initializeDomainAwareSessions = useAppState((state) => state.sessions.actions.initializeDomainAwareSessions);
-  const switchToUrlSession = useAppState((state) => state.sessions.actions.switchToUrlSession);
-  const currentDomain = useAppState((state) => state.sessions.currentDomain);
+  const switchToTabSession = useAppState((state) => state.sessions.actions.switchToTabSession);
   // Use user directly from store - this will trigger re-render when login updates it
   const user = useAppState((state) => state.settings.user);
   // CRITICAL: Get task status to prevent session switching during active task
@@ -156,7 +204,7 @@ const App = () => {
         setUser(session.user);
         setTenant(session.tenantId, session.tenantName);
         
-        // Initialize domain-aware sessions
+        // Initialize sessions (tab-scoped, with domain metadata)
         await initializeDomainAwareSessions();
         
         // Load theme preferences
@@ -173,8 +221,8 @@ const App = () => {
         // Auto-switch to session for current tab's domain
         try {
           const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tab?.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))) {
-            await switchToUrlSession(tab.url);
+          if (typeof tab?.id === 'number' && typeof tab?.url === 'string') {
+            await switchToTabSession(tab.id, tab.url);
           }
         } catch (urlError) {
           console.debug('Could not auto-switch session for current URL:', urlError);
@@ -189,7 +237,7 @@ const App = () => {
 
     checkSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setUser, setTenant, setTheme, clearAuth]); // initializeDomainAwareSessions and switchToUrlSession are stable
+  }, [setUser, setTenant, setTheme, clearAuth]); // initializeDomainAwareSessions and switchToTabSession are stable
   
   // Handle URL changes - switch sessions when domain changes
   // CRITICAL FIX: Do NOT switch sessions when a task is actively running
@@ -197,21 +245,24 @@ const App = () => {
   useEffect(() => {
     if (!user) return;
     
-    const handleUrlChange = async (url: string) => {
-      if (url.startsWith('http://') || url.startsWith('https://')) {
-        // CRITICAL: Check if a task is currently running
-        // If so, skip session switching to preserve task context
-        const currentStatus = useAppState.getState().currentTask.status;
-        if (currentStatus === 'running') {
-          console.debug('[App] Skipping session switch - task is running. URL:', url);
-          return; // Don't switch sessions during active task
+    const handleTabUrlChange = async (tabId: number, url: string) => {
+      if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
+
+      // SAFETY: Don't switch the UI to a different tab's session during an active task.
+      // But DO allow updating metadata for the active task's tab (tasks can navigate across domains).
+      const currentStatus = useAppState.getState().currentTask.status;
+      if (currentStatus === 'running') {
+        const activeTaskTabId = useAppState.getState().currentTask.tabId;
+        if (typeof activeTaskTabId === 'number' && activeTaskTabId !== tabId) {
+          console.debug('[App] Skipping tab session switch - task is running on another tab.');
+          return;
         }
-        
-        try {
-          await switchToUrlSession(url);
-        } catch (error) {
-          console.debug('Could not switch session for URL change:', error);
-        }
+      }
+
+      try {
+        await switchToTabSession(tabId, url);
+      } catch (error) {
+        console.debug('Could not switch session for tab URL change:', error);
       }
     };
     
@@ -222,7 +273,7 @@ const App = () => {
       tab: chrome.tabs.Tab
     ) => {
       if (changeInfo.status === 'complete' && tab?.url) {
-        handleUrlChange(tab.url);
+        handleTabUrlChange(tabId, tab.url);
       }
     };
     
@@ -231,7 +282,7 @@ const App = () => {
       try {
         const tab = await chrome.tabs.get(activeInfo.tabId);
         if (tab?.url) {
-          handleUrlChange(tab.url);
+          handleTabUrlChange(activeInfo.tabId, tab.url);
         }
       } catch (error) {
         console.debug('Could not get tab info on activation:', error);
@@ -246,7 +297,7 @@ const App = () => {
       chrome.tabs.onActivated.removeListener(handleTabActivation);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user]); // switchToUrlSession is stable from Zustand
+  }, [user]); // switchToTabSession is stable from Zustand
 
   // Dark mode color values - defined at component top level
   const bgColor = useColorModeValue('white', 'gray.900');

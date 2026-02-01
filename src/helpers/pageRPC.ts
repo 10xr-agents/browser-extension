@@ -12,6 +12,64 @@ import { copyToClipboard } from '../pages/Content/copyToClipboard';
 import ripple from '../pages/Content/ripple';
 import { sleep } from './utils';
 
+// === SEMANTIC JSON PROTOCOL IMPORTS ===
+// Reference: SEMANTIC_JSON_PROTOCOL.md
+import {
+  ensureStableIds,
+  startAutoTagger,
+  findElementByStableId,
+  getAllTaggedElements,
+  LLM_ID_ATTR,
+} from '../pages/Content/tagger';
+import {
+  extractSemanticTree,
+  extractSemanticTreeAsText,
+  extractSemanticTreeV3,
+  findNodeById,
+  searchNodesByName,
+  getNodesByRole,
+  getV3Legend,
+  type SemanticTreeResult,
+  type SemanticTreeResultV3,
+  type SemanticNode,
+  type SemanticNodeV3,
+  type V3ExtractionOptions,
+} from '../pages/Content/semanticTree';
+import {
+  waitForDomStability,
+  waitForPageReady,
+  waitForCondition,
+  waitForElement as waitForElementBySelector,
+  waitForText,
+  type DomWaitConfig,
+} from '../pages/Content/domWait';
+
+// === V3 ADVANCED: MUTATION LOG IMPORTS ===
+// Reference: DOM_EXTRACTION_ARCHITECTURE.md (Mutation Stream)
+import {
+  getRecentMutations,
+  getRecentMutationsStructured,
+  getMutationSummary,
+  hasRecentErrors,
+  hasRecentSuccess,
+  clearMutationBuffer,
+  startMutationLogger,
+  stopMutationLogger,
+  type MutationEntry,
+} from '../pages/Content/mutationLog';
+
+// === PRODUCTION-GRADE: SENTINEL VERIFICATION IMPORTS ===
+// Reference: DOM_EXTRACTION_ARCHITECTURE.md (Sentinel Verification)
+import {
+  capturePreActionState,
+  verifyOutcome,
+  quickVerify,
+  parseExpectedOutcome,
+  createVerificationPayload,
+  type ExpectedOutcome,
+  type VerificationResult,
+} from './sentinelVerification';
+
 /**
  * PHASE 1 FIX: Ping content script to check if it's ready
  * This is called BEFORE attempting injection to avoid unnecessary injection attempts.
@@ -23,6 +81,13 @@ async function pingContentScript(tabId: number): Promise<boolean> {
     const response = await chrome.tabs.sendMessage(tabId, { type: 'ping' });
     return response?.pong === true;
   } catch {
+    // Reading lastError prevents noisy "Unchecked runtime.lastError" warnings in some Chrome builds.
+    // (Even when using promise-based APIs, Chrome may still surface lastError if not read.)
+    try {
+      void chrome.runtime.lastError;
+    } catch {
+      // ignore
+    }
     // Content script not loaded or not responding
     return false;
   }
@@ -33,9 +98,10 @@ async function pingContentScript(tabId: number): Promise<boolean> {
  * 
  * This function:
  * 1. Checks if tab exists and has valid URL
- * 2. Pings content script to see if it's already loaded
- * 3. Only injects if ping fails
- * 4. Verifies injection succeeded by pinging again
+ * 2. Waits for tab to reach 'complete' state
+ * 3. Pings content script to see if it's already loaded
+ * 4. Only injects if ping fails
+ * 5. Verifies injection succeeded by pinging again
  * 
  * Reference: ARCHITECTURE_REVIEW.md §4.2 (Verify Content Script Before Every RPC)
  */
@@ -51,14 +117,37 @@ async function ensureContentScriptReady(tabId: number): Promise<boolean> {
     return false;
   }
   
-  // Wait if tab is still loading
-  if (tab.status === 'loading') {
-    console.log(`[ensureContentScriptReady] Tab ${tabId} is loading, waiting...`);
-    await sleep(500);
-    try {
-      tab = await chrome.tabs.get(tabId);
-    } catch {
-      return false;
+  // CRITICAL FIX: Wait for tab to reach 'complete' state (not just 'interactive')
+  // This ensures all scripts have executed and DOM is fully ready
+  // The tab may report "loading" for several seconds after a navigation action
+  if (tab.status !== 'complete') {
+    console.log(`[ensureContentScriptReady] Tab ${tabId} status is "${tab.status}", waiting for complete state...`);
+    
+    // Wait up to 15 seconds for tab to finish loading (increased from 10s)
+    const maxLoadWait = 15000;
+    const loadCheckInterval = 500;
+    const loadStartTime = Date.now();
+    
+    while (Date.now() - loadStartTime < maxLoadWait) {
+      await sleep(loadCheckInterval);
+      try {
+        tab = await chrome.tabs.get(tabId);
+        if (tab.status === 'complete') {
+          console.log(`[ensureContentScriptReady] Tab ${tabId} finished loading after ${Date.now() - loadStartTime}ms`);
+          // Add a small additional delay after 'complete' status to allow DOM to stabilize
+          await sleep(300);
+          break;
+        }
+      } catch (getTabError) {
+        console.error(`[ensureContentScriptReady] Tab ${tabId} disappeared during load wait:`, getTabError);
+        return false;
+      }
+    }
+    
+    if (tab.status !== 'complete') {
+      console.warn(`[ensureContentScriptReady] Tab ${tabId} still status "${tab.status}" after ${maxLoadWait}ms, proceeding anyway`);
+      // Add extra delay if we're proceeding with incomplete status
+      await sleep(500);
     }
   }
   
@@ -101,18 +190,20 @@ async function ensureContentScriptReady(tabId: number): Promise<boolean> {
   }
   
   // Step 4: Wait for script to initialize and verify with ping
-  await sleep(200);
+  // CRITICAL FIX: Wait longer for content script to initialize on complex pages
+  await sleep(700); // Increased initial wait from 500ms
   
-  // Try pinging up to 3 times with increasing delays
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Try pinging up to 6 times with increasing delays (more retries for reliability)
+  for (let attempt = 0; attempt < 6; attempt++) {
     const isReady = await pingContentScript(tabId);
     if (isReady) {
       console.log(`[ensureContentScriptReady] Content script verified ready on tab ${tabId} (attempt ${attempt + 1})`);
       return true;
     }
     
-    if (attempt < 2) {
-      const delay = 300 * (attempt + 1);
+    if (attempt < 5) {
+      // Exponential backoff: 400ms, 800ms, 1200ms, 1600ms, 2000ms
+      const delay = 400 * (attempt + 1);
       console.log(`[ensureContentScriptReady] Ping failed on attempt ${attempt + 1}, retrying in ${delay}ms...`);
       await sleep(delay);
     }
@@ -130,7 +221,106 @@ async function ensureContentScriptInjected(tabId: number): Promise<boolean> {
   return ensureContentScriptReady(tabId);
 }
 
+/**
+ * Combined extraction function that waits for DOM stability, 
+ * ensures stable IDs, and extracts the semantic tree.
+ * 
+ * This is the recommended way to get DOM state for LLM processing.
+ * 
+ * Reference: SEMANTIC_JSON_PROTOCOL.md
+ */
+async function getSemanticDom(config?: DomWaitConfig): Promise<SemanticTreeResult> {
+  // 1. Wait for DOM to stabilize
+  await waitForDomStability(config);
+  
+  // 2. Ensure all interactive elements have stable IDs
+  ensureStableIds();
+  
+  // 3. Extract the semantic tree
+  return extractSemanticTree();
+}
+
+/**
+ * Get semantic DOM as text format (alternative to JSON)
+ * Useful for LLMs that prefer plain text
+ */
+async function getSemanticDomAsText(config?: DomWaitConfig): Promise<string> {
+  // 1. Wait for DOM to stabilize
+  await waitForDomStability(config);
+  
+  // 2. Ensure all interactive elements have stable IDs
+  ensureStableIds();
+  
+  // 3. Extract as text
+  return extractSemanticTreeAsText();
+}
+
+/**
+ * V3 ULTRA-LIGHT EXTRACTION
+ * 
+ * Key improvements over getSemanticDom:
+ * 1. Viewport pruning - skips off-screen elements (~60% reduction)
+ * 2. Minified JSON keys - i/r/n/v/s/xy instead of full names
+ * 3. Coordinates included - for precise click targeting
+ * 4. ~50-300 tokens instead of 1k-5k tokens
+ * 
+ * This is now the PRIMARY extraction method - use this instead of getSemanticDom
+ * unless you need the full format for debugging.
+ * 
+ * Reference: DOM_EXTRACTION_ARCHITECTURE.md (V3 section)
+ */
+async function getSemanticDomV3(
+  config?: DomWaitConfig,
+  v3Options?: V3ExtractionOptions
+): Promise<SemanticTreeResultV3> {
+  // 1. Wait for DOM to stabilize
+  await waitForDomStability(config);
+  
+  // 2. Ensure all interactive elements have stable IDs
+  ensureStableIds();
+  
+  // 3. Extract V3 ultra-light format with viewport pruning
+  return extractSemanticTreeV3(v3Options);
+}
+
+/**
+ * Get the V3 legend text to include in system prompts
+ * This helps the LLM understand the minified key format
+ */
+function getSemanticV3Legend(): string {
+  return getV3Legend();
+}
+
+/**
+ * Initialize the tagger on the page.
+ * Should be called once when content script loads.
+ */
+function initializeTagger(): { success: boolean; elementCount: number } {
+  try {
+    startAutoTagger();
+    const elements = getAllTaggedElements();
+    return {
+      success: true,
+      elementCount: elements.length,
+    };
+  } catch (error) {
+    console.error('[pageRPC] Failed to initialize tagger:', error);
+    return {
+      success: false,
+      elementCount: 0,
+    };
+  }
+}
+
+/**
+ * Find element by stable LLM ID and return its info
+ */
+function getElementByLlmId(id: string): SemanticNode | null {
+  return findNodeById(id);
+}
+
 export const rpcMethods = {
+  // === LEGACY METHODS (still available for backward compatibility) ===
   getAnnotatedDOM,
   getUniqueElementSelectorId,
   getInteractiveElementSnapshot,
@@ -141,6 +331,50 @@ export const rpcMethods = {
   getDidNetworkOccurSinceMark,
   ripple,
   copyToClipboard,
+  
+  // === V3 ULTRA-LIGHT EXTRACTION (PRIMARY - use this) ===
+  // These are the recommended methods - send full DOM only if backend requests
+  getSemanticDomV3,                  // PRIMARY: Ultra-light format with viewport pruning
+  getSemanticV3Legend,               // Get legend for system prompt
+  
+  // === V2 SEMANTIC METHODS (fallback) ===
+  getSemanticDom,                    // Full semantic tree as JSON (larger payload)
+  getSemanticDomAsText,              // Semantic tree as text
+  
+  // === TAGGER METHODS ===
+  initializeTagger,                  // Initialize auto-tagger
+  ensureStableIds,                   // Manually trigger tagging
+  
+  // === ELEMENT LOOKUP ===
+  getElementByLlmId,                 // Find element by stable ID
+  findElementByStableId,             // Get raw element by ID
+  searchNodesByName,                 // Search by name
+  getNodesByRole,                    // Get by role
+  
+  // === WAITING METHODS ===
+  waitForDomStability,               // Wait for DOM to settle
+  waitForPageReady,                  // Wait for full page ready
+  waitForElementBySelector,          // Wait for element by CSS selector
+  waitForText,                       // Wait for text content
+  
+  // === V3 ADVANCED: MUTATION LOG METHODS ===
+  // Track DOM changes for ghost state detection
+  // Reference: DOM_EXTRACTION_ARCHITECTURE.md (Mutation Stream)
+  getRecentMutations,                // Get recent mutations as strings
+  getRecentMutationsStructured,      // Get recent mutations as structured data
+  getMutationSummary,                // Get summary with error/success flags
+  hasRecentErrors,                   // Check if errors occurred recently
+  hasRecentSuccess,                  // Check if success messages appeared
+  clearMutationBuffer,               // Clear mutation history
+  startMutationLogger,               // Start logging (auto-started on load)
+  stopMutationLogger,                // Stop logging
+  
+  // === PRODUCTION-GRADE: SENTINEL VERIFICATION METHODS ===
+  // Verify action outcomes to catch silent failures
+  // Reference: DOM_EXTRACTION_ARCHITECTURE.md (Sentinel Verification)
+  capturePreActionState,             // Capture state BEFORE action execution
+  verifyOutcome,                     // Verify expected outcome after action
+  quickVerify,                       // Quick verification with defaults
 } as const;
 
 export type RPCMethods = typeof rpcMethods;
@@ -186,6 +420,17 @@ export const callRPC = async <T extends MethodName>(
     throw new Error(`Cannot execute action on this page type: ${activeTab.url || 'unknown'}. Content scripts only work on HTTP/HTTPS pages.`);
   }
 
+  // Proactively ensure content script is present.
+  // Without this, one-off RPCs (maxTries=1) can fail with:
+  // "Could not establish connection. Receiving end does not exist."
+  const ready = await ensureContentScriptReady(activeTab.id);
+  if (!ready) {
+    throw new Error(
+      `Content script is not loaded on this page. ` +
+        `Try refreshing the page and running the task again.`
+    );
+  }
+
   let err: any;
   let contentScriptInjected = false;
   
@@ -202,6 +447,12 @@ export const callRPC = async <T extends MethodName>(
       console.log(`[callRPC] Successfully received response from tab ${activeTab.id}`);
       return response;
     } catch (e: any) {
+      // Clear lastError to avoid "Unchecked runtime.lastError" console warnings.
+      try {
+        void chrome.runtime.lastError;
+      } catch {
+        // ignore
+      }
       const errorMessage = e?.message || String(e);
       console.log(`[callRPC] Attempt ${i + 1}/${maxTries} failed:`, errorMessage);
       

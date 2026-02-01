@@ -1,8 +1,8 @@
 # Real-Time Message Sync — Documentation & Implementation Feedback
 
-**Document Version:** 2.0  
-**Last Updated:** January 28, 2026  
-**Status:** Implemented (client + backend). Manual QA pending.  
+**Document Version:** 2.2  
+**Last Updated:** February 1, 2026  
+**Status:** Implemented (client + backend). Stability fixes applied (Jan 31).  
 **Purpose:** Documentation of the implemented push-based message sync (Pusher/Sockudo) and implementation feedback.
 
 *This document was converted from a task-based roadmap to documentation with implementation feedback (Jan 2026). It describes what was built, how it works, and lessons learned.*
@@ -28,7 +28,7 @@
 
 | Area | Implementation | Notes |
 |------|----------------|-------|
-| **Transport** | Pusher/Sockudo (Pusher protocol) | Single WebSocket connection; channel switch on session change (no full reconnect). |
+| **Transport** | Pusher/Sockudo (Pusher protocol) | Single WebSocket connection; channel switch on **active session** change (no full reconnect). |
 | **Auth** | Bearer token → `POST /api/pusher/auth` | Main server (3000) validates user and session; returns signed auth for Sockudo (3005). |
 | **Events** | `new_message`, `interact_response` | `new_message` → merge into Zustand; `interact_response` → trigger `loadMessages(sessionId)`. |
 | **Connection state** | `wsConnectionState`, `wsFallbackReason` | Exposed in store; ConnectionStatusBadge in debug panel only. |
@@ -59,7 +59,17 @@ The backend repo may keep a separate copy of this doc. **Extension-side source o
 - **Disconnect handling:** pusher-js can throw "WebSocket is already in CLOSING or CLOSED state" during disconnect/session switch. We only call `unsubscribe()` when `connection.state === 'connected'` and only call `disconnect()` when not already disconnected/failed/unavailable; we also suppress that specific error in `App.tsx`. Error may still appear in some cases; it is harmless.
 - **Auth 403:** Most 403s from `POST /api/pusher/auth` come from session lookup (session not found or user mismatch). We added **docs/PUSHER_AUTH_403_FIX.md** with a checklist and suggested route changes (e.g. dev-only 403 body with `SESSION_NOT_FOUND` / `USER_MISMATCH`).
 
-### 2.3 Pending / Follow-up
+### 2.3 Stability Fixes (Jan 31, 2026)
+
+Additional issues discovered and fixed during testing:
+
+- **Sync Deduplication:** Multiple entry points (`App.tsx`, `loadMessages`, visibility handler) could trigger `startSync` simultaneously, causing parallel polling instances. Fixed by tracking `currentSyncSessionId` and `syncInProgress` promise in `messageSyncService`.
+- **Auth Failure Cooldown:** On 403 errors, `pusherTransport` was retrying immediately, causing rate limits. Added cooldown mechanism with `authFailureCount` and `AUTH_FAILURE_COOLDOWN` (30 seconds after 3 failures).
+- **Frozen Array Mutations:** Zustand with Immer creates immutable state drafts. Calling `.sort()` directly on `state.currentTask.messages` failed with "Cannot assign to read only property". Fixed by using `[...array].sort()` to create a new array.
+- **Store Merge Deep Clone:** `lodash.merge` in the `persist` middleware was preserving frozen array references from localStorage. Fixed by explicitly deep cloning `sessions.sessions` array in the merge function.
+- **API Call Deduplication:** `sessionService.listSessions` was called on every UI interaction. Added caching with 5-minute TTL and `inFlight` promise deduplication.
+
+### 2.4 Pending / Follow-up
 
 - **Manual QA:** Checklist (e.g. connect with Sockudo running, send message, switch session, verify badge states) is not yet run end-to-end. Recommended before marking production-ready.
 - **Typing indicator:** Server does not yet send a dedicated typing event; typing state can be inferred between user message and `interact_response` if desired later.
@@ -101,10 +111,38 @@ The backend repo may keep a separate copy of this doc. **Extension-side source o
 | **ConnectionStatusBadge** | Reads `wsConnectionState`, `wsFallbackReason`; shown in SystemView (debug panel) only. |
 | **TypingIndicator** | Reads `isServerTyping`; used in TaskUI. |
 
+### 3.2.1 Session Selection Model (Tab → Session)
+
+Real-time messaging is **session-scoped** (channels are `private-session-<sessionId>`), but **which `sessionId` is active** in the extension is determined by a **tab-scoped mapping**:
+
+- **Each Chrome tab** has **one active chat session**: `tabId -> sessionId`
+- Navigations **within the same tab** (including cross-domain) keep the **same `sessionId`**; only session metadata (`url`, `domain`) updates.
+- Switching tabs changes the active `sessionId` (and therefore the subscribed channel).
+
+This avoids coupling realtime messaging to domain-based session selection.
+
 ### 3.3 Connection States
 
 `wsConnectionState`: `disconnected` | `connecting` | `connected` | `reconnecting` | `failed` | `fallback`.  
 When `fallback`, `wsFallbackReason` explains (e.g. "Pusher not configured", "Pusher auth failed").
+
+### 3.4 Auto-Reconnection & Visibility Handling
+
+**Auto-Reconnect (added Jan 2026):**
+- When WebSocket connection drops unexpectedly (not a manual disconnect), `pusherTransport` automatically attempts to reconnect
+- Uses exponential backoff: 2s → 4s → 8s (max 3 attempts, max 30s delay)
+- After 3 failed reconnect attempts, emits `fallback` event to switch to polling
+- Manual `disconnect()` calls set `isManualDisconnect = true` to prevent auto-reconnect
+
+**Visibility Change Handler (added Jan 2026):**
+- In `App.tsx`, a `visibilitychange` event listener reconnects WebSocket when the extension panel becomes visible
+- Only reconnects if currently `disconnected`, `failed`, or `fallback` state
+- Handles cases where user switches browser tabs or minimizes the browser
+
+**Session Load Sync (added Jan 2026):**
+- `loadMessages(sessionId)` in `currentTask.ts` now calls `messageSyncManager.startSync(sessionId)` after loading messages
+- This was the missing link — previously, WebSocket sync was only initialized but never started on session changes
+- Ensures real-time updates work for the active session after switching chats or on initial load
 
 ---
 
@@ -114,7 +152,7 @@ When `fallback`, `wsFallbackReason` explains (e.g. "Pusher not configured", "Pus
 
 - **Connect:** Pusher(key, { cluster: 'local', wsHost, wsPort: 3005, authEndpoint: API_BASE + '/api/pusher/auth', channelAuthorization: { headers: { Authorization: 'Bearer ' + token } } }).
 - **Subscribe:** Channel `private-session-<sessionId>`. pusher-js calls `POST /api/pusher/auth` with form `socket_id`, `channel_name` and header `Authorization: Bearer <token>`. Main server validates token and session, returns signed auth; Sockudo allows subscription.
-- **Session switch:** Unsubscribe from old channel, subscribe to new channel (same connection).
+- **Session switch:** Unsubscribe from old channel, subscribe to new channel (same connection). In the extension, the active session is chosen via **tabId → sessionId** (see §3.2.1).
 
 ### 4.2 Event Mapping
 
@@ -169,7 +207,13 @@ Sockudo requires channel auth for private channels. When the client subscribes t
 |-------|--------|------------|--------|
 | **"WebSocket is already in CLOSING or CLOSED state"** | pusher-js calling close/send on an already closing/closed socket (e.g. session switch). | Only unsubscribe when `connection.state === 'connected'`; only disconnect when not already disconnected/failed/unavailable; try/catch; suppress this message in App.tsx error handler. | May still appear in console in some cases; harmless; sync and fallback work. |
 | **"Failed to get annotated DOM: Content script is not loaded"** | Restricted page or tab not refreshed after extension reload. | N/A (expected). | User should refresh the tab and use a normal HTTP(S) page. |
-| **POST /api/pusher/auth 403** | Server rejected channel auth. Common: session not found or user mismatch (tenantId/userId). | Backend: ensure session lookup uses same tenantId/userId as auth; optional dev-only 403 body (e.g. `SESSION_NOT_FOUND`, `USER_MISMATCH`). See **docs/PUSHER_AUTH_403_FIX.md**. | Sync falls back to polling; messages still load via REST. |
+| **POST /api/pusher/auth 403** | Server rejected channel auth. Common: session not found or user mismatch (tenantId/userId). | Backend: ensure session lookup uses same tenantId/userId as auth; optional dev-only 403 body (e.g. `SESSION_NOT_FOUND`, `USER_MISMATCH`). See **docs/PUSHER_AUTH_403_FIX.md**. **Jan 31 fix:** Added auth failure cooldown in `pusherTransport`. | Sync falls back to polling; messages still load via REST. |
+| **WebSocket disconnects on tab switch** | Browser may throttle or suspend WebSocket connections when extension panel is not visible. | Auto-reconnect with exponential backoff (max 3 attempts); visibility change handler reconnects when panel becomes visible again; polling fallback ensures messages are still received. | May see brief "reconnecting" state; sync resumes automatically within seconds. |
+| **WebSocket stuck in "connecting" indefinitely** | Sockudo server unreachable, port blocked, or network issue. | 8-second connection timeout in `pusherTransport`; emits `fallback` event to switch to polling if not connected within timeout. | Polling fallback activates automatically; no user action required. |
+| **startSync not called after session change** | (Fixed Jan 2026) Previously, `messageSyncManager.startSync()` was only called at initialization, not when sessions changed. | `loadMessages(sessionId)` now calls `startSync(sessionId)` after loading. | Real-time updates now work for the active session. |
+| **429 Rate Limit Exceeded (API calls)** | (Fixed Jan 31) Multiple concurrent `startSync` calls and duplicate polling instances. | `messageSyncManager` now tracks `currentSyncSessionId` and deduplicates; `handleInteractResponse` debounced to 1s; `sessionService` caches `listSessions`. | API call rate reduced significantly. |
+| **"Cannot assign to read only property" errors** | (Fixed Jan 31) Mutating frozen Zustand state arrays (from Immer) with `.sort()`. | Changed to `[...array].sort()` in `pollingFallbackService` and `messageSyncService`; deep clone in `store.ts` merge function. | State updates work correctly without errors. |
+| **Multiple polling instances** | (Fixed Jan 31) `handleFallback` could start duplicate polling. | Added `!pollingFallbackService.isPolling()` check before starting. | Only one polling instance runs at a time. |
 
 ---
 
@@ -182,7 +226,7 @@ Sockudo requires channel auth for private channels. When the client subscribes t
 `src/services/websocketService.ts`, `src/services/websocketTypes.ts`, `src/services/websocketService.test.ts`.
 
 **Modified:**  
-`src/state/currentTask.ts` (wsConnectionState, wsFallbackReason, isServerTyping, serverTypingContext; getSimplifiedDom null check), `src/state/store.ts` (init message sync manager), `src/common/TaskUI.tsx` (TypingIndicator, startSync/stopSync, visibility reconnect), `src/common/SystemView.tsx` (ConnectionStatusBadge in debug panel), `src/common/App.tsx` (error handler for pusher-js), `webpack.config.js` (WEBPACK_PUSHER_*).
+`src/state/currentTask.ts` (wsConnectionState, wsFallbackReason, isServerTyping, serverTypingContext; getSimplifiedDom null check; **Jan 2026: startSync call in loadMessages**), `src/state/store.ts` (init message sync manager; **Jan 31: deep clone sessions in merge function**), `src/common/TaskUI.tsx` (TypingIndicator, startSync/stopSync, visibility reconnect), `src/common/SystemView.tsx` (ConnectionStatusBadge in debug panel), `src/common/App.tsx` (error handler for pusher-js; **Jan 2026: visibility change handler for WebSocket reconnect**), `src/services/pusherTransport.ts` (**Jan 2026: auto-reconnect with exponential backoff; Jan 31: auth failure cooldown**), `src/services/messageSyncService.ts` (**Jan 31: sync deduplication, handleInteractResponse debounce, array mutation fix**), `src/services/pollingFallbackService.ts` (**Jan 31: array mutation fix**), `src/services/sessionService.ts` (**Jan 31: listSessions caching and deduplication**), `webpack.config.js` (WEBPACK_PUSHER_*).
 
 ---
 
@@ -196,6 +240,14 @@ Sockudo requires channel auth for private channels. When the client subscribes t
 - [x] ConnectionStatusBadge (debug panel only), TypingIndicator
 - [x] Unit tests (messageSyncService, pollingFallbackService)
 - [x] Backend: Sockudo 3005, main server `/api/pusher/auth` 3000, events new_message, interact_response
+- [x] Auto-reconnect on unexpected disconnect (exponential backoff, max 3 attempts) — **Jan 2026**
+- [x] Visibility change handler (reconnect when extension panel becomes visible) — **Jan 2026**
+- [x] startSync called after session change (loadMessages now starts WebSocket sync) — **Jan 2026**
+- [x] Sync deduplication (prevent duplicate startSync calls) — **Jan 31, 2026**
+- [x] Auth failure cooldown (prevent rapid 403 retries) — **Jan 31, 2026**
+- [x] API call rate limiting (listSessions caching, handleInteractResponse debounce) — **Jan 31, 2026**
+- [x] Array mutation fix (frozen Zustand state compatibility) — **Jan 31, 2026**
+- [x] Deep clone sessions in store merge (prevent read-only errors) — **Jan 31, 2026**
 - [ ] Manual QA (connect, send message, switch session, badge states) — **pending**
 
 ---

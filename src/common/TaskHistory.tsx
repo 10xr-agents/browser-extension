@@ -9,14 +9,8 @@
  */
 
 import React from 'react';
-import { useAppState } from '../state/store';
 import TaskHistoryUser from './TaskHistoryUser';
-import TaskHistoryDebug from './TaskHistoryDebug';
 
 export default function TaskHistory() {
-  const developerMode = useAppState((state) => state.settings.developerMode);
-
-  // Render user-facing view by default, debug view only in developer mode
-  // Note: Debug view is also shown in DebugPanel, so we show user view here
   return <TaskHistoryUser />;
 }

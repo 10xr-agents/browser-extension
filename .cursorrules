@@ -562,6 +562,30 @@ case 'scroll':
 * Text nodes are preserved if they provide context
 * Attributes are whitelisted (see allowed attributes list)
 
+### Hybrid Vision + Skeleton System (NEW)
+
+The extension uses a hybrid approach for ~80% token reduction:
+
+1. **Screenshot Capture** (`src/helpers/screenshotCapture.ts`)
+   - Captures viewport using `chrome.tabs.captureVisibleTab()`
+   - Resizes to max 1024px width, JPEG quality 0.7
+   - Perceptual hash (8x8 grayscale) for deduplication
+
+2. **Skeleton DOM** (`src/helpers/skeletonDom.ts`)
+   - Extracts only interactive elements (~500-2000 chars vs ~50k)
+   - Preserves: id, name, type, href, value, placeholder, role, aria-label, title, data-testid
+
+3. **Mode Selection** (`src/helpers/hybridCapture.ts`)
+   - `"skeleton"`: Simple actions (click, type, fill) - minimum tokens
+   - `"hybrid"`: Visual queries, spatial references, complex pages (>50 elements)
+   - `"full"`: Fallback when server requests full DOM
+
+4. **API Integration** (`src/api/client.ts`)
+   - New fields: `screenshot`, `skeletonDom`, `domMode`, `screenshotHash`
+   - Fallback handling: Retries with `domMode: "full"` on `needs_full_dom` response
+
+Reference: `docs/HYBRID_VISION_SKELETON_EXTENSION_SPEC.md`
+
 ---
 
 ## 5. LLM Integration Patterns
@@ -746,7 +770,10 @@ src/
 │   ├── parseResponse.ts        # Response parsing
 │   ├── simplifyDom.ts          # DOM simplification
 │   ├── chromeDebugger.ts       # Browser automation
-│   └── availableActions.ts     # Action definitions
+│   ├── availableActions.ts     # Action definitions
+│   ├── screenshotCapture.ts    # Screenshot capture + perceptual hash (NEW)
+│   ├── skeletonDom.ts          # Skeleton DOM extraction (NEW)
+│   └── hybridCapture.ts        # Hybrid capture coordination (NEW)
 ├── state/              # Zustand store and slices
 └── assets/             # Images and static assets
 ```

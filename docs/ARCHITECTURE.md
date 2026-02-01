@@ -751,7 +751,7 @@ await chrome.storage.local.set({
 ## 7.8 Cross-Domain Navigation During Tasks
 
 **Problem:** Multi-step tasks like "Go to Google, search for X, click Y" fail because:
-1. Domain-aware sessions feature switches sessions when URL changes
+1. Session selection changes can interrupt task context (especially when switching tabs mid-run)
 2. Content script dies on navigation
 3. WebSocket gets closed/reconnected mid-task
 4. Task context is lost
@@ -769,15 +769,19 @@ await chrome.storage.local.set({
 **File:** `src/common/App.tsx`
 
 ```typescript
-const handleUrlChange = async (url: string) => {
-  // CRITICAL: Check if a task is currently running
+const handleTabUrlChange = async (tabId: number, url: string) => {
+  // SAFETY: If a task is running on a different tab, don't switch the UI's session.
+  // This avoids breaking multi-step automation that navigates across domains within the task tab.
   const currentStatus = useAppState.getState().currentTask.status;
   if (currentStatus === 'running') {
-    console.debug('[App] Skipping session switch - task is running');
-    return; // Don't switch sessions during active task
+    const activeTaskTabId = useAppState.getState().currentTask.tabId;
+    if (typeof activeTaskTabId === 'number' && activeTaskTabId !== tabId) {
+      console.debug('[App] Skipping tab session switch - task is running on another tab.');
+      return;
+    }
   }
-  
-  await switchToUrlSession(url);
+
+  await switchToTabSession(tabId, url);
 };
 ```
 
@@ -825,6 +829,7 @@ The DOM extraction function already has guards against null document during navi
 
 **Files Changed:**
 - `src/common/App.tsx` - Added task status check in `handleUrlChange`
+- `src/state/sessions.ts` - Tab-scoped session mapping (`tabSessionMap`), `switchToTabSession()`
 - `src/helpers/actionExecutors.ts` - Improved `executeNavigate` to wait for page load
 - `src/helpers/simplifyDom.ts` - Already has retry logic with exponential backoff
 

@@ -40,11 +40,9 @@ export const createConversationHistorySlice: MyStateCreator<ConversationHistoryS
     addConversation: (conversation) => {
       set((state) => {
         // Add to beginning of array (most recent first)
-        state.conversationHistory.conversations.unshift(conversation);
-        // Keep only last 50 conversations to prevent memory issues
-        if (state.conversationHistory.conversations.length > 50) {
-          state.conversationHistory.conversations = state.conversationHistory.conversations.slice(0, 50);
-        }
+        // CRITICAL FIX: Use spread operator instead of unshift() to avoid "read only property" errors
+        // The persisted array from localStorage may be frozen, so we must create a new array
+        state.conversationHistory.conversations = [conversation, ...state.conversationHistory.conversations].slice(0, 50);
       });
     },
     clearHistory: () => {

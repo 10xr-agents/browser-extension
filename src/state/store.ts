@@ -2,12 +2,15 @@ import { merge } from 'lodash';
 import { create, StateCreator } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { createJSONStorage, devtools, persist } from 'zustand/middleware';
-import { createCurrentTaskSlice, CurrentTaskSlice } from './currentTask';
+import { createCurrentTaskSlice, CurrentTaskSlice, initializeNewTabListeners } from './currentTask';
 import { createUiSlice, UiSlice } from './ui';
 import { createSettingsSlice, SettingsSlice } from './settings';
 import { createDebugSlice, DebugSlice } from './debug';
 import { createConversationHistorySlice, ConversationHistorySlice } from './conversationHistory';
 import { createSessionsSlice, SessionsSlice } from './sessions';
+// FIX: Static import to prevent ChunkLoadError in Chrome extension popup/panel
+// Dynamic imports create separate webpack chunks that fail to load in extension context
+import { messageSyncManager } from '../services/messageSyncService';
 
 export type StoreType = {
   currentTask: CurrentTaskSlice;
@@ -66,7 +69,8 @@ export const useAppState = create<StoreType>()(
         sessions: {
           sessions: state.sessions.sessions, // Sessions use timestamps (numbers), no conversion needed
           currentSessionId: state.sessions.currentSessionId,
-          currentDomain: state.sessions.currentDomain, // Domain-aware session tracking
+          currentDomain: state.sessions.currentDomain, // Domain metadata (awareness)
+          tabSessionMap: state.sessions.tabSessionMap, // Tab-scoped session tracking
           isHistoryOpen: state.sessions.isHistoryOpen,
         },
       }),
@@ -92,10 +96,30 @@ export const useAppState = create<StoreType>()(
             };
           });
         }
-        // Sessions use timestamps (numbers), no conversion needed
-        // But ensure isHistoryOpen is boolean
+        // CRITICAL FIX: Ensure sessions.sessions is a fresh array, not a frozen reference
+        // lodash merge can preserve the original array reference from persistedState,
+        // which may be frozen. Create a new array so Immer can create drafts properly.
         if (merged.sessions) {
           merged.sessions.isHistoryOpen = Boolean(merged.sessions.isHistoryOpen);
+          // Deep clone sessions array to prevent "Cannot assign to read only property" errors
+          if (Array.isArray(merged.sessions.sessions)) {
+            merged.sessions.sessions = merged.sessions.sessions.map((session: any) => ({ ...session }));
+          }
+          // Deep clone tabSessionMap to avoid frozen references from persisted state
+          if (merged.sessions.tabSessionMap && typeof merged.sessions.tabSessionMap === 'object') {
+            merged.sessions.tabSessionMap = { ...(merged.sessions.tabSessionMap as Record<string, string>) };
+          }
+        }
+        // CRITICAL FIX: Also deep clone conversationHistory.conversations
+        // Same issue as sessions - persisted array may be frozen
+        if (merged.conversationHistory?.conversations && Array.isArray(merged.conversationHistory.conversations)) {
+          merged.conversationHistory.conversations = merged.conversationHistory.conversations.map((conv: any) => ({
+            ...conv,
+            // Ensure displayHistory array is also cloned (it's nested)
+            displayHistory: Array.isArray(conv.displayHistory) 
+              ? conv.displayHistory.map((entry: any) => ({ ...entry }))
+              : [],
+          }));
         }
         return merged;
       },
@@ -128,26 +152,30 @@ export const useAppState = create<StoreType>()(
 // @ts-expect-error used for debugging
 window.getState = useAppState.getState;
 
-// Initialize new tab listeners after store is created
-// Use dynamic import to avoid circular dependency issues (ESM hoists imports)
-// The setTimeout(0) ensures the store is fully initialized before listeners are set up
+// Initialize services after store is created
+// The setTimeout(0) ensures the store is fully initialized before initialization runs
+// This breaks any potential circular dependency issues at runtime
+
 // Initialize message sync manager for real-time message sync (WebSocket + polling fallback)
+// FIX: Uses static import to prevent ChunkLoadError in Chrome extension
 // Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md §7 (Task 4)
 setTimeout(() => {
-  import('../services/messageSyncService').then(({ messageSyncManager }) => {
+  try {
     messageSyncManager.initialize(
       useAppState.getState,
       useAppState.setState as (fn: (state: unknown) => void) => void
     );
-  }).catch((err) => {
+  } catch (err) {
     console.error('[Store] Failed to initialize message sync manager:', err);
-  });
+  }
 }, 0);
 
+// Initialize new tab listeners
+// FIX: Uses static import to prevent ChunkLoadError
 setTimeout(() => {
-  import('./currentTask').then(({ initializeNewTabListeners }) => {
+  try {
     initializeNewTabListeners();
-  }).catch((err) => {
+  } catch (err) {
     console.error('[Store] Failed to initialize new tab listeners:', err);
-  });
+  }
 }, 0);

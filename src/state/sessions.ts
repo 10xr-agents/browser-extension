@@ -4,18 +4,18 @@
  * Manages list of past chat sessions and current session selection.
  * Enables Cursor-style multi-chat functionality.
  * 
- * **Domain-Aware Sessions:**
- * Sessions are automatically managed based on the current domain.
- * When users navigate to a new domain, the extension will:
- * 1. Check if there's an existing active session for that domain
- * 2. If yes, switch to that session
- * 3. If no, create a new session for that domain
+ * **Tab-Scoped Sessions (with Domain Awareness):**
+ * Sessions are now scoped primarily to the Chrome `tabId` (one active session per tab).
+ * When users navigate within the same tab (including across domains), we keep the same session
+ * and update the session's `url` + `domain` metadata for awareness.
+ *
+ * Why: the automation debugger lifecycle is tab-scoped; a tab can navigate across domains quickly.
  * 
  * Uses sessionService for chrome.storage operations.
  * 
  * Reference: 
  * - Multi-Session Chat Interface Implementation
- * - Domain-Aware Sessions Feature
+ * - Tab-Scoped Sessions Feature
  */
 
 import { MyStateCreator } from './store';
@@ -31,16 +31,22 @@ export type ChatSession = Session;
 export type SessionsSlice = {
   sessions: ChatSession[];
   currentSessionId: string | null;
-  /** Current domain being used (for domain-aware session switching) */
+  /** Current domain associated with the current tab/session (awareness only) */
   currentDomain: string | null;
+  /** Active tab id the UI is currently reflecting (best-effort) */
+  currentTabId: number | null;
+  /** Mapping of tabId -> active sessionId for that tab */
+  tabSessionMap: Record<string, string>;
   isHistoryOpen: boolean; // UI toggle for history drawer
   
   actions: {
     loadSessions: (options?: { status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived'; includeArchived?: boolean }) => Promise<void>; // Load from sessionService
     createNewChat: (initialUrl?: string, taskDescription?: string) => Promise<string>; // Create new session, returns sessionId
+    /** Create a new session and associate it to a specific tab */
+    createNewChatForTab: (tabId: number, initialUrl?: string, taskDescription?: string) => Promise<string>;
     switchSession: (sessionId: string) => Promise<Message[]>; // Switch to session, load messages, returns messages
-    /** Switch to or create a session for the given URL (domain-aware) */
-    switchToUrlSession: (url: string) => Promise<{ sessionId: string; isNew: boolean }>; 
+    /** Switch to (or create) the session for a specific tab (tab-scoped) */
+    switchToTabSession: (tabId: number, url?: string) => Promise<{ sessionId: string; isNew: boolean }>;
     updateSession: (sessionId: string, updates: Partial<ChatSession>) => Promise<void>; // Update via service
     /** Rename a session with custom title */
     renameSession: (sessionId: string, newTitle: string) => Promise<void>;
@@ -57,33 +63,70 @@ export type SessionsSlice = {
   };
 };
 
+// Track last load time and in-flight request to prevent excessive calls
+let lastLoadSessionsTime = 0;
+let loadSessionsInFlight: Promise<void> | null = null;
+const MIN_LOAD_INTERVAL = 5000; // Minimum 5 seconds between loads
+
 export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => ({
   sessions: [],
   currentSessionId: null,
   currentDomain: null,
+  currentTabId: null,
+  tabSessionMap: {},
   isHistoryOpen: false,
   
   actions: {
-    loadSessions: async (options?: { status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived'; includeArchived?: boolean }) => {
-      try {
-        // Use sessionService.listSessions which handles API with fallback
-        // Default to active sessions, exclude archived unless explicitly requested
-        const sessions = await sessionService.listSessions({
-          status: options?.status || 'active',
-          includeArchived: options?.includeArchived || false,
-          limit: 50,
-        });
-        
-        set((state) => {
-          state.sessions.sessions = sessions;
-        });
-      } catch (error) {
-        console.error('Error loading sessions:', error);
+    loadSessions: async (options?: { status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived'; includeArchived?: boolean; forceRefresh?: boolean }) => {
+      const now = Date.now();
+      const forceRefresh = options?.forceRefresh || false;
+      
+      // Skip if called too recently (unless forced)
+      if (!forceRefresh && (now - lastLoadSessionsTime) < MIN_LOAD_INTERVAL) {
+        console.debug('[Sessions] Skipping loadSessions - called too recently');
+        return;
       }
+      
+      // Deduplicate in-flight requests
+      if (loadSessionsInFlight && !forceRefresh) {
+        console.debug('[Sessions] Waiting for in-flight loadSessions request');
+        return loadSessionsInFlight;
+      }
+      
+      const requestPromise = (async () => {
+        try {
+          lastLoadSessionsTime = now;
+          
+          // Use sessionService.listSessions which handles API with fallback and caching
+          // Default to active sessions, exclude archived unless explicitly requested
+          const sessions = await sessionService.listSessions({
+            status: options?.status || 'active',
+            includeArchived: options?.includeArchived || false,
+            limit: 50,
+            forceRefresh,
+          });
+          
+          set((state) => {
+            state.sessions.sessions = sessions;
+          });
+        } catch (error) {
+          console.error('Error loading sessions:', error);
+        } finally {
+          loadSessionsInFlight = null;
+        }
+      })();
+      
+      loadSessionsInFlight = requestPromise;
+      return requestPromise;
     },
     
     createNewChat: async (initialUrl = '', taskDescription?: string) => {
       try {
+        const currentTabId = get().sessions.currentTabId;
+        if (typeof currentTabId === 'number' && Number.isFinite(currentTabId) && currentTabId >= 0) {
+          return await get().sessions.actions.createNewChatForTab(currentTabId, initialUrl, taskDescription);
+        }
+
         const session = await sessionService.createNewSession(initialUrl, taskDescription);
         
         // Extract domain for state tracking
@@ -91,15 +134,15 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         
         set((state) => {
           // Add to sessions list (already sorted by sessionService)
+          // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
           const existingIndex = state.sessions.sessions.findIndex(s => s.sessionId === session.sessionId);
           if (existingIndex >= 0) {
-            state.sessions.sessions[existingIndex] = session;
+            state.sessions.sessions = state.sessions.sessions.map((s, i) => 
+              i === existingIndex ? session : s
+            );
           } else {
-            state.sessions.sessions.unshift(session);
-            // Limit to 50
-            if (state.sessions.sessions.length > 50) {
-              state.sessions.sessions = state.sessions.sessions.slice(0, 50);
-            }
+            // Create new array with session at front
+            state.sessions.sessions = [session, ...state.sessions.sessions].slice(0, 50);
           }
           state.sessions.currentSessionId = session.sessionId;
           state.sessions.currentDomain = domainInfo.isValid ? domainInfo.rootDomain : null;
@@ -108,6 +151,75 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         return session.sessionId;
       } catch (error) {
         console.error('Error creating new chat:', error);
+        throw error;
+      }
+    },
+
+    createNewChatForTab: async (tabId: number, initialUrl = '', taskDescription?: string) => {
+      try {
+        // If tabId is not valid, fall back to non-tab-scoped creation.
+        // (We avoid polluting tabSessionMap with sentinel keys like "-1".)
+        if (!Number.isFinite(tabId) || tabId < 0) {
+          const session = await sessionService.createNewSession(initialUrl, taskDescription);
+
+          const domainInfo = extractDomain(initialUrl);
+          set((state) => {
+            const existingIndex = state.sessions.sessions.findIndex(s => s.sessionId === session.sessionId);
+            if (existingIndex >= 0) {
+              state.sessions.sessions = state.sessions.sessions.map((s, i) =>
+                i === existingIndex ? session : s
+              );
+            } else {
+              state.sessions.sessions = [session, ...state.sessions.sessions].slice(0, 50);
+            }
+
+            state.sessions.currentSessionId = session.sessionId;
+            state.sessions.currentDomain = domainInfo.isValid ? domainInfo.rootDomain : null;
+          });
+
+          void chrome.storage.local
+            .set({ last_session_id: session.sessionId })
+            .catch((error: unknown) => {
+              console.debug('[Sessions] Failed to persist last_session_id:', error);
+            });
+
+          return session.sessionId;
+        }
+
+        const session = await sessionService.createNewSession(initialUrl, taskDescription);
+
+        // Extract domain for state tracking
+        const domainInfo = extractDomain(initialUrl);
+
+        set((state) => {
+          // Add to sessions list (already sorted by sessionService)
+          // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
+          const existingIndex = state.sessions.sessions.findIndex(s => s.sessionId === session.sessionId);
+          if (existingIndex >= 0) {
+            state.sessions.sessions = state.sessions.sessions.map((s, i) =>
+              i === existingIndex ? session : s
+            );
+          } else {
+            // Create new array with session at front
+            state.sessions.sessions = [session, ...state.sessions.sessions].slice(0, 50);
+          }
+
+          state.sessions.currentTabId = tabId;
+          state.sessions.currentSessionId = session.sessionId;
+          state.sessions.currentDomain = domainInfo.isValid ? domainInfo.rootDomain : null;
+          state.sessions.tabSessionMap[String(tabId)] = session.sessionId;
+        });
+
+        // Persist last-opened session for reliable restore on startup
+        void chrome.storage.local
+          .set({ last_session_id: session.sessionId })
+          .catch((error: unknown) => {
+            console.debug('[Sessions] Failed to persist last_session_id:', error);
+          });
+
+        return session.sessionId;
+      } catch (error) {
+        console.error('Error creating new chat for tab:', error);
         throw error;
       }
     },
@@ -130,12 +242,26 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
             const domainInfo = extractDomain(session.url);
             state.sessions.currentDomain = domainInfo.isValid ? domainInfo.rootDomain : null;
           }
+
+          // If the user manually switched sessions, pin that session to the current tab.
+          const currentTabId = state.sessions.currentTabId;
+          if (typeof currentTabId === 'number') {
+            state.sessions.tabSessionMap[String(currentTabId)] = sessionId;
+          }
         });
+
+        // Persist last-opened session for reliable restore on startup
+        void chrome.storage.local
+          .set({ last_session_id: sessionId })
+          .catch((error: unknown) => {
+            console.debug('[Sessions] Failed to persist last_session_id:', error);
+          });
         
         // Update currentTask with messages
         const { currentTask } = get();
         if (currentTask.actions.loadMessages) {
           // Load messages into currentTask (it will handle conversion from Message[] to ChatMessage[])
+          // This also starts WebSocket sync via messageSyncManager.startSync()
           await currentTask.actions.loadMessages(sessionId);
         }
         
@@ -147,57 +273,96 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
     },
     
     /**
-     * Switch to or create a session for the given URL (domain-aware)
-     * This is the main entry point for domain-aware session management
+     * Switch to or create the session for a given tab (tab-scoped).
+     * If the tab already has an associated session, we keep it and only update metadata.
      */
-    switchToUrlSession: async (url: string) => {
+    switchToTabSession: async (tabId: number, url?: string) => {
       try {
-        const domainInfo = extractDomain(url);
-        const currentDomain = get().sessions.currentDomain;
-        const currentSessionId = get().sessions.currentSessionId;
-        
-        // If same domain and we have an active session, just update URL
-        if (domainInfo.isValid && domainInfo.rootDomain === currentDomain && currentSessionId) {
-          // Same domain - update session URL but don't switch
-          await sessionService.updateSession(currentSessionId, {
-            url,
-            updatedAt: Date.now(),
-          });
-          return { sessionId: currentSessionId, isNew: false };
-        }
-        
-        // Different domain or no current session - use getOrCreateSessionForUrl
-        const { session, isNew } = await sessionService.getOrCreateSessionForUrl(url);
-        
+        const tabKey = String(tabId);
+        const existingForTab = get().sessions.tabSessionMap[tabKey];
+
+        const urlToUse = typeof url === 'string' ? url : '';
+        const domainInfo = extractDomain(urlToUse);
+        const nextDomain = domainInfo.isValid ? domainInfo.rootDomain : null;
+
+        // Always track which tab the UI is currently reflecting.
         set((state) => {
-          // Update sessions list
-          const existingIndex = state.sessions.sessions.findIndex(s => s.sessionId === session.sessionId);
-          if (existingIndex >= 0) {
-            state.sessions.sessions[existingIndex] = session;
-          } else {
-            state.sessions.sessions.unshift(session);
-            if (state.sessions.sessions.length > 50) {
-              state.sessions.sessions = state.sessions.sessions.slice(0, 50);
+          state.sessions.currentTabId = tabId;
+        });
+
+        // If tab already has a session, keep it; just update metadata.
+        if (typeof existingForTab === 'string' && existingForTab.length > 0) {
+          const sessionId = existingForTab;
+
+          set((state) => {
+            state.sessions.currentSessionId = sessionId;
+            state.sessions.currentDomain = nextDomain;
+          });
+
+          // Update session metadata (best-effort).
+          if (urlToUse) {
+            await sessionService.updateSession(sessionId, {
+              url: urlToUse,
+              domain: nextDomain || undefined,
+              updatedAt: Date.now(),
+            });
+          }
+
+          // Ensure currentTask is hydrated for this session so chat renders immediately.
+          const taskSessionId = get().currentTask.sessionId;
+          const taskMessages = Array.isArray(get().currentTask.messages) ? get().currentTask.messages : [];
+          if (taskSessionId !== sessionId || taskMessages.length === 0) {
+            try {
+              const { currentTask } = get();
+              if (currentTask.actions.loadMessages) {
+                await currentTask.actions.loadMessages(sessionId);
+              }
+            } catch (loadError: unknown) {
+              console.debug('[Sessions] Failed to hydrate messages on tab session:', loadError);
             }
           }
-          
-          state.sessions.currentSessionId = session.sessionId;
-          state.sessions.currentDomain = session.domain || (domainInfo.isValid ? domainInfo.rootDomain : null);
-        });
-        
-        // Load messages for this session if it's not new
-        if (!isNew) {
-          const { currentTask } = get();
-          if (currentTask.actions.loadMessages) {
-            await currentTask.actions.loadMessages(session.sessionId);
-          }
+
+          // Persist current session as last-opened (best-effort)
+          void chrome.storage.local
+            .set({ last_session_id: sessionId })
+            .catch((error: unknown) => {
+              console.debug('[Sessions] Failed to persist last_session_id:', error);
+            });
+
+          return { sessionId, isNew: false };
         }
-        
-        console.log(`[Sessions] ${isNew ? 'Created new' : 'Switched to existing'} session for domain: ${session.domain || 'unknown'}`);
-        
-        return { sessionId: session.sessionId, isNew };
+
+        // No session mapped to this tab yet: create a new session for the tab.
+        const session = await sessionService.createNewSession(urlToUse);
+
+        set((state) => {
+          // Add to sessions list (already sorted by sessionService)
+          const existingIndex = state.sessions.sessions.findIndex(s => s.sessionId === session.sessionId);
+          if (existingIndex >= 0) {
+            state.sessions.sessions = state.sessions.sessions.map((s, i) =>
+              i === existingIndex ? session : s
+            );
+          } else {
+            state.sessions.sessions = [session, ...state.sessions.sessions].slice(0, 50);
+          }
+
+          state.sessions.currentTabId = tabId;
+          state.sessions.currentSessionId = session.sessionId;
+          state.sessions.currentDomain = nextDomain;
+          state.sessions.tabSessionMap[tabKey] = session.sessionId;
+        });
+
+        void chrome.storage.local
+          .set({ last_session_id: session.sessionId })
+          .catch((error: unknown) => {
+            console.debug('[Sessions] Failed to persist last_session_id:', error);
+          });
+
+        console.log(`[Sessions] Created new session for tab ${tabId} (domain: ${nextDomain || 'unknown'})`);
+
+        return { sessionId: session.sessionId, isNew: true };
       } catch (error) {
-        console.error(`Error switching to URL session for ${url}:`, error);
+        console.error(`Error switching to tab session for tabId=${tabId}:`, error);
         throw error;
       }
     },
@@ -207,14 +372,11 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         await sessionService.updateSession(sessionId, updates);
         
         // Update local state
+        // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
         set((state) => {
-          const index = state.sessions.sessions.findIndex(s => s.sessionId === sessionId);
-          if (index >= 0) {
-            state.sessions.sessions[index] = {
-              ...state.sessions.sessions[index],
-              ...updates,
-            };
-          }
+          state.sessions.sessions = state.sessions.sessions.map(s => 
+            s.sessionId === sessionId ? { ...s, ...updates } : s
+          );
         });
       } catch (error) {
         console.error(`Error updating session ${sessionId}:`, error);
@@ -252,15 +414,13 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         await sessionService.archiveSession(sessionId);
         
         // Update local state - mark as archived
+        // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
         set((state) => {
-          const index = state.sessions.sessions.findIndex(s => s.sessionId === sessionId);
-          if (index >= 0) {
-            state.sessions.sessions[index] = {
-              ...state.sessions.sessions[index],
-              status: 'archived',
-              updatedAt: Date.now(),
-            };
-          }
+          state.sessions.sessions = state.sessions.sessions.map(s => 
+            s.sessionId === sessionId 
+              ? { ...s, status: 'archived' as const, updatedAt: Date.now() }
+              : s
+          );
           
           // If archiving current session, clear currentSessionId
           if (state.sessions.currentSessionId === sessionId) {
@@ -306,6 +466,16 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
       set((state) => {
         state.sessions.currentSessionId = sessionId;
       });
+
+      // Persist last-opened session for reliable restoration on next extension open
+      // (works even if backend is slow/unavailable).
+      if (sessionId) {
+        void chrome.storage.local
+          .set({ last_session_id: sessionId })
+          .catch((error: unknown) => {
+            console.debug('[Sessions] Failed to persist last_session_id:', error);
+          });
+      }
     },
     
     setHistoryOpen: (open: boolean) => {
@@ -315,9 +485,10 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
     },
     
     /**
-     * Initialize domain-aware sessions on extension startup
+     * Initialize sessions on extension startup
      * - Migrates existing sessions to add domain field
      * - Loads sessions list
+     * - Cleans up stale tab mappings (tabIds don't survive browser restarts)
      */
     initializeDomainAwareSessions: async () => {
       try {
@@ -326,7 +497,6 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         
         // Load sessions directly using sessionService to avoid nested get() calls
         const sessions = await sessionService.listSessions({
-          status: 'active',
           includeArchived: false,
           limit: 50,
         });
@@ -334,6 +504,110 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         set((state) => {
           state.sessions.sessions = sessions;
         });
+
+        // Clean up stale tabId -> sessionId mappings (best-effort).
+        // Tab IDs are not stable across browser restarts; remove mappings for tabs that no longer exist.
+        try {
+          const tabs = await chrome.tabs.query({});
+          const openTabIds = new Set<number>();
+          for (const t of tabs) {
+            if (typeof t.id === 'number') openTabIds.add(t.id);
+          }
+
+          set((state) => {
+            const currentMap = state.sessions.tabSessionMap || {};
+            const cleaned: Record<string, string> = {};
+            for (const [k, v] of Object.entries(currentMap)) {
+              const n = Number(k);
+              if (Number.isFinite(n) && openTabIds.has(n) && typeof v === 'string' && v.length > 0) {
+                cleaned[String(n)] = v;
+              }
+            }
+            state.sessions.tabSessionMap = cleaned;
+
+            const currentTabId = state.sessions.currentTabId;
+            if (typeof currentTabId === 'number' && !openTabIds.has(currentTabId)) {
+              state.sessions.currentTabId = null;
+            }
+          });
+        } catch (tabQueryError: unknown) {
+          console.debug('[Sessions] Could not clean tab session map:', tabQueryError);
+        }
+
+        // CRITICAL: `sessions.currentSessionId` is persisted (localStorage) but `currentTask.sessionId/messages`
+        // are not. On a fresh open, the UI can have a current session selected but an empty chat stream
+        // until the user sends the first message. Hydrate currentTask for the selected session on startup.
+        const persistedCurrentSessionId = get().sessions.currentSessionId;
+        if (typeof persistedCurrentSessionId === 'string' && persistedCurrentSessionId.length > 0) {
+          const taskSessionId = get().currentTask.sessionId;
+          const taskMessages = Array.isArray(get().currentTask.messages) ? get().currentTask.messages : [];
+          if (taskSessionId !== persistedCurrentSessionId || taskMessages.length === 0) {
+            try {
+              const { currentTask } = get();
+              if (currentTask.actions.loadMessages) {
+                await currentTask.actions.loadMessages(persistedCurrentSessionId);
+              }
+            } catch (loadError: unknown) {
+              console.debug('[Sessions] Failed to hydrate messages for persisted currentSessionId:', loadError);
+            }
+          }
+        }
+
+        // On first open, proactively restore the most recent session so the user
+        // immediately sees previous chat history (even before they send a new message).
+        // Domain-aware switching (App.tsx) may override this shortly after based on active tab URL.
+        const existingCurrentSessionId = get().sessions.currentSessionId;
+        if (!existingCurrentSessionId) {
+          // 1) Prefer a persisted last session id (works even if session list is empty/offline).
+          try {
+            const stored = await chrome.storage.local.get('last_session_id');
+            const lastSessionId = stored?.last_session_id;
+            if (typeof lastSessionId === 'string' && lastSessionId.length > 0) {
+              set((state) => {
+                state.sessions.currentSessionId = lastSessionId;
+                state.sessions.currentDomain = null;
+              });
+
+              try {
+                const { currentTask } = get();
+                if (currentTask.actions.loadMessages) {
+                  await currentTask.actions.loadMessages(lastSessionId);
+                }
+              } catch (loadError: unknown) {
+                console.debug('[Sessions] Failed to preload messages for last_session_id:', loadError);
+              }
+
+              console.log('[Sessions] Restored last session from local storage');
+              return;
+            }
+          } catch (storageError: unknown) {
+            console.debug('[Sessions] Could not read last_session_id:', storageError);
+          }
+
+          // 2) Fallback: use the most recent session from the sessions list (if any).
+          if (sessions.length > 0) {
+            const mostRecent = sessions[0];
+            const mostRecentSessionId = mostRecent?.sessionId;
+            if (typeof mostRecentSessionId === 'string' && mostRecentSessionId.length > 0) {
+              // Set current session id for UI + for runTask session continuity.
+              set((state) => {
+                state.sessions.currentSessionId = mostRecentSessionId;
+                state.sessions.currentDomain = mostRecent.domain || null;
+              });
+
+              // Hydrate chat messages into currentTask so TaskUI can render immediately.
+              // This is safe: loadMessages has its own backoff/loop protection.
+              try {
+                const { currentTask } = get();
+                if (currentTask.actions.loadMessages) {
+                  await currentTask.actions.loadMessages(mostRecentSessionId);
+                }
+              } catch (loadError: unknown) {
+                console.debug('[Sessions] Failed to preload messages for most recent session:', loadError);
+              }
+            }
+          }
+        }
         
         console.log('[Sessions] Domain-aware sessions initialized');
       } catch (error) {
@@ -357,15 +631,13 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
           });
           
           // Update local state
+          // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
           set((state) => {
-            const index = state.sessions.sessions.findIndex(s => s.sessionId === sessionId);
-            if (index >= 0) {
-              state.sessions.sessions[index] = {
-                ...state.sessions.sessions[index],
-                messageCount: messages.length,
-                updatedAt: Date.now(),
-              };
-            }
+            state.sessions.sessions = state.sessions.sessions.map(s => 
+              s.sessionId === sessionId 
+                ? { ...s, messageCount: messages.length, updatedAt: Date.now() }
+                : s
+            );
           });
         }
       } catch (error) {

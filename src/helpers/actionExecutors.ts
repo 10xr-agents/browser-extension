@@ -307,7 +307,14 @@ export async function executeScrollContainer(args: { elementId: number; directio
         let element = this;
         
         while (element && element !== document.body && element !== document.documentElement) {
-          const style = window.getComputedStyle(element);
+          // CRITICAL FIX: Wrap getComputedStyle in try-catch (can fail on detached elements)
+          let style;
+          try {
+            style = window.getComputedStyle(element);
+          } catch (e) {
+            element = element.parentElement;
+            continue;
+          }
           const overflowY = style.overflowY;
           const overflowX = style.overflowX;
           
@@ -563,39 +570,87 @@ const KEY_MAP: Record<string, { code: string; key: string }> = {
   Backspace: { code: 'Backspace', key: 'Backspace' },
 };
 
+/**
+ * Converts modifier key names to Chrome DevTools Protocol bitmask.
+ * Alt=1, Ctrl=2, Meta/Command=4, Shift=8
+ */
+function modifiersToInt(modifiers: string[]): number {
+  let bitmask = 0;
+  for (const mod of modifiers) {
+    const modLower = mod.toLowerCase();
+    if (modLower === 'alt') bitmask |= 1;
+    else if (modLower === 'control' || modLower === 'ctrl') bitmask |= 2;
+    else if (modLower === 'meta' || modLower === 'command' || modLower === 'cmd') bitmask |= 4;
+    else if (modLower === 'shift') bitmask |= 8;
+  }
+  return bitmask;
+}
+
+/**
+ * Gets the modifier bitmask for a single modifier key.
+ */
+function singleModifierToInt(mod: string): number {
+  const modLower = mod.toLowerCase();
+  if (modLower === 'alt') return 1;
+  if (modLower === 'control' || modLower === 'ctrl') return 2;
+  if (modLower === 'meta' || modLower === 'command' || modLower === 'cmd') return 4;
+  if (modLower === 'shift') return 8;
+  return 0;
+}
+
 export async function executePress(args: { key: string; modifiers?: string[] }) {
   const keyInfo = KEY_MAP[args.key] || { code: args.key, key: args.key };
-  const modifiers = args.modifiers || [];
+  const modifierNames = args.modifiers || [];
   
-  // Press modifier keys
-  for (const mod of modifiers) {
+  // Convert modifiers array to integer bitmask for Chrome DevTools Protocol
+  // Alt=1, Ctrl=2, Meta/Command=4, Shift=8
+  const modifiersBitmask = modifiersToInt(modifierNames);
+  
+  // Press modifier keys one by one (building up the bitmask)
+  let currentModifiers = 0;
+  for (const mod of modifierNames) {
+    currentModifiers |= singleModifierToInt(mod);
+    const modCode = mod.toLowerCase() === 'control' || mod.toLowerCase() === 'ctrl' ? 'ControlLeft' 
+      : mod.toLowerCase() === 'shift' ? 'ShiftLeft' 
+      : mod.toLowerCase() === 'alt' ? 'AltLeft' 
+      : mod.toLowerCase() === 'meta' || mod.toLowerCase() === 'command' || mod.toLowerCase() === 'cmd' ? 'MetaLeft' 
+      : mod;
     await sendCommand('Input.dispatchKeyEvent', {
       type: 'keyDown',
-      modifiers: [mod],
-      code: mod === 'Control' ? 'ControlLeft' : mod === 'Shift' ? 'ShiftLeft' : mod === 'Alt' ? 'AltLeft' : mod === 'Meta' ? 'MetaLeft' : mod,
+      modifiers: currentModifiers,
+      code: modCode,
     });
   }
   
-  // Press main key
+  // Press main key with all modifiers
   await sendCommand('Input.dispatchKeyEvent', {
     type: 'keyDown',
     code: keyInfo.code,
     key: keyInfo.key,
-    modifiers: modifiers,
+    modifiers: modifiersBitmask,
   });
   
   await sendCommand('Input.dispatchKeyEvent', {
     type: 'keyUp',
     code: keyInfo.code,
     key: keyInfo.key,
-    modifiers: modifiers,
+    modifiers: modifiersBitmask,
   });
   
-  // Release modifier keys
-  for (const mod of modifiers.reverse()) {
+  // Release modifier keys in reverse order (reducing the bitmask)
+  const reversedModifiers = [...modifierNames].reverse();
+  for (const mod of reversedModifiers) {
+    const modBit = singleModifierToInt(mod);
+    currentModifiers &= ~modBit; // Remove this modifier from the bitmask
+    const modCode = mod.toLowerCase() === 'control' || mod.toLowerCase() === 'ctrl' ? 'ControlLeft' 
+      : mod.toLowerCase() === 'shift' ? 'ShiftLeft' 
+      : mod.toLowerCase() === 'alt' ? 'AltLeft' 
+      : mod.toLowerCase() === 'meta' || mod.toLowerCase() === 'command' || mod.toLowerCase() === 'cmd' ? 'MetaLeft' 
+      : mod;
     await sendCommand('Input.dispatchKeyEvent', {
       type: 'keyUp',
-      modifiers: [mod],
+      modifiers: currentModifiers,
+      code: modCode,
     });
   }
   
@@ -868,7 +923,13 @@ export async function executeIsVisible(args: { index: number }) {
     functionDeclaration: `
       function() {
         if (!this.offsetParent && this.tagName !== 'BODY') return false;
-        const style = window.getComputedStyle(this);
+        // CRITICAL FIX: Wrap getComputedStyle in try-catch (can fail on detached elements)
+        let style;
+        try {
+          style = window.getComputedStyle(this);
+        } catch (e) {
+          return false; // Element not visible if we can't get its style
+        }
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
         const rect = this.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;

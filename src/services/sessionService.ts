@@ -5,12 +5,9 @@
  * Uses backend API endpoints when available, falls back to local storage for offline support.
  * The schema matches the backend API structure for seamless integration.
  * 
- * **Domain-Aware Sessions:**
- * Sessions are now domain-aware - each domain can have its own active session.
- * When users navigate to a new domain, the extension will:
- * 1. Check if there's an existing active session for that domain
- * 2. If yes, switch to that session
- * 3. If no, create a new session for that domain
+ * **Session Metadata (Domain/URL):**
+ * Sessions store `url` + `domain` as metadata for display/awareness.
+ * Session selection itself is handled at a higher layer (tab-scoped in `src/state/sessions.ts`).
  * 
  * API Endpoints:
  * - GET /api/session/[sessionId]/messages - Get messages for a session (with limit, since params)
@@ -24,7 +21,7 @@
  * Reference: 
  * - Multi-Session Chat Interface Implementation
  * - BACKEND_MISSING_ITEMS.md §2 (Session Management Endpoints)
- * - Domain-Aware Sessions Feature
+ * - Tab-Scoped Sessions Feature
  */
 
 import { extractDomain, formatSessionTitle } from '../helpers/domainUtils';
@@ -39,7 +36,7 @@ export interface Session {
   title: string;
   createdAt: number; // Unix timestamp (milliseconds)
   url: string;
-  /** Root domain for domain-aware session switching (e.g., "google.com") */
+  /** Root domain metadata (e.g., "google.com") */
   domain?: string;
   updatedAt?: number; // Unix timestamp (milliseconds)
   messageCount?: number;
@@ -81,6 +78,29 @@ export interface Message {
 
 const SESSIONS_INDEX_KEY = 'chat_sessions_index';
 const SESSION_PREFIX = 'session_';
+
+// === SESSION LIST CACHING ===
+// Prevents excessive API calls when no task is running
+// Cache is invalidated after MIN_REFRESH_INTERVAL or when explicitly requested
+
+/** Minimum time between session list refreshes (30 seconds) */
+const SESSION_LIST_MIN_REFRESH_INTERVAL = 30000;
+
+/** Cache for session list to prevent redundant API calls */
+let sessionListCache: {
+  sessions: Session[];
+  timestamp: number;
+  status: string; // Cached status filter
+} | null = null;
+
+/** In-flight request deduplication */
+let sessionListInFlight: Promise<Session[]> | null = null;
+
+/** Clear session list cache (call after creating/updating sessions) */
+export function invalidateSessionListCache(): void {
+  sessionListCache = null;
+  console.debug('[sessionService] Session list cache invalidated');
+}
 
 /**
  * Generate a UUID v4 for session IDs
@@ -126,64 +146,156 @@ function generateMessageId(): string {
  * Falls back to chrome.storage.local if API unavailable
  * Returns sessions sorted by updatedAt (most recent first)
  * 
+ * OPTIMIZATION: Uses caching to prevent excessive API calls when idle.
+ * Cache is valid for 30 seconds unless explicitly invalidated.
+ * 
  * Reference: SERVER_SIDE_AGENT_ARCH.md §4.8.2 (GET /api/session)
  */
 export async function listSessions(options?: {
   status?: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
   includeArchived?: boolean;
   limit?: number;
+  /** Force refresh, ignoring cache */
+  forceRefresh?: boolean;
 }): Promise<Session[]> {
-  try {
-    // Try API first - GET /api/session with filtering
-    const { apiClient } = await import('../api/client');
-    try {
-      const response = await apiClient.listSessions({
-        status: options?.status || 'active',
-        includeArchived: options?.includeArchived || false,
-        limit: options?.limit || 50,
-        offset: 0,
-      });
-      
-      if (response.success && response.data.sessions.length > 0) {
-        // Convert API response to Session format
-        const apiSessions: Session[] = response.data.sessions.map((s) => ({
-          sessionId: s.sessionId,
-          title: s.metadata?.initialQuery 
-            ? (typeof s.metadata.initialQuery === 'string' && s.metadata.initialQuery.length > 50
-                ? s.metadata.initialQuery.substring(0, 50) + '...'
-                : String(s.metadata.initialQuery || 'New Task'))
-            : 'New Task',
-          createdAt: new Date(s.createdAt).getTime(),
-          url: s.url,
-          updatedAt: new Date(s.updatedAt).getTime(),
-          messageCount: s.messageCount,
-          status: s.status,
-        }));
-        
-        // Merge with local storage sessions (for offline support)
-        const localSessions = await getLocalSessions();
-        const localSessionIds = new Set(apiSessions.map(s => s.sessionId));
-        const uniqueLocalSessions = localSessions.filter(s => !localSessionIds.has(s.sessionId));
-        
-        // Combine and sort by updatedAt descending
-        // Filter out archived sessions (they should already be excluded by API, but filter as safeguard)
-        const allSessions = [...apiSessions, ...uniqueLocalSessions]
-          .filter(s => s.status !== 'archived')
-          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-        return allSessions;
-      }
-    } catch (apiError) {
-      // API failed, fall back to local storage
-      console.debug('API unavailable, using local storage:', apiError);
+  const includeArchived = options?.includeArchived || false;
+  const limit = options?.limit || 50;
+  const forceRefresh = options?.forceRefresh || false;
+  
+  // Default to 'active' status - this is the most common case and reduces API calls
+  // Only fetch multiple statuses when explicitly needed (e.g., history drawer)
+  const requestedStatus: (typeof options)['status'] | undefined =
+    options === undefined ? 'active' : options.status || 'active';
+  
+  const cacheKey = `${requestedStatus}-${includeArchived}`;
+  
+  // === CHECK CACHE ===
+  // Return cached results if still valid and not forced refresh
+  if (!forceRefresh && sessionListCache) {
+    const cacheAge = Date.now() - sessionListCache.timestamp;
+    if (cacheAge < SESSION_LIST_MIN_REFRESH_INTERVAL && sessionListCache.status === cacheKey) {
+      console.debug(`[sessionService] Using cached session list (age: ${Math.round(cacheAge / 1000)}s)`);
+      return sessionListCache.sessions;
     }
-    
-    // Fallback to local storage - filter out archived sessions
-    const localSessions = await getLocalSessions();
-    return localSessions.filter(s => s.status !== 'archived');
-  } catch (error) {
-    console.error('Error listing sessions:', error);
-    return [];
   }
+  
+  // === DEDUPLICATE IN-FLIGHT REQUESTS ===
+  // If a request is already in progress, wait for it instead of making a new one
+  if (sessionListInFlight) {
+    console.debug('[sessionService] Waiting for in-flight session list request');
+    try {
+      return await sessionListInFlight;
+    } catch {
+      // If the in-flight request fails, continue to make a new request
+    }
+  }
+  
+  // Create the request promise for deduplication
+  const requestPromise = (async (): Promise<Session[]> => {
+    try {
+      // Try API first - GET /api/session with filtering
+      const { apiClient } = await import('../api/client');
+      try {
+        // Fetch sessions from API - SINGLE request with specific status
+        // This avoids the previous pattern of making 4 parallel requests
+        const response = await apiClient.listSessions({
+          status: requestedStatus,
+          includeArchived,
+          limit,
+          offset: 0,
+        });
+        
+        let apiSessionsRaw: Array<{
+          sessionId: string;
+          url: string;
+          status: 'active' | 'completed' | 'failed' | 'interrupted' | 'archived';
+          createdAt: string;
+          updatedAt: string;
+          messageCount: number;
+          metadata?: {
+            taskType?: string;
+            initialQuery?: string;
+            [key: string]: unknown;
+          };
+        }> = [];
+        
+        if (response.success && Array.isArray(response.data.sessions)) {
+          apiSessionsRaw = response.data.sessions;
+        }
+
+        if (apiSessionsRaw.length > 0 || response.success) {
+          // Convert API response to Session format
+          const byId = new Map<string, Session>();
+          for (const s of apiSessionsRaw) {
+            const session: Session = {
+              sessionId: s.sessionId,
+              title: s.metadata?.initialQuery
+                ? typeof s.metadata.initialQuery === 'string' && s.metadata.initialQuery.length > 50
+                  ? s.metadata.initialQuery.substring(0, 50) + '...'
+                  : String(s.metadata.initialQuery || 'New Task')
+                : 'New Task',
+              createdAt: new Date(s.createdAt).getTime(),
+              url: s.url,
+              updatedAt: new Date(s.updatedAt).getTime(),
+              messageCount: s.messageCount,
+              status: s.status,
+            };
+
+            const prev = byId.get(session.sessionId);
+            if (!prev || (session.updatedAt || 0) > (prev.updatedAt || 0)) {
+              byId.set(session.sessionId, session);
+            }
+          }
+          const apiSessions = Array.from(byId.values());
+          
+          // Merge with local storage sessions (for offline support)
+          const localSessions = await getLocalSessions();
+          const localSessionIds = new Set(apiSessions.map(s => s.sessionId));
+          const uniqueLocalSessions = localSessions.filter(s => !localSessionIds.has(s.sessionId));
+          
+          // Combine and sort by updatedAt descending
+          // Filter out archived sessions (they should already be excluded by API, but filter as safeguard)
+          const allSessions = [...apiSessions, ...uniqueLocalSessions]
+            .filter(s => s.status !== 'archived')
+            .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+          
+          // Update cache
+          sessionListCache = {
+            sessions: allSessions,
+            timestamp: Date.now(),
+            status: cacheKey,
+          };
+          
+          return allSessions;
+        }
+      } catch (apiError) {
+        // API failed, fall back to local storage
+        console.debug('API unavailable, using local storage:', apiError);
+      }
+      
+      // Fallback to local storage - filter out archived sessions
+      const localSessions = await getLocalSessions();
+      const filteredSessions = localSessions.filter(s => s.status !== 'archived');
+      
+      // Cache local results too (shorter validity)
+      sessionListCache = {
+        sessions: filteredSessions,
+        timestamp: Date.now() - (SESSION_LIST_MIN_REFRESH_INTERVAL / 2), // Half validity for local-only
+        status: cacheKey,
+      };
+      
+      return filteredSessions;
+    } catch (error) {
+      console.error('Error listing sessions:', error);
+      return [];
+    } finally {
+      // Clear in-flight marker
+      sessionListInFlight = null;
+    }
+  })();
+  
+  sessionListInFlight = requestPromise;
+  return requestPromise;
 }
 
 /**
@@ -281,7 +393,7 @@ export async function createNewSession(initialUrl: string = '', taskDescription?
   const sessionId = generateSessionId();
   const now = Date.now();
   
-  // Extract domain from URL for domain-aware sessions
+  // Extract domain from URL for metadata
   const domainInfo = extractDomain(initialUrl);
   const domain = domainInfo.isValid ? domainInfo.rootDomain : '';
   
@@ -301,8 +413,11 @@ export async function createNewSession(initialUrl: string = '', taskDescription?
   };
   
   try {
+    // Invalidate cache since we're creating a new session
+    invalidateSessionListCache();
+    
     // Load existing sessions
-    const existingSessions = await listSessions();
+    const existingSessions = await listSessions({ forceRefresh: true });
     
     // Add new session to the beginning
     const updatedSessions = [session, ...existingSessions];
@@ -315,84 +430,14 @@ export async function createNewSession(initialUrl: string = '', taskDescription?
       [SESSIONS_INDEX_KEY]: limitedSessions,
     });
     
+    // Invalidate cache again after modification
+    invalidateSessionListCache();
+    
     return session;
   } catch (error) {
     console.error('Error creating new session:', error);
     throw error;
   }
-}
-
-/**
- * Find an active session for a specific domain
- * Returns the most recently updated active session for the domain
- * 
- * @param domain - The root domain to search for (e.g., "google.com")
- * @returns The most recent active session for the domain, or null if none found
- */
-export async function findSessionByDomain(domain: string): Promise<Session | null> {
-  if (!domain) return null;
-  
-  try {
-    const sessions = await listSessions({ status: 'active' });
-    
-    // Find sessions matching this domain
-    const domainSessions = sessions.filter(session => {
-      // Check stored domain field first
-      if (session.domain === domain) return true;
-      
-      // Fallback: extract domain from URL
-      if (session.url) {
-        const sessionDomain = extractDomain(session.url);
-        return sessionDomain.isValid && sessionDomain.rootDomain === domain;
-      }
-      
-      return false;
-    });
-    
-    if (domainSessions.length === 0) {
-      return null;
-    }
-    
-    // Return most recently updated session
-    domainSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    return domainSessions[0];
-  } catch (error) {
-    console.error(`Error finding session for domain ${domain}:`, error);
-    return null;
-  }
-}
-
-/**
- * Get or create a session for a specific URL/domain
- * This is the main entry point for domain-aware session management
- * 
- * @param url - The current URL
- * @returns Existing session for the domain or a newly created one
- */
-export async function getOrCreateSessionForUrl(url: string): Promise<{ session: Session; isNew: boolean }> {
-  const domainInfo = extractDomain(url);
-  
-  if (!domainInfo.isValid) {
-    // Invalid URL - create a generic session
-    const session = await createNewSession(url);
-    return { session, isNew: true };
-  }
-  
-  // Try to find an existing active session for this domain
-  const existingSession = await findSessionByDomain(domainInfo.rootDomain);
-  
-  if (existingSession) {
-    // Update the session's URL to the current URL (same domain, different page)
-    await updateSession(existingSession.sessionId, {
-      url,
-      updatedAt: Date.now(),
-    });
-    return { session: existingSession, isNew: false };
-  }
-  
-  // No existing session - create new one for this domain
-  const newSession = await createNewSession(url);
-  return { session: newSession, isNew: true };
 }
 
 /**
@@ -484,12 +529,21 @@ export async function saveMessage(sessionId: string, message: Message): Promise<
 /**
  * Update a session's metadata
  * If session doesn't exist in index, it will be created
+ * 
+ * NOTE: Only invalidates cache for significant changes (status, title changes)
+ * Minor updates (url, updatedAt) use cached session list for efficiency
  */
 export async function updateSession(
   sessionId: string,
   updates: Partial<Session>
 ): Promise<void> {
   try {
+    // Only invalidate cache for significant changes
+    const isSignificantChange = updates.status !== undefined || updates.title !== undefined;
+    if (isSignificantChange) {
+      invalidateSessionListCache();
+    }
+    
     const existingSessions = await listSessions();
     const sessionIndex = existingSessions.findIndex(s => s.sessionId === sessionId);
     
@@ -512,19 +566,22 @@ export async function updateSession(
       await chrome.storage.local.set({
         [SESSIONS_INDEX_KEY]: updatedSessions,
       });
+      
+      // Invalidate cache after creating new session
+      invalidateSessionListCache();
     } else {
       // Update existing session
-      const updatedSession = {
-        ...existingSessions[sessionIndex],
-        ...updates,
-      };
-      
-      // Replace in array
-      existingSessions[sessionIndex] = updatedSession;
+      // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
+      // The existingSessions array may be cached/frozen from sessionListCache
+      const updatedSessions = existingSessions.map((s, i) => 
+        i === sessionIndex 
+          ? { ...s, ...updates }
+          : s
+      );
       
       // Save updated index
       await chrome.storage.local.set({
-        [SESSIONS_INDEX_KEY]: existingSessions,
+        [SESSIONS_INDEX_KEY]: updatedSessions,
       });
     }
   } catch (error) {
@@ -542,6 +599,9 @@ export async function updateSession(
  */
 export async function archiveSession(sessionId: string): Promise<void> {
   try {
+    // Invalidate cache since we're archiving
+    invalidateSessionListCache();
+    
     // Try API first
     const { apiClient } = await import('../api/client');
     try {
@@ -556,15 +616,20 @@ export async function archiveSession(sessionId: string): Promise<void> {
     const sessionIndex = existingSessions.findIndex(s => s.sessionId === sessionId);
     
     if (sessionIndex >= 0) {
-      existingSessions[sessionIndex] = {
-        ...existingSessions[sessionIndex],
-        status: 'archived',
-        updatedAt: Date.now(),
-      };
+      // CRITICAL FIX: Use map() instead of direct index assignment to avoid "read only property" errors
+      // The existingSessions array may be returned frozen from getLocalSessions or cached
+      const updatedSessions = existingSessions.map((s, i) =>
+        i === sessionIndex
+          ? { ...s, status: 'archived' as const, updatedAt: Date.now() }
+          : s
+      );
       
       await chrome.storage.local.set({
-        [SESSIONS_INDEX_KEY]: existingSessions,
+        [SESSIONS_INDEX_KEY]: updatedSessions,
       });
+      
+      // Invalidate cache after modification
+      invalidateSessionListCache();
     }
   } catch (error) {
     console.error(`Error archiving session ${sessionId}:`, error);

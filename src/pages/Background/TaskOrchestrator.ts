@@ -760,14 +760,41 @@ async function runTaskLoop(tabId: number): Promise<void> {
         usage: response.usage,
       });
       
-      // Execute the action
-      const { callDOMAction } = await import('../../helpers/domActions');
-      const actionResult = await callDOMAction(tabId, parsedAction);
+      // Execute the action - only for click and setValue (DOM actions)
+      // CRITICAL FIX: Pass correct arguments to callDOMAction
+      const actionName = parsedAction.parsedAction.name;
+      const actionArgs = parsedAction.parsedAction.args;
       
-      if (!actionResult.success) {
-        console.error('[TaskOrchestrator] Action failed:', actionResult.error);
-        await updateTaskContext({ status: 'error' });
+      if (actionName === 'click' || actionName === 'setValue') {
+        const { callDOMAction } = await import('../../helpers/domActions');
+        const actionResult = await callDOMAction(
+          actionName as 'click' | 'setValue',
+          actionArgs as any
+        );
+        
+        if (!actionResult.success) {
+          // CRITICAL FIX: Properly format error for logging to avoid [object Object]
+          const errorMsg = actionResult.error
+            ? `${actionResult.error.message || 'Unknown error'} (code: ${actionResult.error.code || 'unknown'})`
+            : 'Unknown action error';
+          console.error('[TaskOrchestrator] Action failed:', errorMsg);
+          await updateTaskContext({ status: 'error' });
+          break;
+        }
+      } else if (actionName === 'finish' || actionName === 'fail') {
+        // Terminal actions - handled below
         break;
+      } else {
+        // Other actions - use actionExecutors
+        try {
+          const { executeAction } = await import('../../helpers/actionExecutors');
+          await executeAction(actionName, actionArgs);
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.error('[TaskOrchestrator] Action failed:', errorMessage);
+          await updateTaskContext({ status: 'error' });
+          break;
+        }
       }
       
       // Wait for DOM to stabilize after action

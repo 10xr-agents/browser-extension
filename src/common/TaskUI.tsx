@@ -17,8 +17,7 @@ import {
   useColorModeValue,
 } from '@chakra-ui/react';
 import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
-import { BsStopFill } from 'react-icons/bs';
-import { FiSend, FiChevronDown } from 'react-icons/fi';
+import { IoSend, IoStop } from 'react-icons/io5';
 import { Icon, IconButton } from '@chakra-ui/react';
 import { useAppState } from '../state/store';
 import TaskHistory from './TaskHistory';
@@ -28,10 +27,6 @@ import { KnowledgeCheckSkeleton } from './KnowledgeCheckSkeleton';
 import ErrorBoundary from './ErrorBoundary';
 import ChatHistoryDrawer from './ChatHistoryDrawer';
 import DomainStatus from './components/DomainStatus';
-import TaskStatusIndicator from './components/TaskStatusIndicator';
-import TaskHeader from './components/TaskHeader';
-import PlanWidget from './components/PlanWidget';
-import TaskCompletedCard from './components/TaskCompletedCard';
 import { TypingIndicator } from './TypingIndicator';
 import { messageSyncManager } from '../services/messageSyncService';
 
@@ -85,6 +80,7 @@ const TaskUI: React.FC<TaskUIProps> = ({
   const isHistoryOpen = useAppState((state) => state.sessions.isHistoryOpen);
   const setHistoryOpen = useAppState((state) => state.sessions.actions.setHistoryOpen);
   const createNewChat = useAppState((state) => state.sessions.actions.createNewChat);
+  const createNewChatForTab = useAppState((state) => state.sessions.actions.createNewChatForTab);
   const startNewChat = useAppState((state) => state.currentTask.actions.startNewChat);
 
   const taskInProgress = state.taskStatus === 'running';
@@ -112,17 +108,12 @@ const TaskUI: React.FC<TaskUIProps> = ({
   // Scroll container ref and stick-to-bottom: only auto-scroll if user was at bottom
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const userWasAtBottomRef = useRef(true);
-  const [showNewMessagesButton, setShowNewMessagesButton] = useState(false);
   const prevContentLengthRef = useRef(0);
+  // Focus mode: use state to trigger the effect (refs don't cause re-renders)
+  const [focusScrollTrigger, setFocusScrollTrigger] = useState(0);
 
-  const scrollToBottom = useCallback(() => {
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-      userWasAtBottomRef.current = true;
-      setShowNewMessagesButton(false);
-    }
-  }, []);
-
+  // Auto-scroll when new content arrives
+  // More aggressive scrolling when task is running to ensure new messages are visible
   useEffect(() => {
     const messagesArray = Array.isArray(messages) ? messages : [];
     const taskHistoryArray = Array.isArray(taskHistory) ? taskHistory : [];
@@ -136,18 +127,23 @@ const TaskUI: React.FC<TaskUIProps> = ({
     const prevLength = prevContentLengthRef.current;
     prevContentLengthRef.current = contentLength;
 
-    if (contentLength > prevLength) {
-      setTimeout(() => {
+    // Scroll to bottom when:
+    // 1. New content arrives AND user was at bottom, OR
+    // 2. Task is running (always keep up with new messages during active task)
+    const shouldScroll = (contentLength > prevLength && wasAtBottom) || 
+                         (contentLength > prevLength && taskStatus === 'running');
+
+    if (shouldScroll) {
+      // Use requestAnimationFrame for smoother scrolling timing
+      requestAnimationFrame(() => {
         if (!scrollContainerRef.current) return;
-        if (wasAtBottom) {
-          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-          setShowNewMessagesButton(false);
-        } else {
-          setShowNewMessagesButton(true);
-        }
-      }, 100);
+        scrollContainerRef.current.scrollTo({
+          top: scrollContainerRef.current.scrollHeight,
+          behavior: 'smooth'
+        });
+      });
     }
-  }, [messages, taskHistory]);
+  }, [messages, taskHistory, taskStatus]);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -155,7 +151,6 @@ const TaskUI: React.FC<TaskUIProps> = ({
     const threshold = 80;
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
     userWasAtBottomRef.current = atBottom;
-    if (atBottom) setShowNewMessagesButton(false);
   }, []);
 
   // Load messages on mount if sessionId exists
@@ -251,11 +246,84 @@ const TaskUI: React.FC<TaskUIProps> = ({
       }
       
       // Silently handle errors - they will be shown in the UI via error state
+      // Focus mode: trigger scroll to snap the newly-submitted user query to top
+      // Increment trigger to force the useEffect to run
+      setFocusScrollTrigger(prev => prev + 1);
       runTask((message: string) => {
         console.error('Task error:', message);
       });
     }
   }, [instructions, runTask, waitingForUserInput]);
+
+  // Focus mode: after submit, snap the active task section to top of viewport
+  // Use a retry mechanism since the DOM may not be updated immediately
+  useEffect(() => {
+    // Only run when triggered (focusScrollTrigger > 0)
+    if (focusScrollTrigger === 0) return;
+    
+    let scrollCompleted = false;
+    
+    // Retry finding and scrolling to the focus-anchor with increasing delays
+    // This handles the race condition where DOM hasn't updated yet
+    const attemptScroll = (attempt: number): boolean => {
+      if (scrollCompleted) return true;
+      
+      // First try the focus-anchor element
+      const anchor = document.getElementById('focus-anchor');
+      if (anchor) {
+        anchor.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        scrollCompleted = true;
+        userWasAtBottomRef.current = false;
+        console.log('[FocusMode] Scrolled to focus-anchor on attempt', attempt);
+        return true;
+      }
+      
+      // Fallback: find the last chat-turn element and scroll to it
+      const chatTurns = document.querySelectorAll('[id^="chat-turn-"]');
+      if (chatTurns.length > 0) {
+        const lastTurn = chatTurns[chatTurns.length - 1];
+        lastTurn.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        scrollCompleted = true;
+        userWasAtBottomRef.current = false;
+        console.log('[FocusMode] Scrolled to last chat-turn (fallback) on attempt', attempt);
+        return true;
+      }
+      
+      return false;
+    };
+    
+    // Try immediately
+    if (attemptScroll(0)) return;
+    
+    // Retry with delays: 100ms, 200ms, 400ms, 600ms
+    const delays = [100, 200, 400, 600];
+    const timeouts: NodeJS.Timeout[] = [];
+    
+    delays.forEach((delay, i) => {
+      const timeout = setTimeout(() => {
+        attemptScroll(i + 1);
+      }, delay);
+      timeouts.push(timeout);
+    });
+    
+    // Final fallback after 800ms - scroll to bottom of scroll container
+    const finalTimeout = setTimeout(() => {
+      if (!scrollCompleted && scrollContainerRef.current) {
+        // Scroll to show the latest content
+        const container = scrollContainerRef.current;
+        // Scroll to bottom
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        userWasAtBottomRef.current = false;
+        console.log('[FocusMode] Used final fallback scroll');
+      }
+    }, 800);
+    timeouts.push(finalTimeout);
+    
+    // Cleanup timeouts on unmount or re-trigger
+    return () => {
+      timeouts.forEach(t => clearTimeout(t));
+    };
+  }, [focusScrollTrigger]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -296,15 +364,25 @@ const TaskUI: React.FC<TaskUIProps> = ({
     // Clear current task state (clears messages, displayHistory, instructions)
     startNewChat();
 
-    // Create new session
-    await createNewChat(activeUrl);
+    // Create new session for the ACTIVE tab (tab-scoped sessions)
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (typeof tab?.id === 'number') {
+        await createNewChatForTab(tab.id, activeUrl);
+      } else {
+        await createNewChat(activeUrl);
+      }
+    } catch (error: unknown) {
+      // If tab query fails, still create a session (but may not be pinned correctly)
+      await createNewChat(activeUrl);
+    }
 
     // Clear instructions explicitly (startNewChat should do this, but ensure it)
     setInstructions('');
-  }, [activeUrl, createNewChat, startNewChat, isRunning, interruptTask, setInstructions, taskStatus]);
+  }, [activeUrl, createNewChat, createNewChatForTab, startNewChat, isRunning, interruptTask, setInstructions, taskStatus]);
 
   return (
-    <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg} position="relative">
+    <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg}>
       {/* Zone A: Unified Command Bar (Domain Status + Actions) */}
       <DomainStatus
         currentUrl={activeUrl}
@@ -321,29 +399,21 @@ const TaskUI: React.FC<TaskUIProps> = ({
         onClose={() => setHistoryOpen(false)}
       />
 
-      {/* Zone B: Scrollable Document Stream (stick-to-bottom; "New messages" when scrolled up) */}
+      {/* Zone B: Scrollable Document Stream (stick-to-bottom) */}
       <Box
         ref={scrollContainerRef}
         flex="1"
         overflowY="auto"
         overflowX="hidden"
         minW="0"
+        minH="0"
         px={4}
-        py={4}
+        pt={4}
+        pb={2}
         bg={contentBg}
-        pb="100px"
         onScroll={handleScroll}
-        position="relative"
       >
         <VStack spacing={4} align="stretch" minW="0">
-          {/* Task Header - Status badge (RUNNING / COMPLETED / FAILED) */}
-          <ErrorBoundary>
-            <TaskHeader />
-          </ErrorBoundary>
-          {/* Live Plan - Stepper or Planning skeleton */}
-          <ErrorBoundary>
-            <PlanWidget />
-          </ErrorBoundary>
           {/* System Notice - Slim, inline style */}
           {hasOrgKnowledge === false && (
             <Box
@@ -389,36 +459,20 @@ const TaskUI: React.FC<TaskUIProps> = ({
               <TaskHistory />
             </Box>
           </ErrorBoundary>
-          {/* Task Completed summary card */}
-          <ErrorBoundary>
-            <TaskCompletedCard />
-          </ErrorBoundary>
+          
+          {/* Spacer to ensure last message can scroll fully above input bar */}
+          <Box minH="16px" flexShrink={0} />
         </VStack>
 
-        {/* "New messages" button when user has scrolled up */}
-        {showNewMessagesButton && (
-          <Box position="absolute" bottom={24} left="50%" transform="translateX(-50%)" zIndex={15}>
-            <Button
-              size="sm"
-              leftIcon={<Icon as={FiChevronDown} />}
-              onClick={scrollToBottom}
-              colorScheme="blue"
-              shadow="md"
-              aria-label="Scroll to new messages"
-            >
-              New messages
-            </Button>
-          </Box>
-        )}
       </Box>
 
-      {/* Zone C: Floating Command Bar */}
+      {/* Zone C: Fixed Command Bar at bottom */}
       <Box
-        position="absolute"
-        bottom={4}
-        left={4}
-        right={4}
-        zIndex={20}
+        flexShrink={0}
+        px={4}
+        pb={4}
+        pt={2}
+        bg={contentBg}
         minW="0"
       >
         <TypingIndicator />
@@ -427,7 +481,7 @@ const TaskUI: React.FC<TaskUIProps> = ({
           borderColor={floatingInputBorder}
           borderRadius="xl"
           bg={floatingInputBg}
-          shadow="lg"
+          shadow="md"
           minW="0"
           _focusWithin={{
             borderColor: 'blue.500',
@@ -435,11 +489,9 @@ const TaskUI: React.FC<TaskUIProps> = ({
             boxShadow: '0 0 0 1px var(--chakra-colors-blue-500)',
           }}
         >
+          {/* Status line removed - cleaner design without visual artifacts */}
+
           <Flex align="flex-end" px={4} py={3} gap={2} minW="0">
-            {/* Task status: running / done / failed (icon + optional motion) */}
-            <ErrorBoundary>
-              <TaskStatusIndicator />
-            </ErrorBoundary>
             {/* Text Input - Takes up most space */}
             <Box flex="1" minW="0">
               <AutosizeTextarea
@@ -477,38 +529,25 @@ const TaskUI: React.FC<TaskUIProps> = ({
               />
             </Box>
             
-            {/* Send Button - Inline with text input */}
+            {/* Send Button - Solid filled icons for high contrast */}
             <Box flexShrink={0} pb={1}>
-              {isRunning ? (
-                <IconButton
-                  aria-label="Stop task"
-                  icon={<Icon as={BsStopFill} />}
-                  onClick={interruptTask}
-                  colorScheme="red"
-                  size="sm"
-                  _focusVisible={{
-                    boxShadow: 'outline',
-                  }}
-                  borderRadius="md"
-                />
-              ) : (
-                <IconButton
-                  aria-label="Send task"
-                  icon={<Icon as={FiSend} />}
-                  onClick={handleRunTask}
-                  colorScheme={waitingForUserInput ? 'yellow' : 'blue'}
-                  size="sm"
-                  isDisabled={!instructions || (isRunning && !waitingForUserInput)}
-                  _disabled={{
-                    opacity: 0.5,
-                    cursor: 'not-allowed',
-                  }}
-                  _focusVisible={{
-                    boxShadow: 'outline',
-                  }}
-                  borderRadius="md"
-                />
-              )}
+              <IconButton
+                aria-label={isRunning && !waitingForUserInput ? 'Stop task' : 'Send task'}
+                icon={<Icon as={isRunning && !waitingForUserInput ? IoStop : IoSend} boxSize={4} />}
+                onClick={isRunning && !waitingForUserInput ? interruptTask : handleRunTask}
+                variant="solid"
+                colorScheme={isRunning && !waitingForUserInput ? 'red' : waitingForUserInput ? 'yellow' : 'blue'}
+                size="sm"
+                isDisabled={!isRunning && !instructions}
+                _disabled={{
+                  opacity: 0.5,
+                  cursor: 'not-allowed',
+                }}
+                _focusVisible={{
+                  boxShadow: 'outline',
+                }}
+                borderRadius="md"
+              />
             </Box>
           </Flex>
         </Box>

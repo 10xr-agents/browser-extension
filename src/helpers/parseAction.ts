@@ -165,8 +165,26 @@ export function parseAction(actionString: string): ParsedAction {
     };
   }
 
-  // Handle actions with no arguments (finish, fail)
+  // Handle actions with no arguments (finish, fail, goBack, goForward, etc.)
   if (availableAction.args.length === 0) {
+    // For terminal actions (finish, fail), be lenient and ignore any extra arguments
+    // The LLM sometimes sends finish("Task completed") or finish("Done")
+    const terminalActions = ['finish', 'fail'];
+    if (terminalActions.includes(actionName)) {
+      if (actionArgsString.trim() !== '') {
+        console.warn(`[parseAction] Ignoring unexpected arguments for terminal action "${actionName}": ${actionArgsString.slice(0, 100)}`);
+      }
+      return {
+        thought: '', // Will be set by caller
+        action: `${actionName}()`, // Normalize to standard format without args
+        parsedAction: {
+          name: actionName,
+          args: {},
+        } as ActionPayload,
+      };
+    }
+    
+    // For other no-arg actions, still validate strictly
     if (actionArgsString.trim() !== '') {
       return {
         error: `Invalid number of arguments: Expected 0 for action "${actionName}", but got arguments.`,

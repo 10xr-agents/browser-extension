@@ -168,10 +168,94 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // ============================================================================
+// Content Script Readiness Tracking
+// CRITICAL: Track when content scripts are ready to receive messages
+// This prevents "Receiving end does not exist" errors during navigation
+// ============================================================================
+
+/**
+ * Map of tabId -> { ready: boolean, url: string, timestamp: number }
+ * Tracks which tabs have content scripts ready to receive messages
+ */
+const contentScriptReadiness = new Map<number, { ready: boolean; url: string; timestamp: number }>();
+
+/**
+ * Check if a content script is ready on a given tab
+ * @param tabId - The tab ID to check
+ * @returns Promise that resolves when content script is ready (with timeout)
+ */
+export async function waitForContentScriptReady(tabId: number, timeoutMs: number = 10000): Promise<boolean> {
+  const startTime = Date.now();
+  const pollInterval = 200;
+  
+  // Check if already ready
+  const state = contentScriptReadiness.get(tabId);
+  if (state?.ready) {
+    console.log(`[ContentScriptReadiness] Tab ${tabId} already ready`);
+    return true;
+  }
+  
+  console.log(`[ContentScriptReadiness] Waiting for content script on tab ${tabId}...`);
+  
+  // Wait for the content script to signal readiness
+  while (Date.now() - startTime < timeoutMs) {
+    const currentState = contentScriptReadiness.get(tabId);
+    if (currentState?.ready) {
+      console.log(`[ContentScriptReadiness] Tab ${tabId} became ready after ${Date.now() - startTime}ms`);
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+  }
+  
+  console.warn(`[ContentScriptReadiness] Timeout waiting for content script on tab ${tabId}`);
+  return false;
+}
+
+/**
+ * Mark a tab's content script as not ready (called before navigation)
+ */
+export function markContentScriptNotReady(tabId: number): void {
+  console.log(`[ContentScriptReadiness] Marking tab ${tabId} as not ready`);
+  contentScriptReadiness.set(tabId, { ready: false, url: '', timestamp: Date.now() });
+}
+
+/**
+ * Check if content script is currently ready (synchronous check)
+ */
+export function isContentScriptReady(tabId: number): boolean {
+  return contentScriptReadiness.get(tabId)?.ready ?? false;
+}
+
+// ============================================================================
 // Message Handler - Routes to TaskOrchestrator
 // ============================================================================
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Content script readiness handshake - TRACK THE READINESS STATE
+  if (message.type === 'CONTENT_SCRIPT_READY') {
+    const tabId = sender.tab?.id;
+    if (tabId) {
+      const url = message.url || sender.tab?.url || '';
+      console.log(`[Background] Content script ready on tab ${tabId}, URL: ${url.substring(0, 50)}...`);
+      
+      // Mark this tab's content script as ready
+      contentScriptReadiness.set(tabId, {
+        ready: true,
+        url,
+        timestamp: Date.now(),
+      });
+      
+      // Also store in chrome.storage for persistence across service worker restarts
+      chrome.storage.local.set({
+        [`content_script_ready_${tabId}`]: { ready: true, url, timestamp: Date.now() },
+      }).catch(() => {
+        // Ignore storage errors
+      });
+    }
+    sendResponse({ success: true, tabId: tabId ?? null });
+    return true;
+  }
+
   // Legacy keep-alive messages (for backward compatibility with UI)
   if (message.type === 'START_KEEP_ALIVE') {
     startKeepAlive();
@@ -204,6 +288,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'ping') {
     sendResponse({ pong: true, timestamp: Date.now() });
     return true;
+  }
+  
+  // ============================================================================
+  // Content Script Readiness Commands
+  // ============================================================================
+  
+  // Check if content script is ready (synchronous check)
+  if (message.type === 'IS_CONTENT_SCRIPT_READY') {
+    const tabId = message.tabId as number;
+    const ready = isContentScriptReady(tabId);
+    sendResponse({ ready, tabId });
+    return true;
+  }
+  
+  // Wait for content script to be ready (async with timeout)
+  if (message.type === 'WAIT_FOR_CONTENT_SCRIPT') {
+    const tabId = message.tabId as number;
+    const timeoutMs = message.timeoutMs || 10000;
+    
+    waitForContentScriptReady(tabId, timeoutMs)
+      .then((ready) => {
+        sendResponse({ ready, tabId });
+      })
+      .catch((error: unknown) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        sendResponse({ ready: false, tabId, error: errorMessage });
+      });
+    return true; // Async response
   }
   
   // ============================================================================
@@ -475,6 +587,13 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 // Handle tab updates (navigation, etc.)
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  // CRITICAL: Mark content script as not ready when navigation starts
+  // This prevents "Receiving end does not exist" errors
+  if (changeInfo.status === 'loading') {
+    markContentScriptNotReady(tabId);
+    console.log(`[Background] Tab ${tabId} started loading - content script marked not ready`);
+  }
+  
   // Configure side panel when tab finishes loading
   if (changeInfo.status === 'complete') {
     try {
@@ -633,3 +752,59 @@ getMultiTabState().then((state) => {
 }).catch((error) => {
   console.error('[Background] Failed to get multi-tab state on startup:', error);
 });
+
+// ============================================================================
+// Debugger Cleanup on Startup
+// CRITICAL: Clean up any stale debuggers from previous sessions
+// This prevents "Another debugger is already attached" errors
+// ============================================================================
+
+import { initDebuggerDetachListener, onDebuggerDetach, detachAllDebuggers } from '../../helpers/chromeDebugger';
+
+// Initialize the debugger detach listener to track when debuggers are disconnected
+initDebuggerDetachListener();
+
+// Register a callback to handle debugger detachment (e.g., when DevTools is opened)
+onDebuggerDetach((tabId, reason) => {
+  console.warn(`[Background] Debugger detached from tab ${tabId}: ${reason}`);
+  
+  // If the user opened DevTools, we can't do anything about it - just log
+  if (reason === 'canceled_by_user' || reason === 'replaced_with_devtools') {
+    // Store a flag so the UI can show a message to the user
+    chrome.storage.local.set({
+      debugger_detach_warning: {
+        tabId,
+        reason,
+        timestamp: Date.now(),
+        message: reason === 'replaced_with_devtools' 
+          ? 'DevTools was opened. Close DevTools to resume automation.'
+          : 'Debugger was canceled by user.',
+      },
+    }).catch((error) => {
+      console.error('[Background] Failed to store debugger detach warning:', error);
+    });
+  }
+  
+  // If the tab was closed, clean up any related state
+  if (reason === 'target_closed') {
+    // The tab handling code will take care of cleanup
+  }
+});
+
+(async function cleanupDebuggers() {
+  try {
+    const targets = await chrome.debugger.getTargets();
+    const attachedTabs = targets.filter(t => t.attached && t.tabId);
+    
+    if (attachedTabs.length > 0) {
+      console.log(`[Background] Found ${attachedTabs.length} stale debugger(s) from previous session, cleaning up...`);
+      
+      // Use the helper function for consistent cleanup
+      await detachAllDebuggers();
+      
+      console.log('[Background] Debugger cleanup complete');
+    }
+  } catch (error) {
+    console.warn('[Background] Error during debugger cleanup:', error);
+  }
+})();

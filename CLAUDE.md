@@ -77,6 +77,25 @@ Actions are defined in `src/helpers/availableActions.ts` and executed via Chrome
 2. Include semantically important text
 3. Assign unique numeric IDs to each element
 4. Templatize HTML to reduce token count (see `src/helpers/shrinkHTML/`)
+
+### Hybrid Vision + Skeleton System (NEW)
+
+The extension now supports a hybrid approach for ~80% token reduction:
+
+1. **Screenshot Capture** (`src/helpers/screenshotCapture.ts`)
+   - Captures viewport, resizes to max 1024px, JPEG quality 0.7
+   - Perceptual hash for deduplication (skip unchanged screenshots)
+
+2. **Skeleton DOM** (`src/helpers/skeletonDom.ts`)
+   - Extracts only interactive elements (~500-2000 chars vs ~50k for full DOM)
+   - Preserves IDs, names, types, ARIA labels
+
+3. **Mode Selection** (`src/helpers/hybridCapture.ts`)
+   - `"skeleton"`: Simple actions (click, type, fill) - lowest tokens
+   - `"hybrid"`: Visual queries, spatial references - screenshot + skeleton
+   - `"full"`: Fallback when skeleton insufficient
+
+Reference: `docs/HYBRID_VISION_SKELETON_EXTENSION_SPEC.md`
 5. Remove unnecessary attributes and nested structure
 
 This is critical because the full DOM would exceed token limits.
@@ -171,6 +190,12 @@ Zustand store (`src/state/store.ts`) manages:
 - `src/state/store.ts`: Global state management
 - `src/common/TaskUI.tsx`: Main task interface component
 - `src/manifest.json`: Extension configuration
+
+### Hybrid Vision + Skeleton Files (NEW)
+- `src/helpers/screenshotCapture.ts`: Screenshot capture with optimization and perceptual hash
+- `src/helpers/skeletonDom.ts`: Skeleton DOM extraction (interactive elements only)
+- `src/helpers/hybridCapture.ts`: Page state capture coordination and mode selection
+- `src/api/client.ts`: API client with hybrid payload support
 
 ## When Making Changes
 

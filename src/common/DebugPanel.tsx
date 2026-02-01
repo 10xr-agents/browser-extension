@@ -1,38 +1,33 @@
 /**
- * Debug Panel Component for Thin Client Architecture
+ * Debug Panel Component - Redesigned for Thin Client Architecture
  * 
- * Tabbed interface for system/debug information to improve navigation and information density.
- * System Health cards remain fixed at top, debug sections organized in tabs below.
+ * Streamlined tabbed interface focused on the most useful debugging information:
+ * - Connection: WebSocket/Pusher status, sync state
+ * - Actions: Action execution history and debugger state
+ * - Messages: Message flow between extension and backend
+ * - Network: API request/response traces
+ * - State: Simplified state inspector
  * 
- * Reference: Debug Panel Refactor - Tabbed Interface
+ * Reference: Thin Client Architecture, REALTIME_MESSAGE_SYNC_ROADMAP.md
  */
 
 import React from 'react';
 import {
   Box,
-  VStack,
-  Heading,
   useColorModeValue,
-  Text,
-  Code,
   Tabs,
   TabList,
   TabPanels,
   Tab,
   TabPanel,
+  Badge,
+  HStack,
+  Icon,
 } from '@chakra-ui/react';
+import { FiWifi, FiZap, FiMessageSquare, FiActivity, FiDatabase } from 'react-icons/fi';
 import { useAppState } from '../state/store';
-import AccessibilityTreeView from './AccessibilityTreeView';
-import CoverageMetricsView from './CoverageMetricsView';
-import HybridElementView from './HybridElementView';
-import TaskStatus from './TaskStatus';
-import TaskHistoryDebug from './TaskHistoryDebug';
+import { ConnectionDebugView, ActionsDebugView, MessagesDebugView, StateDebugView } from './debug';
 import NetworkTraceView from './NetworkTraceView';
-import RAGContextView from './RAGContextView';
-import StateInspectorView from './StateInspectorView';
-import PlanViewDebug from './PlanViewDebug';
-import VerificationViewDebug from './VerificationViewDebug';
-import CorrectionViewDebug from './CorrectionViewDebug';
 import ErrorBoundary from './ErrorBoundary';
 
 interface DebugPanelProps {
@@ -41,54 +36,15 @@ interface DebugPanelProps {
 
 const DebugPanel: React.FC<DebugPanelProps> = () => {
   const developerMode = useAppState((state) => state.settings.developerMode);
-  
-  // Get debug data from store
-  const accessibilityTree = useAppState((state) => state.currentTask.accessibilityTree);
-  const coverageMetrics = useAppState((state) => state.currentTask.coverageMetrics);
-  const hybridElements = useAppState((state) => state.currentTask.hybridElements);
+  const wsConnectionState = useAppState((state) => state.currentTask.wsConnectionState);
   const taskStatus = useAppState((state) => state.currentTask.status);
-  const actionStatus = useAppState((state) => state.currentTask.actionStatus);
-  const plan = useAppState((state) => state.currentTask.plan);
-  const currentStep = useAppState((state) => state.currentTask.currentStep);
-  const totalSteps = useAppState((state) => state.currentTask.totalSteps);
-  const verificationHistory = useAppState((state) => state.currentTask.verificationHistory);
-  const correctionHistory = useAppState((state) => state.currentTask.correctionHistory);
+  const messagesCount = useAppState((state) => state.currentTask.messages.length);
+  const actionsCount = useAppState((state) => state.currentTask.displayHistory.length);
+  const networkLogsCount = useAppState((state) => state.debug.networkLogs.length);
 
   // Dark mode colors - defined at component top level
   const cardBg = useColorModeValue('white', 'gray.800');
   const borderColor = useColorModeValue('gray.200', 'gray.700');
-  const headingColor = useColorModeValue('gray.900', 'gray.100');
-  const textColor = useColorModeValue('gray.700', 'gray.300');
-  const descColor = useColorModeValue('gray.600', 'gray.400');
-
-  // Don't render if developer mode is off
-  if (!developerMode) {
-    return null;
-  }
-
-  // Card wrapper component for consistent styling
-  const DebugCard: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-    <Box
-      borderWidth="1px"
-      borderColor={borderColor}
-      borderRadius="lg"
-      p={4}
-      bg={cardBg}
-      shadow="sm"
-    >
-      <Heading size="sm" mb={3} color={headingColor}>
-        {title}
-      </Heading>
-      {children}
-    </Box>
-  );
-
-  // Empty state component
-  const EmptyState: React.FC<{ message: string }> = ({ message }) => (
-    <Text fontSize="sm" color={descColor} fontStyle="italic">
-      {message}
-    </Text>
-  );
 
   // Tab colors
   const tabBg = useColorModeValue('white', 'gray.800');
@@ -100,10 +56,64 @@ const DebugPanel: React.FC<DebugPanelProps> = () => {
   const scrollbarTrackBg = useColorModeValue('gray.100', 'gray.700');
   const scrollbarThumbBg = useColorModeValue('gray.400', 'gray.500');
 
+  // Don't render if developer mode is off
+  if (!developerMode) {
+    return null;
+  }
+
+  // Tab configuration with icons and badges
+  const tabs = [
+    { 
+      id: 'connection', 
+      label: 'Connection', 
+      icon: FiWifi,
+      badge: wsConnectionState === 'connected' ? null : wsConnectionState,
+      badgeColor: wsConnectionState === 'connected' ? 'green' : 
+                  wsConnectionState === 'fallback' ? 'orange' : 
+                  wsConnectionState === 'failed' ? 'red' : 'gray',
+    },
+    { 
+      id: 'actions', 
+      label: 'Actions', 
+      icon: FiZap,
+      badge: actionsCount > 0 ? actionsCount : null,
+      badgeColor: taskStatus === 'running' ? 'blue' : 'gray',
+    },
+    { 
+      id: 'messages', 
+      label: 'Messages', 
+      icon: FiMessageSquare,
+      badge: messagesCount > 0 ? messagesCount : null,
+      badgeColor: 'gray',
+    },
+    { 
+      id: 'network', 
+      label: 'Network', 
+      icon: FiActivity,
+      badge: networkLogsCount > 0 ? networkLogsCount : null,
+      badgeColor: 'gray',
+    },
+    { 
+      id: 'state', 
+      label: 'State', 
+      icon: FiDatabase,
+      badge: null,
+      badgeColor: 'gray',
+    },
+  ];
+
   return (
     <Box w="100%" h="100%" display="flex" flexDirection="column" overflow="hidden">
-      {/* Tabbed Interface - All content in tabs */}
-      <Tabs variant="enclosed" size="sm" isLazy colorScheme="blue" display="flex" flexDirection="column" h="100%" overflow="hidden">
+      <Tabs 
+        variant="enclosed" 
+        size="sm" 
+        isLazy 
+        colorScheme="blue" 
+        display="flex" 
+        flexDirection="column" 
+        h="100%" 
+        overflow="hidden"
+      >
         <TabList
           flex="none"
           overflowX="auto"
@@ -124,95 +134,44 @@ const DebugPanel: React.FC<DebugPanelProps> = () => {
             },
           }}
         >
-          <Tab
-            fontSize="xs"
-            fontWeight="medium"
-            px={3}
-            py={2}
-            _selected={{
-              bg: tabSelectedBg,
-              color: tabSelectedColor,
-              borderColor: tabBorderColor,
-              borderBottomColor: 'transparent',
-            }}
-            _hover={{
-              bg: tabHoverBg,
-            }}
-          >
-            Execution
-          </Tab>
-          <Tab
-            fontSize="xs"
-            fontWeight="medium"
-            px={3}
-            py={2}
-            _selected={{
-              bg: tabSelectedBg,
-              color: tabSelectedColor,
-              borderColor: tabBorderColor,
-              borderBottomColor: 'transparent',
-            }}
-            _hover={{
-              bg: tabHoverBg,
-            }}
-          >
-            Network
-          </Tab>
-          <Tab
-            fontSize="xs"
-            fontWeight="medium"
-            px={3}
-            py={2}
-            _selected={{
-              bg: tabSelectedBg,
-              color: tabSelectedColor,
-              borderColor: tabBorderColor,
-              borderBottomColor: 'transparent',
-            }}
-            _hover={{
-              bg: tabHoverBg,
-            }}
-          >
-            State
-          </Tab>
-          <Tab
-            fontSize="xs"
-            fontWeight="medium"
-            px={3}
-            py={2}
-            _selected={{
-              bg: tabSelectedBg,
-              color: tabSelectedColor,
-              borderColor: tabBorderColor,
-              borderBottomColor: 'transparent',
-            }}
-            _hover={{
-              bg: tabHoverBg,
-            }}
-          >
-            Logs
-          </Tab>
-          <Tab
-            fontSize="xs"
-            fontWeight="medium"
-            px={3}
-            py={2}
-            _selected={{
-              bg: tabSelectedBg,
-              color: tabSelectedColor,
-              borderColor: tabBorderColor,
-              borderBottomColor: 'transparent',
-            }}
-            _hover={{
-              bg: tabHoverBg,
-            }}
-          >
-            RAG
-          </Tab>
+          {tabs.map((tab) => (
+            <Tab
+              key={tab.id}
+              fontSize="xs"
+              fontWeight="medium"
+              px={3}
+              py={2}
+              _selected={{
+                bg: tabSelectedBg,
+                color: tabSelectedColor,
+                borderColor: tabBorderColor,
+                borderBottomColor: 'transparent',
+              }}
+              _hover={{
+                bg: tabHoverBg,
+              }}
+            >
+              <HStack spacing={1.5}>
+                <Icon as={tab.icon} boxSize={3.5} />
+                <span>{tab.label}</span>
+                {tab.badge !== null && (
+                  <Badge 
+                    colorScheme={tab.badgeColor} 
+                    fontSize="xs" 
+                    ml={1}
+                    minW="18px"
+                    textAlign="center"
+                  >
+                    {typeof tab.badge === 'number' && tab.badge > 99 ? '99+' : tab.badge}
+                  </Badge>
+                )}
+              </HStack>
+            </Tab>
+          ))}
         </TabList>
 
         <TabPanels flex="1" overflow="hidden" display="flex" flexDirection="column">
-          {/* Execution Tab - Contains Execution Status, Action Plan, Verification, Correction */}
+          {/* Connection Tab */}
           <TabPanel 
             px={0} 
             py={4} 
@@ -222,51 +181,39 @@ const DebugPanel: React.FC<DebugPanelProps> = () => {
             overflowX="hidden"
             minH="0"
           >
-            <VStack align="stretch" spacing={4}>
-              {/* Execution Status */}
-              {(taskStatus === 'running' || actionStatus !== 'idle') && (
-                <ErrorBoundary>
-                  <DebugCard title="Execution Status">
-                    <TaskStatus />
-                  </DebugCard>
-                </ErrorBoundary>
-              )}
+            <ErrorBoundary>
+              <ConnectionDebugView />
+            </ErrorBoundary>
+          </TabPanel>
 
-              {/* Action Plan (Manus Orchestrator) */}
-              {(plan || currentStep || totalSteps) && (
-                <ErrorBoundary>
-                  <DebugCard title="Action Plan">
-                    <PlanViewDebug />
-                  </DebugCard>
-                </ErrorBoundary>
-              )}
+          {/* Actions Tab */}
+          <TabPanel 
+            px={0} 
+            py={4} 
+            bg={tabPanelBg}
+            flex="1"
+            overflowY="auto"
+            overflowX="hidden"
+            minH="0"
+          >
+            <ErrorBoundary>
+              <ActionsDebugView />
+            </ErrorBoundary>
+          </TabPanel>
 
-              {/* Verification Results (Manus Orchestrator) */}
-              {verificationHistory && verificationHistory.length > 0 && (
-                <ErrorBoundary>
-                  <DebugCard title="Verification Results">
-                    <VerificationViewDebug />
-                  </DebugCard>
-                </ErrorBoundary>
-              )}
-
-              {/* Correction Results (Manus Orchestrator) */}
-              {correctionHistory && correctionHistory.length > 0 && (
-                <ErrorBoundary>
-                  <DebugCard title="Correction Results">
-                    <CorrectionViewDebug />
-                  </DebugCard>
-                </ErrorBoundary>
-              )}
-
-              {/* Empty state if no execution data */}
-              {!(taskStatus === 'running' || actionStatus !== 'idle') && 
-               !(plan || currentStep || totalSteps) && 
-               (!verificationHistory || verificationHistory.length === 0) && 
-               (!correctionHistory || correctionHistory.length === 0) && (
-                <EmptyState message="No execution data available. Start a task to see execution details here." />
-              )}
-            </VStack>
+          {/* Messages Tab */}
+          <TabPanel 
+            px={0} 
+            py={4} 
+            bg={tabPanelBg}
+            flex="1"
+            overflowY="auto"
+            overflowX="hidden"
+            minH="0"
+          >
+            <ErrorBoundary>
+              <MessagesDebugView />
+            </ErrorBoundary>
           </TabPanel>
 
           {/* Network Tab */}
@@ -280,9 +227,16 @@ const DebugPanel: React.FC<DebugPanelProps> = () => {
             minH="0"
           >
             <ErrorBoundary>
-              <DebugCard title="Network/API Trace">
+              <Box
+                borderWidth="1px"
+                borderColor={borderColor}
+                borderRadius="lg"
+                p={4}
+                bg={cardBg}
+                shadow="sm"
+              >
                 <NetworkTraceView />
-              </DebugCard>
+              </Box>
             </ErrorBoundary>
           </TabPanel>
 
@@ -296,73 +250,8 @@ const DebugPanel: React.FC<DebugPanelProps> = () => {
             overflowX="hidden"
             minH="0"
           >
-            <VStack align="stretch" spacing={4}>
-              <ErrorBoundary>
-                <DebugCard title="State Inspector">
-                  <StateInspectorView />
-                </DebugCard>
-              </ErrorBoundary>
-              
-              {/* Page Structure (Accessibility Tree) */}
-              {accessibilityTree && (
-                <ErrorBoundary>
-                  <DebugCard title="Page Structure">
-                    <AccessibilityTreeView tree={accessibilityTree} />
-                  </DebugCard>
-                </ErrorBoundary>
-              )}
-
-              {/* Interaction Coverage (Coverage Metrics) */}
-              {coverageMetrics && (
-                <ErrorBoundary>
-                  <DebugCard title="Interaction Coverage">
-                    <CoverageMetricsView metrics={coverageMetrics} />
-                  </DebugCard>
-                </ErrorBoundary>
-              )}
-
-              {/* Element Sources (Hybrid Elements) */}
-              {hybridElements && hybridElements.length > 0 && (
-                <ErrorBoundary>
-                  <DebugCard title="Element Sources">
-                    <HybridElementView hybridElements={hybridElements} />
-                  </DebugCard>
-                </ErrorBoundary>
-              )}
-            </VStack>
-          </TabPanel>
-
-          {/* Logs Tab */}
-          <TabPanel 
-            px={0} 
-            py={4} 
-            bg={tabPanelBg}
-            flex="1"
-            overflowY="auto"
-            overflowX="hidden"
-            minH="0"
-          >
             <ErrorBoundary>
-              <DebugCard title="Raw Logs">
-                <TaskHistoryDebug />
-              </DebugCard>
-            </ErrorBoundary>
-          </TabPanel>
-
-          {/* RAG Tab */}
-          <TabPanel 
-            px={0} 
-            py={4} 
-            bg={tabPanelBg}
-            flex="1"
-            overflowY="auto"
-            overflowX="hidden"
-            minH="0"
-          >
-            <ErrorBoundary>
-              <DebugCard title="RAG Context">
-                <RAGContextView />
-              </DebugCard>
+              <StateDebugView />
             </ErrorBoundary>
           </TabPanel>
         </TabPanels>

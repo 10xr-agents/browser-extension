@@ -16,7 +16,8 @@ import { callDOMAction } from '../helpers/domActions';
 import { parseAction, ParsedAction } from '../helpers/parseAction';
 import { apiClient, type DOMChangeInfo, type ClientObservations, RateLimitError, NotFoundError } from '../api/client';
 import templatize from '../helpers/shrinkHTML/templatize';
-import { getSimplifiedDom } from '../helpers/simplifyDom';
+import { getSimplifiedDom, type SimplifiedDomResult } from '../helpers/simplifyDom';
+import { extractDomViaInjection, type FallbackDomResult } from '../helpers/fallbackDomExtractor';
 import { sleep } from '../helpers/utils';
 import { MyStateCreator } from './store';
 import type { AccessibilityTree } from '../types/accessibility';
@@ -45,6 +46,43 @@ import {
 import { callRPC } from '../helpers/pageRPC';
 import { startKeepAlive, stopKeepAlive } from '../helpers/serviceWorkerKeepAlive';
 import { validatePayloadSize, PayloadTooLargeError, PAYLOAD_TOO_LARGE_MESSAGE } from '../helpers/payloadValidation';
+import {
+  captureAndOptimizeScreenshot,
+  resetScreenshotHashCache
+} from '../helpers/screenshotCapture';
+import { 
+  extractSkeletonDom, 
+  getSkeletonStats 
+} from '../helpers/skeletonDom';
+import { selectDomMode, type DomMode } from '../helpers/hybridCapture';
+
+// === SEMANTIC JSON PROTOCOL ===
+// Configuration flag to enable new semantic extraction
+// When enabled, uses stable IDs and JSON format instead of HTML
+// This reduces tokens by ~95% and eliminates "Element not found" errors
+// Reference: SEMANTIC_JSON_PROTOCOL.md
+const USE_SEMANTIC_EXTRACTION = true; // Set to true to enable new extraction
+
+// Import semantic node type for type safety
+interface SemanticNode {
+  id: string;
+  role: string;
+  name: string;
+  value?: string;
+  state?: string;
+  type?: string;
+  placeholder?: string;
+  href?: string;
+}
+// Dynamic import for messageSyncManager to avoid circular dependency
+// Used for starting WebSocket sync when session changes
+let messageSyncManagerPromise: Promise<typeof import('../services/messageSyncService')> | null = null;
+const getMessageSyncManager = async () => {
+  if (!messageSyncManagerPromise) {
+    messageSyncManagerPromise = import('../services/messageSyncService');
+  }
+  return messageSyncManagerPromise;
+};
 
 /**
  * Generate a UUID v4
@@ -63,6 +101,178 @@ function generateUUID(): string {
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+/**
+ * Wait for content script to be ready on a tab
+ * This communicates with the background script which tracks content script readiness
+ * 
+ * CRITICAL: This prevents "Receiving end does not exist" errors during navigation
+ * by ensuring we don't try to communicate with a destroyed content script
+ * 
+ * @param tabId - The tab ID to check
+ * @param timeoutMs - Maximum time to wait (default 10 seconds)
+ * @returns Promise<boolean> - true if content script is ready, false if timeout
+ */
+async function waitForContentScriptReady(tabId: number, timeoutMs: number = 10000): Promise<boolean> {
+  try {
+    // Check if chrome.runtime is available
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+      console.warn('[waitForContentScriptReady] Chrome runtime not available');
+      return false;
+    }
+    
+    const response = await new Promise<{ ready: boolean; tabId: number; error?: string }>((resolve) => {
+      chrome.runtime.sendMessage(
+        { type: 'WAIT_FOR_CONTENT_SCRIPT', tabId, timeoutMs },
+        (response) => {
+          // Handle potential lastError
+          if (chrome.runtime.lastError) {
+            console.warn('[waitForContentScriptReady] Message failed:', chrome.runtime.lastError.message);
+            resolve({ ready: false, tabId, error: chrome.runtime.lastError.message });
+            return;
+          }
+          resolve(response || { ready: false, tabId });
+        }
+      );
+    });
+    
+    if (response.ready) {
+      console.log(`[waitForContentScriptReady] Content script ready on tab ${tabId}`);
+    } else {
+      console.warn(`[waitForContentScriptReady] Content script not ready on tab ${tabId}:`, response.error || 'timeout');
+    }
+    
+    return response.ready;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('[waitForContentScriptReady] Error:', errorMessage);
+    return false;
+  }
+}
+
+/**
+ * Create a SimplifiedDomResult from the fallback DOM extraction result.
+ * 
+ * This converts the direct injection result into a format that can be used
+ * by the rest of the DOM processing pipeline.
+ * 
+ * @param fallbackResult - The result from extractDomViaInjection
+ * @returns SimplifiedDomResult or null if conversion fails
+ */
+function createSimplifiedDomFromFallback(fallbackResult: FallbackDomResult): SimplifiedDomResult | null {
+  if (!fallbackResult.success || !fallbackResult.html) {
+    return null;
+  }
+
+  try {
+    // Create a DOM element from the HTML
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(
+      `<!DOCTYPE html><html><head><title>${fallbackResult.title || ''}</title></head><body>${fallbackResult.html}</body></html>`,
+      'text/html'
+    );
+
+    // Mark interactive elements with data-element-id for action targeting
+    if (fallbackResult.interactiveElements && fallbackResult.interactiveElements.length > 0) {
+      // Create a mapping of interactive elements
+      const interactiveSelectors = [
+        'a[href]', 'button', 'input', 'textarea', 'select',
+        '[role="button"]', '[role="link"]', '[role="textbox"]',
+        '[onclick]', '[tabindex]:not([tabindex="-1"])',
+      ].join(', ');
+
+      const elements = doc.querySelectorAll(interactiveSelectors);
+      let elementId = 0;
+
+      elements.forEach((el) => {
+        // Only mark visible elements
+        if (!el.hasAttribute('data-element-id')) {
+          el.setAttribute('data-element-id', String(elementId++));
+        }
+      });
+
+      console.log(`[createSimplifiedDomFromFallback] Marked ${elementId} interactive elements`);
+    }
+
+    // Create HybridElements from the fallback data
+    const hybridElements: HybridElement[] = (fallbackResult.interactiveElements || []).map((el, index) => ({
+      id: index,
+      tag: el.tag,
+      role: el.role || undefined,
+      name: el.text || el.ariaLabel || el.placeholder || '',
+      description: '',
+      value: el.value || '',
+      isInteractive: true,
+      boundingBox: el.rect,
+      attributes: {
+        id: el.id || undefined,
+        name: el.name || undefined,
+        type: el.type || undefined,
+        href: el.href || undefined,
+        placeholder: el.placeholder || undefined,
+        'aria-label': el.ariaLabel || undefined,
+      },
+      axNodeId: undefined,
+      domIndex: index,
+    }));
+
+    return {
+      dom: doc.body,
+      usedAccessibility: false,
+      hybridElements,
+    };
+  } catch (error) {
+    console.error('[createSimplifiedDomFromFallback] Failed to convert fallback result:', error);
+    return null;
+  }
+}
+
+/**
+ * Programmatically inject the content script into a tab.
+ * 
+ * This is a fallback mechanism when the auto-injected content script
+ * (via manifest.json content_scripts) fails to load or respond.
+ * 
+ * IMPORTANT: This requires host_permissions in manifest.json.
+ * 
+ * @param tabId - The tab ID to inject the content script into
+ * @throws Error if injection fails
+ */
+async function injectContentScript(tabId: number): Promise<void> {
+  if (!tabId || tabId <= 0) {
+    throw new Error(`Invalid tabId for content script injection: ${tabId}`);
+  }
+  
+  try {
+    // First check if chrome.scripting is available
+    if (typeof chrome === 'undefined' || !chrome.scripting?.executeScript) {
+      throw new Error('chrome.scripting API not available');
+    }
+    
+    console.log(`[injectContentScript] Injecting content script into tab ${tabId}...`);
+    
+    // Inject the content script bundle
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['contentScript.bundle.js'],
+    });
+    
+    console.log(`[injectContentScript] Content script injected successfully into tab ${tabId}`);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Check for common injection failures
+    if (errorMessage.includes('Cannot access') || errorMessage.includes('chrome://') || errorMessage.includes('chrome-extension://')) {
+      throw new Error(`Cannot inject content script into protected page: ${errorMessage}`);
+    }
+    
+    if (errorMessage.includes('No tab with id')) {
+      throw new Error(`Tab ${tabId} no longer exists: ${errorMessage}`);
+    }
+    
+    throw new Error(`Content script injection failed: ${errorMessage}`);
+  }
 }
 
 /**
@@ -258,35 +468,38 @@ function setupNewTabListeners() {
       }
       
       // Handle tab switch
-      // PHASE 1 FIX: When user manually switches tabs during a running task, PAUSE the task
-      // instead of auto-following. This prevents DOM mismatch errors and confusion.
-      // Auto-follow only happens for NEW tabs opened by agent actions (handled above).
+      // When user switches tabs, update the tabId so the next command runs on the new tab.
+      // Only interrupt if task was actively running (prevents DOM mismatch during action execution).
+      // User's next command will start fresh on the new tab automatically.
       // Reference: ARCHITECTURE_REVIEW.md §4.3 (Handle Tab Switch in Side Panel)
       if (changes.tabSwitched && changes.tabSwitched.newValue) {
         const switchInfo = changes.tabSwitched.newValue;
         
         if (currentTask.tabId !== switchInfo.tabId) {
-          console.log('[TabSwitch] User switched away from automation tab:', {
+          console.log('[TabSwitch] User switched to new tab:', {
             originalTabId: currentTask.tabId,
             newTabId: switchInfo.tabId,
+            taskStatus: currentTask.status,
           });
           
-          // PHASE 1 FIX: Pause the task instead of auto-following
-          // The user intentionally switched tabs, so we should pause and let them decide
-          useAppState.setState((draft: any) => {
-            // Don't update tabId - keep it pointing to original automation tab
-            // If user wants to continue on new tab, they should start a new task
-            draft.currentTask.status = 'interrupted';
-          });
-          
-          // Add system message explaining the pause
-          useAppState.getState().currentTask.actions.addAssistantMessage(
-            `[System] Task paused - you switched away from the automation tab. ` +
-            `The task was running on tab ${currentTask.tabId}. ` +
-            `To continue, switch back to that tab and run a new command, or start fresh on this tab.`,
-            'system',
-            { name: 'system', args: {} }
-          );
+          // If task is actively running, we need to stop it because DOM context changed
+          // But update tabId so user's next command works on the new tab
+          if (currentTask.status === 'running') {
+            useAppState.setState((draft: any) => {
+              // Update tabId to new tab - user's next command will work on this tab
+              draft.currentTask.tabId = switchInfo.tabId;
+              // Set to idle so user can start a new command immediately
+              draft.currentTask.status = 'idle';
+              draft.currentTask.actionStatus = 'idle';
+            });
+            
+            console.log('[TabSwitch] Task stopped, ready for new command on tab:', switchInfo.tabId);
+          } else {
+            // Task wasn't running - just update tabId silently
+            useAppState.setState((draft: any) => {
+              draft.currentTask.tabId = switchInfo.tabId;
+            });
+          }
           
           // Clear the flag
           chrome.storage.local.remove('tabSwitched').catch(() => {});
@@ -428,6 +641,11 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
       } else {
         // This IS a new task
         isNewTask = true;
+        
+        // Reset screenshot hash cache for new task (ensures first screenshot is captured)
+        // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md
+        resetScreenshotHashCache();
+        
         // New task - preserve existing sessionId to continue the same chat context
         // Only clear task-specific state, not sessionId (sessionId is only cleared via startNewChat)
         const existingSessionId = get().currentTask.sessionId;
@@ -547,6 +765,18 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           }
         }
 
+        // CRITICAL FIX: Ensure content script is ready before attaching debugger
+        // This prevents "Could not establish connection" errors on subsequent tasks
+        try {
+          const { callRPC } = await import('../helpers/pageRPC');
+          // Simple ping to verify content script is responding
+          await callRPC('checkNetworkIdle', [], 3, tabId);
+          console.log('[CurrentTask] Content script verified ready on tab', tabId);
+        } catch (contentScriptError) {
+          console.warn('[CurrentTask] Content script not ready, will retry during DOM extraction:', contentScriptError);
+          // Continue - DOM extraction has its own retry logic
+        }
+        
         await attachDebugger(tabId);
         await disableIncompatibleExtensions();
 
@@ -576,11 +806,60 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           setActionStatus('pulling-dom');
           let domResult: SimplifiedDomResult | null = null;
           
-          // CRITICAL FIX: Retry DOM extraction with proper wait for content script
-          // After navigation, the content script needs time to initialize on the new page
+          // ============================================================================
+          // CRITICAL ARCHITECTURAL FIX: Content Script Readiness Check
+          // 
+          // The fundamental issue with Chrome Extensions navigating to new pages:
+          // - When navigation starts, the OLD content script is DESTROYED immediately
+          // - The NEW content script isn't injected until the page reaches 'interactive' state
+          // - There's a timing gap where no content script exists to receive messages
+          // 
+          // Solution: Wait for the background's readiness tracking to confirm the NEW
+          // content script has loaded and sent its CONTENT_SCRIPT_READY message
+          // ============================================================================
+          
+          console.log(`[CurrentTask] Waiting for content script readiness on tab ${tabId}...`);
+          let contentScriptReady = await waitForContentScriptReady(tabId, 15000); // 15 second timeout
+          
+          if (!contentScriptReady) {
+            console.warn(`[CurrentTask] Content script not ready after 15s, attempting programmatic injection...`);
+            // Try to programmatically inject the content script
+            try {
+              await injectContentScript(tabId);
+              console.log(`[CurrentTask] Content script injected programmatically, waiting for readiness...`);
+              await sleep(1000); // Give it time to initialize
+              contentScriptReady = await waitForContentScriptReady(tabId, 5000);
+            } catch (injectError) {
+              console.warn(`[CurrentTask] Programmatic injection failed:`, injectError);
+            }
+          }
+          
+          if (contentScriptReady) {
+            console.log(`[CurrentTask] Content script confirmed ready on tab ${tabId}`);
+          } else {
+            console.warn(`[CurrentTask] Content script still not ready, will try DOM extraction anyway...`);
+          }
+          
+          // ============================================================================
+          // ROBUST DOM EXTRACTION with Exponential Backoff
+          // 
+          // Some sites like google.com have complex JavaScript that can interfere with
+          // content script timing. We use:
+          // 1. Exponential backoff delays (1.5s, 2s, 3s, 4s, 6s, 8s...)
+          // 2. Content script re-injection on repeated failures
+          // 3. Direct function injection as final fallback
+          // ============================================================================
           let domRetryCount = 0;
-          const MAX_DOM_RETRIES = 8;
-          const DOM_RETRY_DELAY = 1500; // 1.5 seconds between retries
+          const MAX_DOM_RETRIES = 10; // Reduced but with longer waits
+          const MIN_RETRY_DELAY = 1500; // Minimum 1.5 seconds between retries
+          const MAX_RETRY_DELAY = 10000; // Cap at 10 seconds
+          let hasTriedReinjection = false;
+          
+          // Exponential backoff function: 1.5s, 2s, 3s, 4.5s, 6s, 8s, 10s...
+          const getRetryDelay = (attempt: number): number => {
+            const delay = MIN_RETRY_DELAY * Math.pow(1.5, attempt - 1);
+            return Math.min(Math.round(delay), MAX_RETRY_DELAY);
+          };
           
           while (domRetryCount < MAX_DOM_RETRIES) {
             try {
@@ -589,14 +868,19 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               if (domResult) {
                 // Success! Reset failure counter
                 consecutiveDomFailures = 0;
+                if (domRetryCount > 0) {
+                  console.log(`[CurrentTask] DOM extraction succeeded on attempt ${domRetryCount + 1}/${MAX_DOM_RETRIES}`);
+                }
                 break;
               }
               
               // DOM was null - page may be loading
               domRetryCount++;
               if (domRetryCount < MAX_DOM_RETRIES) {
-                console.log(`[CurrentTask] DOM extraction returned null (attempt ${domRetryCount}/${MAX_DOM_RETRIES}), waiting...`);
-                await sleep(DOM_RETRY_DELAY);
+                // Exponential backoff: 1.5s, 2s, 3s, 4.5s, 6s, 8s, 10s
+                const retryDelay = getRetryDelay(domRetryCount);
+                console.log(`[CurrentTask] DOM extraction returned null (attempt ${domRetryCount}/${MAX_DOM_RETRIES}), waiting ${retryDelay}ms...`);
+                await sleep(retryDelay);
               }
             } catch (error: unknown) {
               const errorMessage = error instanceof Error ? error.message : String(error);
@@ -609,11 +893,71 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 errorMessage.includes('Cannot read properties of null');
               
               if (isContentScriptError && domRetryCount < MAX_DOM_RETRIES) {
-                console.log(`[CurrentTask] Content script not ready (attempt ${domRetryCount}/${MAX_DOM_RETRIES}): ${errorMessage}`);
-                console.log('[CurrentTask] Waiting for content script to initialize...');
-                await sleep(DOM_RETRY_DELAY);
+                console.log(`[CurrentTask] Content script error (attempt ${domRetryCount}/${MAX_DOM_RETRIES}): ${errorMessage}`);
+                
+                // Try programmatic content script re-injection after 4 failed attempts
+                if (domRetryCount >= 4 && !hasTriedReinjection) {
+                  console.log('[CurrentTask] Attempting programmatic content script re-injection...');
+                  hasTriedReinjection = true;
+                  try {
+                    await injectContentScript(tabId);
+                    console.log('[CurrentTask] Content script re-injected, waiting for initialization...');
+                    await sleep(2000);
+                    // Re-check readiness
+                    const nowReady = await waitForContentScriptReady(tabId, 5000);
+                    if (nowReady) {
+                      console.log('[CurrentTask] Content script now ready after re-injection');
+                      continue; // Try DOM extraction immediately
+                    }
+                  } catch (injectError) {
+                    console.warn('[CurrentTask] Content script re-injection failed:', injectError);
+                  }
+                }
+                
+                // Exponential backoff for stubborn sites
+                const retryDelay = getRetryDelay(domRetryCount);
+                console.log(`[CurrentTask] Waiting ${retryDelay}ms for content script to initialize...`);
+                
+                // CRITICAL: Re-check content script readiness before next retry
+                const stillReady = await waitForContentScriptReady(tabId, 3000);
+                if (!stillReady) {
+                  await sleep(retryDelay);
+                }
               } else if (domRetryCount >= MAX_DOM_RETRIES) {
-                console.error('[CurrentTask] DOM extraction failed after all retries:', errorMessage);
+                // ============================================================================
+                // LAST RESORT: Direct Function Injection Fallback
+                // 
+                // When all content script communication fails (common on google.com), we
+                // bypass the message channel entirely by directly injecting a DOM extraction
+                // function into the page using chrome.scripting.executeScript().
+                // ============================================================================
+                console.warn(`[CurrentTask] All ${MAX_DOM_RETRIES} retries exhausted. Attempting direct injection fallback...`);
+                
+                try {
+                  const fallbackResult = await extractDomViaInjection(tabId);
+                  
+                  if (fallbackResult.success && fallbackResult.html) {
+                    console.log(`[CurrentTask] Direct injection fallback SUCCEEDED!`, {
+                      url: fallbackResult.url?.substring(0, 50),
+                      interactiveElements: fallbackResult.interactiveElements?.length || 0,
+                    });
+                    
+                    // Create a minimal SimplifiedDomResult from the fallback
+                    domResult = createSimplifiedDomFromFallback(fallbackResult);
+                    
+                    if (domResult) {
+                      consecutiveDomFailures = 0;
+                      break; // Exit the retry loop with success
+                    }
+                  } else {
+                    console.error(`[CurrentTask] Direct injection fallback failed:`, fallbackResult.error);
+                  }
+                } catch (fallbackError) {
+                  console.error(`[CurrentTask] Direct injection fallback threw:`, fallbackError);
+                }
+                
+                // If fallback also failed, throw the original error
+                console.error('[CurrentTask] DOM extraction failed after all retries AND fallback:', errorMessage);
                 throw error; // Let outer catch handle it
               } else {
                 throw error; // Non-retryable error
@@ -623,16 +967,37 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
 
           // Guard: content script may not be loaded (getSimplifiedDom returns null after all retries)
           if (!domResult) {
+            // Try direct injection fallback before giving up
+            console.warn(`[CurrentTask] DOM result is null after retries. Attempting direct injection fallback...`);
+            
+            try {
+              const fallbackResult = await extractDomViaInjection(tabId);
+              
+              if (fallbackResult.success && fallbackResult.html) {
+                console.log(`[CurrentTask] Direct injection fallback SUCCEEDED (null result case)!`, {
+                  url: fallbackResult.url?.substring(0, 50),
+                  interactiveElements: fallbackResult.interactiveElements?.length || 0,
+                });
+                
+                domResult = createSimplifiedDomFromFallback(fallbackResult);
+              }
+            } catch (fallbackError) {
+              console.error(`[CurrentTask] Direct injection fallback failed:`, fallbackError);
+            }
+          }
+          
+          // Final check after all fallbacks
+          if (!domResult) {
             consecutiveDomFailures++;
             
             if (consecutiveDomFailures >= MAX_DOM_FAILURES) {
               set((state) => {
                 state.currentTask.displayHistory.push({
                   thought:
-                    'Error: Could not extract page content after multiple attempts. The content script may not be loaded. Try refreshing the page or closing Chrome DevTools if it\'s open.',
+                    'Error: Could not extract page content after multiple attempts including direct injection fallback. The page may be protected or inaccessible.',
                   action: '',
                   parsedAction: {
-                    error: 'Could not extract page content. Content script may not be loaded.',
+                    error: 'Could not extract page content. All extraction methods failed.',
                   },
                 });
                 state.currentTask.status = 'error';
@@ -855,6 +1220,109 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           setActionStatus('transforming-dom');
           const currentDom = templatize(html);
 
+          // === DOM EXTRACTION MODE SELECTION ===
+          // Choose between:
+          // 1. SEMANTIC mode (new): JSON-based, stable IDs, ~95% token reduction
+          // 2. SKELETON mode: HTML-based, lightweight
+          // 3. HYBRID mode: Screenshot + skeleton for visual tasks
+          // 4. FULL mode: Full HTML (fallback)
+          
+          // Extract skeleton for backward compatibility and fallback
+          const skeletonDom = extractSkeletonDom(currentDom);
+          const skeletonStats = getSkeletonStats(currentDom.length, skeletonDom);
+          
+          // Variables for semantic extraction
+          let semanticNodes: SemanticNode[] | undefined;
+          let pageTitle: string | undefined;
+          let domMode: DomMode | 'semantic' = 'skeleton'; // Default
+          
+          // Screenshot capture variables
+          let screenshotBase64: string | null = null;
+          let screenshotHash: string | null = null;
+          
+          if (USE_SEMANTIC_EXTRACTION) {
+            // === SEMANTIC JSON PROTOCOL (new, recommended) ===
+            // Use stable IDs and JSON format for ~95% token reduction
+            // Reference: SEMANTIC_JSON_PROTOCOL.md
+            try {
+              // Call the semantic extraction via RPC
+              // This runs in the content script context where the DOM is accessible
+              const semanticResult = await callRPC('getSemanticDom', [{ timeout: 2000 }], 3, tabId) as {
+                type: 'semantic_tree';
+                url: string;
+                title: string;
+                nodes: SemanticNode[];
+                meta: { elementCount: number; extractionTimeMs: number; estimatedTokens: number };
+              } | null;
+              
+              if (semanticResult && semanticResult.nodes && semanticResult.nodes.length > 0) {
+                semanticNodes = semanticResult.nodes;
+                pageTitle = semanticResult.title;
+                domMode = 'semantic';
+                
+                console.log('[CurrentTask] SEMANTIC extraction:', {
+                  mode: 'semantic',
+                  nodeCount: semanticNodes.length,
+                  estimatedTokens: semanticResult.meta.estimatedTokens,
+                  extractionTimeMs: semanticResult.meta.extractionTimeMs,
+                  fullDomLength: currentDom.length,
+                  tokenReduction: `${Math.round((1 - (semanticResult.meta.estimatedTokens * 4) / currentDom.length) * 100)}%`,
+                });
+              } else {
+                // Fallback to skeleton if semantic extraction failed
+                console.warn('[CurrentTask] Semantic extraction returned empty, falling back to skeleton');
+                domMode = selectDomMode(safeInstructions, {
+                  interactiveElementCount: skeletonStats.interactiveCount,
+                });
+              }
+            } catch (semanticError: unknown) {
+              // Fallback to skeleton if semantic extraction throws
+              const errorMessage = semanticError instanceof Error ? semanticError.message : String(semanticError);
+              console.warn('[CurrentTask] Semantic extraction failed, falling back to skeleton:', errorMessage);
+              domMode = selectDomMode(safeInstructions, {
+                interactiveElementCount: skeletonStats.interactiveCount,
+              });
+            }
+          } else {
+            // Legacy mode selection (skeleton/hybrid/full)
+            domMode = selectDomMode(safeInstructions, {
+              interactiveElementCount: skeletonStats.interactiveCount,
+            });
+          }
+          
+          // Capture screenshot for hybrid mode (skip for skeleton-only and semantic modes)
+          if (domMode === 'hybrid') {
+            try {
+              const screenshotResult = await captureAndOptimizeScreenshot();
+              if (screenshotResult) {
+                screenshotBase64 = screenshotResult.base64;
+                screenshotHash = screenshotResult.hash;
+                console.log('[CurrentTask] Screenshot captured:', {
+                  width: screenshotResult.width,
+                  height: screenshotResult.height,
+                  sizeKB: Math.round(screenshotResult.sizeBytes / 1024),
+                });
+              } else {
+                console.log('[CurrentTask] Screenshot unchanged (hash match), skipping');
+              }
+            } catch (screenshotError) {
+              console.warn('[CurrentTask] Screenshot capture failed, continuing without:', screenshotError);
+              // Continue without screenshot - skeleton still provides value
+            }
+          }
+          
+          // Log extraction summary
+          if (domMode !== 'semantic') {
+            console.log('[CurrentTask] Hybrid capture:', {
+              domMode,
+              fullDomLength: currentDom.length,
+              skeletonLength: skeletonDom.length,
+              compressionRatio: `${skeletonStats.compressionRatio}%`,
+              interactiveElements: skeletonStats.interactiveCount,
+              hasScreenshot: screenshotBase64 !== null,
+            });
+          }
+
           // CRITICAL FIX: Validate payload size before sending to backend
           // Prevents 413 Payload Too Large errors and reduces API costs
           // Reference: CLIENT_ARCHITECTURE_BLOCKERS.md §Issue #2 (Payload Explosion)
@@ -971,6 +1439,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
 
             // Call agentInteract API with logging, error, DOM change, and client observations
             // IMPORTANT: Use currentUrl (just captured above), not the stale 'url' from task start
+            // HYBRID: Pass screenshot and skeleton DOM when available
             let response: Awaited<ReturnType<typeof apiClient.agentInteract>>;
             try {
               response = await apiClient.agentInteract(
@@ -993,7 +1462,19 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   });
                 } : undefined,
                 lastDOMChanges || undefined,
-                clientObservations
+                clientObservations,
+                // Hybrid Vision + Skeleton + Semantic parameters
+                // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §3 (Payload Contract)
+                // Reference: SEMANTIC_JSON_PROTOCOL.md (new semantic mode)
+                {
+                  screenshot: screenshotBase64,
+                  skeletonDom,
+                  domMode: domMode as 'skeleton' | 'full' | 'hybrid' | 'semantic',
+                  screenshotHash: screenshotHash || undefined,
+                  // Semantic JSON Protocol fields (only sent when domMode === 'semantic')
+                  semanticNodes: domMode === 'semantic' ? semanticNodes : undefined,
+                  pageTitle: domMode === 'semantic' ? pageTitle : undefined,
+                }
               );
             } finally {
               // CRITICAL: Stop keep-alive as soon as API response is received
@@ -1005,6 +1486,54 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             const res = response && typeof response === 'object' && 'data' in response && response.data && typeof response.data === 'object'
               ? (response as { data: Record<string, unknown> }).data
               : (response as Record<string, unknown>);
+
+            // HYBRID FALLBACK: Handle NEEDS_FULL_DOM response
+            // When skeleton DOM is insufficient, server requests full DOM retry
+            // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §6 (Fallback Handling)
+            if (response.status === 'needs_full_dom') {
+              console.log('[CurrentTask] Server requested full DOM, retrying with full mode:', {
+                reason: response.needsFullDomReason,
+                requestedElement: response.requestedElement,
+              });
+              
+              // Retry the same request with full DOM mode
+              await startKeepAlive();
+              try {
+                response = await apiClient.agentInteract(
+                  currentUrl,
+                  safeInstructions,
+                  currentDom,
+                  currentTaskId,
+                  currentSessionId,
+                  lastActionStatus,
+                  lastActionError,
+                  lastActionResultPayload,
+                  addNetworkLog ? (log) => {
+                    addNetworkLog({
+                      method: log.method,
+                      endpoint: log.endpoint,
+                      request: log.request,
+                      response: log.response,
+                      duration: log.duration,
+                      error: log.error,
+                    });
+                  } : undefined,
+                  lastDOMChanges || undefined,
+                  clientObservations,
+                  // Force full DOM mode for fallback
+                  {
+                    screenshot: screenshotBase64,
+                    skeletonDom,
+                    domMode: 'full', // Override to full mode
+                    screenshotHash: screenshotHash || undefined,
+                  }
+                );
+              } finally {
+                await stopKeepAlive();
+              }
+              
+              console.log('[CurrentTask] Full DOM retry completed');
+            }
 
             // Store taskId from response so follow-up requests send it (required for loop to advance)
             // Support both camelCase (taskId) and snake_case (task_id)
@@ -1192,6 +1721,16 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             // Parse action string (parseAction also trims and normalizes)
             const parsed = parseAction(safeAction);
             
+            // DEBUG: Log parsed action for troubleshooting
+            console.log('[CurrentTask] Action received from backend:', {
+              rawAction: safeAction,
+              rawThought: safeThought?.substring(0, 100) + (safeThought?.length > 100 ? '...' : ''),
+              parsedResult: 'error' in parsed ? { error: parsed.error } : { 
+                name: parsed.parsedAction.name, 
+                args: parsed.parsedAction.args 
+              },
+            });
+            
             // Add thought from response
             // Type guard: check if parsed has error property
             const parsedWithThought: ParsedAction = 'error' in parsed
@@ -1375,6 +1914,10 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             const actionArgs = parsedWithThought.parsedAction.args;
             const actionString = safeAction; // Use validated safeAction instead of response.action
             
+            // Extract selectorPath from actionDetails if available (for robust element finding)
+            // Reference: ROBUST_ELEMENT_SELECTORS_SPEC.md
+            const selectorPath = response.actionDetails?.selectorPath;
+            
             // Create action step
             const stepId = generateUUID();
             const stepStartTime = Date.now();
@@ -1432,26 +1975,173 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             }
             
             try {
+              // DEBUG: Log before action execution
+              console.log('[CurrentTask] Executing action:', {
+                actionName,
+                actionArgs,
+                actionString,
+                tabId,
+              });
+              
               // Handle legacy actions (click, setValue) via domActions for backward compatibility
               if (actionName === 'click' || actionName === 'setValue') {
-                executionResult = await callDOMAction(actionName as 'click' | 'setValue', actionArgs as any);
+                console.log('[CurrentTask] Using callDOMAction for:', actionName);
+                // Include selectorPath for robust element finding (fixes stale element ID issues)
+                // Reference: ROBUST_ELEMENT_SELECTORS_SPEC.md
+                const argsWithSelector = selectorPath 
+                  ? { ...(actionArgs as Record<string, unknown>), selectorPath }
+                  : actionArgs;
+                executionResult = await callDOMAction(actionName as 'click' | 'setValue', argsWithSelector as any);
+                console.log('[CurrentTask] callDOMAction result:', executionResult);
               } else {
                 // Use new action executors for all other actions
+                console.log('[CurrentTask] Using executeAction for:', actionName);
                 const { executeAction } = await import('../helpers/actionExecutors');
                 try {
                   await executeAction(actionName, actionArgs);
                   executionResult = { success: true };
+                  console.log('[CurrentTask] executeAction completed successfully');
                 } catch (error: unknown) {
                   const errorMessage = error instanceof Error ? error.message : String(error);
-                  executionResult = {
-                    success: false,
-                    error: {
-                      message: errorMessage,
-                      code: 'ACTION_EXECUTION_FAILED',
-                      action: actionString,
-                    },
-                    actualState: errorMessage,
-                  };
+                  console.error('[CurrentTask] executeAction failed:', errorMessage);
+                  
+                  // CRITICAL FIX: Try fallback injection for press actions
+                  // The debugger-based approach may fail due to connection issues or
+                  // parameter serialization problems (e.g., modifiers type mismatch)
+                  const isRecoverableError = 
+                    errorMessage.includes('Failed to deserialize') ||
+                    errorMessage.includes('Invalid parameters') ||
+                    errorMessage.includes('Receiving end does not exist') ||
+                    errorMessage.includes('Could not establish connection') ||
+                    errorMessage.includes('int32 value expected');
+                  
+                  if (isRecoverableError && (actionName === 'press' || actionName === 'pressKey')) {
+                    console.warn('[CurrentTask] Attempting fallback injection for press action...');
+                    try {
+                      const keyArg = actionArgs && typeof actionArgs === 'object' && 'key' in actionArgs 
+                        ? (actionArgs as { key: string }).key 
+                        : undefined;
+                      
+                      if (keyArg && tabId) {
+                        // Use direct script injection to dispatch keyboard event
+                        const results = await chrome.scripting.executeScript({
+                          target: { tabId },
+                          func: (keyName: string) => {
+                            try {
+                              var targetElement = document.activeElement || document.body;
+                              
+                              // Key mapping for common keys
+                              var keyMap: { [key: string]: { key: string; code: string; keyCode: number } } = {
+                                'Enter': { key: 'Enter', code: 'Enter', keyCode: 13 },
+                                'Tab': { key: 'Tab', code: 'Tab', keyCode: 9 },
+                                'Escape': { key: 'Escape', code: 'Escape', keyCode: 27 },
+                                'Backspace': { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+                                'Delete': { key: 'Delete', code: 'Delete', keyCode: 46 },
+                                'ArrowUp': { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+                                'ArrowDown': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+                                'ArrowLeft': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+                                'ArrowRight': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+                                'Space': { key: ' ', code: 'Space', keyCode: 32 },
+                                ' ': { key: ' ', code: 'Space', keyCode: 32 },
+                              };
+                              
+                              var keyInfo = keyMap[keyName] || { key: keyName, code: keyName, keyCode: 0 };
+                              
+                              // Dispatch keydown
+                              var keydownEvent = new KeyboardEvent('keydown', {
+                                key: keyInfo.key,
+                                code: keyInfo.code,
+                                keyCode: keyInfo.keyCode,
+                                which: keyInfo.keyCode,
+                                bubbles: true,
+                                cancelable: true,
+                              });
+                              targetElement.dispatchEvent(keydownEvent);
+                              
+                              // For Enter key on inputs in forms, try to submit
+                              if (keyName === 'Enter') {
+                                var inputElement = targetElement as HTMLInputElement;
+                                if (inputElement && inputElement.form) {
+                                  var submitEvent = new Event('submit', { bubbles: true, cancelable: true });
+                                  var shouldSubmit = inputElement.form.dispatchEvent(submitEvent);
+                                  if (shouldSubmit) {
+                                    inputElement.form.submit();
+                                  }
+                                }
+                              }
+                              
+                              // Dispatch keyup
+                              var keyupEvent = new KeyboardEvent('keyup', {
+                                key: keyInfo.key,
+                                code: keyInfo.code,
+                                keyCode: keyInfo.keyCode,
+                                which: keyInfo.keyCode,
+                                bubbles: true,
+                                cancelable: true,
+                              });
+                              targetElement.dispatchEvent(keyupEvent);
+                              
+                              return { success: true };
+                            } catch (e) {
+                              return { success: false, error: e instanceof Error ? e.message : String(e) };
+                            }
+                          },
+                          args: [keyArg],
+                          world: 'MAIN',
+                        });
+                        
+                        if (results && results[0] && results[0].result && results[0].result.success) {
+                          console.log('[CurrentTask] Fallback press injection succeeded');
+                          executionResult = { success: true };
+                        } else {
+                          const fallbackError = results?.[0]?.result?.error || 'Unknown fallback error';
+                          console.error('[CurrentTask] Fallback press injection failed:', fallbackError);
+                          executionResult = {
+                            success: false,
+                            error: {
+                              message: `Action failed: ${errorMessage}. Fallback also failed: ${fallbackError}`,
+                              code: 'ACTION_EXECUTION_FAILED',
+                              action: actionString,
+                            },
+                            actualState: errorMessage,
+                          };
+                        }
+                      } else {
+                        // No key argument or tabId, can't do fallback
+                        executionResult = {
+                          success: false,
+                          error: {
+                            message: errorMessage,
+                            code: 'ACTION_EXECUTION_FAILED',
+                            action: actionString,
+                          },
+                          actualState: errorMessage,
+                        };
+                      }
+                    } catch (fallbackError: unknown) {
+                      const fallbackErrorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+                      console.error('[CurrentTask] Fallback press injection threw:', fallbackErrorMessage);
+                      executionResult = {
+                        success: false,
+                        error: {
+                          message: `Action failed: ${errorMessage}. Fallback error: ${fallbackErrorMessage}`,
+                          code: 'ACTION_EXECUTION_FAILED',
+                          action: actionString,
+                        },
+                        actualState: errorMessage,
+                      };
+                    }
+                  } else {
+                    executionResult = {
+                      success: false,
+                      error: {
+                        message: errorMessage,
+                        code: 'ACTION_EXECUTION_FAILED',
+                        action: actionString,
+                      },
+                      actualState: errorMessage,
+                    };
+                  }
                 }
               }
               
@@ -1724,7 +2414,11 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               
               // If action failed, log but continue (server will handle retry)
               if (!executionResult.success) {
-                console.warn('Action execution failed:', executionResult.error);
+                // CRITICAL FIX: Properly format error for logging to avoid [object Object]
+                const errorMsg = executionResult.error
+                  ? `${executionResult.error.message || 'Unknown error'} (code: ${executionResult.error.code || 'unknown'})`
+                  : 'Unknown action error';
+                console.warn('Action execution failed:', errorMsg);
                 // Don't break - let server decide next action based on error
               }
             } catch (error: unknown) {
@@ -2313,6 +3007,19 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
       
       // Set as current session after loading (or attempting to load)
       get().sessions.actions.setCurrentSession(sessionId);
+      
+      // Start WebSocket sync for real-time message updates
+      // This is the CRITICAL missing piece - startSync was never called after loadMessages
+      // Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md §7 (Task 4)
+      try {
+        const { messageSyncManager } = await getMessageSyncManager();
+        void messageSyncManager.startSync(sessionId).catch((syncError: unknown) => {
+          console.debug('[loadMessages] Failed to start WebSocket sync:', syncError);
+          // Sync failure is non-fatal - polling fallback will handle it
+        });
+      } catch (importError: unknown) {
+        console.debug('[loadMessages] Failed to import messageSyncManager:', importError);
+      }
     },
     addUserMessage: (content: string) => {
       // Type guard: Ensure content is always a string to prevent React error #130

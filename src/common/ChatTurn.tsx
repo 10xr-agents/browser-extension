@@ -6,7 +6,7 @@
  *   Thought (collapsible/italic), Action (code-like/badge), Observation (success/fail).
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Box,
   Text,
@@ -27,6 +27,22 @@ import UserInputPrompt from './UserInputPrompt';
 import EvidenceIndicator from './EvidenceIndicator';
 import type { ChatMessage } from '../types/chatMessage';
 import type { DisplayHistoryEntry } from '../state/currentTask';
+import { useAppState } from '../state/store';
+
+function formatSeconds(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return '—';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  return `${mins}m ${secs}s`;
+}
+
+function formatNumber(n: number | null): string {
+  if (n === null || !Number.isFinite(n) || n < 0) return '—';
+  if (n === 0) return '—';
+  if (n < 1000) return String(Math.round(n));
+  return `${(n / 1000).toFixed(1)}k`;
+}
 
 interface ChatTurnProps {
   turn: ChatTurnType | null | undefined;
@@ -39,18 +55,76 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
   const dividerColor = useColorModeValue('gray.100', 'gray.800');
   const userBubbleBg = useColorModeValue('blue.500', 'blue.600');
   const userBubbleText = useColorModeValue('white', 'white');
-  const agentBubbleBg = useColorModeValue('gray.100', 'gray.700');
-  const agentBubbleBorder = useColorModeValue('gray.200', 'gray.600');
+  const agentBubbleBg = useColorModeValue('gray.50', 'gray.800');
+  const focusHeaderBg = useColorModeValue('whiteAlpha.900', 'blackAlpha.400');
+  const focusHeaderBorder = useColorModeValue('gray.200', 'gray.700');
+  const focusHeaderText = useColorModeValue('gray.900', 'gray.100');
   const aiTextColor = useColorModeValue('gray.700', 'gray.300');
   const thoughtLabelColor = useColorModeValue('gray.500', 'gray.400');
   const mutedColor = useColorModeValue('gray.500', 'gray.500');
   const errorTextColor = useColorModeValue('red.600', 'red.400');
-  const successTextColor = useColorModeValue('green.600', 'green.400');
-  const activeBorderColor = useColorModeValue('blue.400', 'blue.500');
   const processingColor = useColorModeValue('blue.500', 'blue.400');
   const actionBadgeBg = useColorModeValue('gray.200', 'gray.600');
   const actionBadgeText = useColorModeValue('gray.800', 'gray.100');
   const errorBorderColor = useColorModeValue('red.400', 'red.500');
+  const stepBadgeBg = useColorModeValue('blue.50', 'blue.900/25');
+  const stepBadgeText = useColorModeValue('blue.700', 'blue.200');
+
+  const plan = useAppState((state) => state.currentTask.plan);
+  const currentStep = useAppState((state) => state.currentTask.currentStep);
+  const totalSteps = useAppState((state) => state.currentTask.totalSteps);
+
+  const stepSummary = useMemo(() => {
+    const stepNum =
+      plan?.currentStepIndex != null ? plan.currentStepIndex + 1 : typeof currentStep === 'number' ? currentStep : null;
+    const total =
+      plan?.steps?.length ?? (typeof totalSteps === 'number' ? totalSteps : null);
+    if (stepNum == null || total == null || total <= 0) return null;
+    return `Step ${stepNum}/${total}`;
+  }, [currentStep, plan, totalSteps]);
+
+  // Completion summary should be tied to the turn (finish action), not global taskStatus.
+  // This keeps it visible in history even after the user starts the next task.
+  const completionStats = useMemo(() => {
+    const ai = Array.isArray(turn?.aiMessages) ? turn?.aiMessages : [];
+    const startTime = turn?.userMessage?.timestamp;
+    if (!(startTime instanceof Date) || isNaN(startTime.getTime())) return null;
+
+    // Find the last finish() message within this turn
+    let finishTime: Date | null = null;
+    for (let i = ai.length - 1; i >= 0; i--) {
+      const msg = ai[i];
+      const actionString = typeof msg?.actionPayload?.action === 'string' ? msg.actionPayload.action : null;
+      const parsed = msg?.actionPayload?.parsedAction;
+      const parsedName =
+        parsed && !('error' in parsed) && parsed.parsedAction && typeof parsed.parsedAction === 'object' && 'name' in parsed.parsedAction
+          ? (parsed.parsedAction as { name: unknown }).name
+          : null;
+      const isFinish =
+        actionString?.startsWith('finish') ||
+        (typeof parsedName === 'string' && parsedName === 'finish');
+
+      if (isFinish) {
+        const ts = msg?.timestamp;
+        finishTime = ts instanceof Date && !isNaN(ts.getTime()) ? ts : new Date();
+        break;
+      }
+    }
+
+    if (!finishTime) return null;
+
+    const durationSec = (finishTime.getTime() - startTime.getTime()) / 1000;
+    const tokens = ai.reduce((sum, m) => {
+      const usage = m?.meta?.usage;
+      const prompt = typeof usage?.promptTokens === 'number' ? usage.promptTokens : 0;
+      const completion = typeof usage?.completionTokens === 'number' ? usage.completionTokens : 0;
+      return sum + prompt + completion;
+    }, 0);
+
+    const steps = ai.filter((m) => Boolean(m?.actionPayload)).length || null;
+
+    return { durationSec, tokens: tokens > 0 ? tokens : null, steps };
+  }, [turn]);
 
   // CRITICAL SAFETY CHECKS
   if (!turn) {
@@ -103,39 +177,50 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
 
   return (
     <Box
-      py={4}
-      borderBottomWidth="1px"
-      borderBottomColor={dividerColor}
+      py={1}
       position="relative"
+      id={`chat-turn-${turn.userMessage.id}`}
     >
-      {isActive && (
-        <Box
-          position="absolute"
-          left={-4}
-          top={0}
-          bottom={0}
-          width="2px"
-          bg={activeBorderColor}
-          borderRadius="full"
-        />
-      )}
+      {/* Blue left border removed - message bubbles should be self-contained */}
 
       <VStack align="stretch" spacing={3}>
-        {/* User message: right-aligned, blue/primary bubble */}
-        <Box display="flex" justifyContent="flex-end" w="100%">
+        {/* Focus Mode: while processing, keep current user query sticky as a header */}
+        {isActive && isProcessing ? (
           <Box
-            maxW="85%"
-            px={4}
-            py={2}
+            position="sticky"
+            top={0}
+            zIndex={12}
+            bg={focusHeaderBg}
+            borderWidth="1px"
+            borderColor={focusHeaderBorder}
             borderRadius="lg"
-            bg={userBubbleBg}
-            color={userBubbleText}
+            px={4}
+            py={3}
+            backdropFilter="blur(8px)"
           >
-            <Text fontSize="sm" lineHeight="1.5">
+            <Text fontSize="sm" fontWeight="600" color={focusHeaderText} lineHeight="1.45">
               {userContent}
             </Text>
           </Box>
-        </Box>
+        ) : (
+          <Box display="flex" justifyContent="flex-end" w="100%">
+            <Box
+              maxW="85%"
+              px={4}
+              py={2}
+              borderRadius="lg"
+              bg={userBubbleBg}
+              color={userBubbleText}
+            >
+              <Text fontSize="sm" lineHeight="1.5">
+                {userContent}
+              </Text>
+            </Box>
+          </Box>
+        )}
+
+        {/* Focus mode spacing: keep a calm buffer before logs start */}
+        {isActive && isProcessing && aiMessages.length === 0 && <Box height={6} />}
 
         {/* Agent messages: left-aligned, gray bubble with Thought / Action / Observation */}
         {aiMessages.length > 0 && (
@@ -151,7 +236,6 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
 
               const displayEntry = convertToDisplayEntry(aiMessage);
               const isError = aiMessage.status === 'failure' || aiMessage.status === 'error';
-              const isSuccess = aiMessage.status === 'success';
               const isUserInputRequest =
                 aiMessage.userQuestion &&
                 (aiMessage.status === 'pending' || aiMessage.meta?.reasoning?.source === 'ASK_USER');
@@ -160,8 +244,8 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
                 <Box key={aiMessageKey} w="100%">
                   <Box
                     bg={agentBubbleBg}
-                    borderWidth="1px"
-                    borderColor={isError ? errorBorderColor : agentBubbleBorder}
+                    borderLeftWidth={isError ? '3px' : 0}
+                    borderLeftColor={isError ? errorBorderColor : undefined}
                     borderRadius="lg"
                     px={3}
                     py={3}
@@ -214,7 +298,8 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
                             ? aiMessage.content
                             : String(aiMessage.content || '')
                         }
-                        color={isError ? errorTextColor : isSuccess ? successTextColor : aiTextColor}
+                        // Thought is not a "success" signal. Only errors should be highlighted.
+                        color={isError ? errorTextColor : aiTextColor}
                         labelColor={thoughtLabelColor}
                       />
                     )}
@@ -222,37 +307,53 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
                     {/* Action: code-like / badge */}
                     {displayEntry && (
                       <Box mt={2}>
-                        <Text fontSize="xs" color={thoughtLabelColor} mb={1}>
-                          Action
-                        </Text>
-                        <Badge
-                          bg={actionBadgeBg}
-                          color={actionBadgeText}
-                          fontFamily="mono"
-                          fontSize="xs"
-                          px={2}
-                          py={1}
-                          borderRadius="md"
-                        >
-                          {typeof displayEntry.action === 'string'
-                            ? displayEntry.action
-                            : String(displayEntry.action || '')}
-                        </Badge>
+                        <HStack spacing={2} align="center" mb={2}>
+                          <Badge
+                            bg={actionBadgeBg}
+                            color={actionBadgeText}
+                            fontFamily="mono"
+                            fontSize="xs"
+                            px={2}
+                            py={1}
+                            borderRadius="full"
+                          >
+                            {typeof displayEntry.action === 'string'
+                              ? displayEntry.action
+                              : String(displayEntry.action || '')}
+                          </Badge>
+                          {/* Breadcrumb badge for current step (inline context; only on active turn) */}
+                          {isActive && stepSummary && (
+                            <Badge
+                              bg={stepBadgeBg}
+                              color={stepBadgeText}
+                              fontSize="xs"
+                              px={2}
+                              py={1}
+                              borderRadius="full"
+                            >
+                              {stepSummary}
+                            </Badge>
+                          )}
+                        </HStack>
                         <Box mt={2}>
                           <ActionCard entry={displayEntry} compact />
                         </Box>
                       </Box>
                     )}
 
-                    {/* Observation / Result */}
-                    {(isSuccess || isError) && (
+                    {/* Observation / Result
+                        UX: Avoid showing a green "✅ Success" label for reasoning/thought.
+                        Success is implicit via the normal (non-error) styling + continued progress.
+                        Only explicit failures get a label.
+                      */}
+                    {isError && (
                       <Box mt={2}>
                         <Text
                           fontSize="xs"
-                          color={isError ? errorTextColor : successTextColor}
+                          color={errorTextColor}
                           fontWeight="medium"
                         >
-                          {isSuccess ? '✅ Success' : '❌ Failed'}
+                          ❌ Failed
                         </Text>
                       </Box>
                     )}
@@ -273,6 +374,27 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
                 </Box>
               );
             })}
+
+            {/* Minimal completion line for this turn (persists in history) */}
+            {completionStats && (
+              <Box mt={1}>
+                <HStack
+                  spacing={2}
+                  justify="center"
+                  color={mutedColor}
+                  fontSize="xs"
+                  aria-label="Task completed stats"
+                >
+                  <Text fontWeight="medium">Completed</Text>
+                  <Text aria-hidden>·</Text>
+                  <Text>{formatSeconds(completionStats.durationSec)}</Text>
+                  <Text aria-hidden>·</Text>
+                  <Text>{formatNumber(completionStats.tokens)}</Text>
+                  <Text aria-hidden>·</Text>
+                  <Text>{completionStats.steps ?? '—'}</Text>
+                </HStack>
+              </Box>
+            )}
           </VStack>
         )}
 
@@ -286,8 +408,6 @@ const ChatTurnComponent: React.FC<ChatTurnProps> = ({ turn, isActive = false, is
             display="flex"
             justifyContent="flex-start"
             bg={agentBubbleBg}
-            borderWidth="1px"
-            borderColor={agentBubbleBorder}
             borderRadius="lg"
             px={3}
             py={2}
@@ -327,7 +447,8 @@ function AgentThoughtSection({
   color: string;
   labelColor: string;
 }) {
-  const [open, setOpen] = useState(false);
+  // Feedback: show reasoning by default (transparency-first)
+  const [open, setOpen] = useState(true);
   const displayContent = content.trim() ? content : '—';
   const toggle = () => setOpen((o) => !o);
   return (
