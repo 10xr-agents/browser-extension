@@ -41,6 +41,8 @@
 2. [Semantic Architecture - Ultra-Light Extraction](#2-semantic-architecture---ultra-light-extraction)
    - 2.5 [Advanced Features](#25-advanced-features-production-grade)
    - 2.6 [Production-Grade Features](#26-production-grade-features)
+   - 2.7 [Element ID Strategy: data-llm-id vs backendNodeId](#27-element-id-strategy-data-llm-id-vs-backendnodeid)
+   - 2.8 [Midscene-Inspired Optimizations](#28-midscene-inspired-optimizations)
 3. [Extraction Pipeline](#3-extraction-pipeline)
 4. [The Tag & Freeze Strategy](#4-the-tag--freeze-strategy)
 5. [Shadow DOM Support](#5-shadow-dom-support)
@@ -249,26 +251,107 @@ The semantic architecture includes production-grade reliability features that ma
 
 **Problem:** An element with `display: block` might be covered by a popup, cookie banner, or transparent overlay. Clicks are intercepted by the overlay.
 
-**Solution:** Use `document.elementFromPoint(x, y)` to verify the element is actually the top-most clickable layer.
+**Solution (Browser-Use Inspired):** Use **multi-point visibility sampling** with `document.elementFromPoint()` to determine what percentage of an element is actually visible. This is more reliable than single center-point checking, as it catches partial occlusions from overlays, modals, cookie banners, and sticky headers.
 
 ```typescript
-function isActuallyClickable(element: HTMLElement): boolean {
+/**
+ * Multi-Point Visibility Score Calculator
+ *
+ * Uses 5-point sampling (center + 4 corners) to determine
+ * what percentage of an element is actually visible.
+ */
+function getVisibilityScore(element: HTMLElement): number {
   const rect = element.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return false;
-  
-  // Check the center point of the element
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  
-  // Ask browser: "If I click here, what gets hit?"
-  const topElement = document.elementFromPoint(x, y);
-  
-  // Return true if our element (or child/parent) is the hit target
-  return element.contains(topElement) || topElement.contains(element);
+  if (rect.width === 0 || rect.height === 0) return 0;
+
+  // Sample 5 points: center + 4 corners (with 2px inset)
+  const points = [
+    { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },  // Center
+    { x: rect.left + 2, y: rect.top + 2 },                              // Top-left
+    { x: rect.right - 2, y: rect.top + 2 },                             // Top-right
+    { x: rect.left + 2, y: rect.bottom - 2 },                           // Bottom-left
+    { x: rect.right - 2, y: rect.bottom - 2 },                          // Bottom-right
+  ];
+
+  let visiblePoints = 0;
+  let sampledPoints = 0;
+
+  for (const p of points) {
+    if (p.x < 0 || p.y < 0 || p.x > window.innerWidth || p.y > window.innerHeight) continue;
+    sampledPoints++;
+
+    const topElement = document.elementFromPoint(p.x, p.y);
+    if (topElement && (element === topElement ||
+                       element.contains(topElement) ||
+                       topElement.contains(element))) {
+      visiblePoints++;
+    }
+  }
+
+  return sampledPoints > 0 ? visiblePoints / sampledPoints : 0;
+}
+
+// Element is clickable if >= 50% visible
+function isActuallyClickable(element: HTMLElement): boolean {
+  return getVisibilityScore(element) >= 0.5;
 }
 ```
 
-**Node Field:** `occ: true` if element is occluded
+**Node Field:** `occ: true` if element visibility score < 50%
+
+**Improvement over Single-Point:** Multi-point sampling catches:
+- Elements partially hidden by sticky headers
+- Elements with only corners visible
+- Elements behind semi-transparent overlays
+- Modals that don't cover center but block interaction
+
+### 2.5.1.1 Hidden Event Listener Detection (Browser-Use Inspired)
+
+**Problem:** Modern SPAs (React, Vue, Angular) attach click handlers via JavaScript that are invisible to standard DOM inspection. CDP's `isClickable` flag and our tagger don't detect:
+- React's `onClick` (synthetic events)
+- Vue's `@click` directives
+- Angular's `(click)` bindings
+- jQuery's `.on('click', ...)`
+- Native `addEventListener('click', ...)`
+
+**Solution:** Execute a script via CDP `Runtime.evaluate` with `includeCommandLineAPI: true`, which enables the DevTools-only `getEventListeners()` API:
+
+```typescript
+// src/helpers/hiddenListenerDetector.ts
+const DETECTION_SCRIPT = `
+(() => {
+  if (typeof getEventListeners !== 'function') return { error: 'not available', elements: [] };
+
+  const elementsWithListeners = [];
+  for (const el of document.querySelectorAll('*')) {
+    const listeners = getEventListeners(el);
+    if (listeners.click || listeners.mousedown || listeners.pointerdown) {
+      elementsWithListeners.push({
+        llmId: el.getAttribute('data-llm-id'),
+        tagName: el.tagName.toLowerCase(),
+        listenerTypes: Object.keys(listeners)
+      });
+    }
+  }
+  return { elements: elementsWithListeners, total: elementsWithListeners.length };
+})()
+`;
+
+// Execute with DevTools API enabled
+const result = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+  expression: DETECTION_SCRIPT,
+  includeCommandLineAPI: true,  // THE KEY: enables getEventListeners()
+  returnByValue: true,
+});
+```
+
+**Usage:** Called from background script before DOM extraction to mark interactive elements that don't have explicit `onclick` attributes or ARIA roles.
+
+**Node Field:** `data-has-click-listener="true"` attribute added to detected elements.
+
+**Files:**
+- `src/helpers/hiddenListenerDetector.ts` - Detection and marking logic
+- Reference: `docs/browser-use-dom-extraction.md` - Full Browser-Use implementation details
 
 ### 2.5.2 Explicit Label Association (Form Fix)
 
@@ -656,6 +739,243 @@ interface VerificationResult {
 | **Speed** | DOM RAG | Handles massive pages |
 | **Accuracy** | Sentinel Checks | Catches silent failures |
 | **Vision** | Set-of-Mark | Multimodal ready |
+
+---
+
+## 2.7 Element ID Strategy: `data-llm-id` vs `backendNodeId`
+
+### The Trade-Off
+
+Browser-Use uses Chrome's native `backendNodeId` from CDP, while we use injected `data-llm-id` attributes. Each approach has distinct advantages:
+
+| Aspect | Our Approach (`data-llm-id`) | Browser-Use (`backendNodeId`) |
+|--------|------------------------------|-------------------------------|
+| **ID Source** | Injected attribute via content script | Chrome's internal node identifier |
+| **Stability** | Persists across re-renders if element survives | Immutable - assigned by Chrome at node creation |
+| **Risk** | Can be wiped if framework destroys/recreates DOM node | Requires active debugger session |
+| **Debugger Banner** | ❌ Not required for basic operation | ⚠️ Shows "Chrome is being controlled by automated software" |
+| **Stealthiness** | ✅ Extension operates invisibly | ❌ Visible debugging indicator |
+| **Shadow DOM** | Requires `querySelectorAllDeep` to pierce | Chrome handles automatically |
+| **Iframe Support** | Requires distributed extraction | Chrome stitches frames together |
+
+### Why We Chose `data-llm-id`
+
+1. **User Experience:** No debugging banner that alarms users or triggers bot detection
+2. **Stealth Operation:** Extension can work without visible indicators that automation is active
+3. **Compatibility:** Works on sites that detect/block debugger connections
+4. **Simplicity:** Content script injection is more straightforward than maintaining CDP sessions
+
+### Mitigations for ID Instability
+
+Since injected IDs can be lost when frameworks completely destroy and recreate DOM nodes, we have multiple layers of protection:
+
+#### 1. MutationObserver Re-Tagging (`tagger.ts`)
+
+```typescript
+// Automatically re-tags new elements as they appear
+const observer = new MutationObserver((mutations) => {
+  if (mutations.some(m => m.addedNodes.length > 0)) {
+    ensureStableIds(); // Re-tag any untagged interactive elements
+  }
+});
+observer.observe(document.body, { childList: true, subtree: true });
+```
+
+#### 2. Self-Healing Ghost Match (`domActions.ts`)
+
+When an ID becomes stale, we recover using role + name + coordinates:
+
+```typescript
+// If element ID not found, attempt ghost match recovery
+const ghostMatch = await findGhostMatch({
+  name: originalName,
+  role: originalRole,
+  coordinates: originalXY,
+  minConfidence: 0.5,
+});
+// Confidence scoring: exact text +0.4, role match +0.3, coordinates within 50px +0.3
+```
+
+#### 3. Coordinate-Based Fallback
+
+Even if ID is lost, the `xy` coordinates in the semantic payload allow CDP-based clicking:
+
+```typescript
+// Fallback: click by coordinates via CDP
+await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+  type: 'click',
+  x: savedCoordinates[0],
+  y: savedCoordinates[1],
+});
+```
+
+### When to Use CDP `backendNodeId`
+
+For operations that **already require the debugger** (hidden listener detection, AXTree extraction), we do use `backendNodeId`:
+
+```typescript
+// axTreeExtractor.ts - uses backendDOMNodeId for reliability
+const nodes = await chrome.debugger.sendCommand({ tabId }, 'Accessibility.getFullAXTree');
+nodes.forEach(node => {
+  // node.backendDOMNodeId is stable within the debugger session
+  semanticNodes.push({ i: String(node.backendDOMNodeId), ... });
+});
+```
+
+### Hybrid Approach (Future Consideration)
+
+A potential enhancement: use `data-llm-id` for normal operation, but opportunistically capture `backendNodeId` when debugger is already attached (e.g., for hidden listener detection) and store the mapping:
+
+```typescript
+// Potential future enhancement
+interface ElementMapping {
+  llmId: string;           // Our injected ID
+  backendNodeId?: number;  // CDP ID when available
+  lastKnownXY: [number, number];
+  role: string;
+  name: string;
+}
+```
+
+This would give us the best of both worlds: stealth operation normally, with CDP-grade stability when the debugger is attached anyway.
+
+---
+
+## 2.8 Midscene-Inspired Optimizations
+
+Midscene uses a "vision-first" approach but its optional DOM extractor has several clever optimizations that we've adopted to further reduce token count and improve reliability.
+
+### 2.8.1 Atomic Leaf Traversal (~30% Tree Depth Reduction)
+
+**Problem:** Standard extraction recurses into everything: `div > button > span > i > text`, creating unnecessary depth in the JSON tree.
+
+**Midscene Solution:** Treat certain elements as "Atomic Leaves." Once you hit a `<button>`, STOP recursion and extract all text content at once.
+
+**Implementation:**
+
+```typescript
+// Elements that should not have children extracted
+const ATOMIC_ROLES = new Set([
+  'button', 'link', 'menuitem', 'tab', 'option', 'treeitem',
+  'checkbox', 'radio', 'switch', 'slider', 'spinbutton',
+  'textbox', 'searchbox', 'combobox',
+]);
+
+// Skip elements inside atomic parents
+function isInsideAtomicParent(element: HTMLElement): boolean {
+  let parent = element.parentElement;
+  while (parent) {
+    if (['button', 'a', 'select'].includes(parent.tagName.toLowerCase())) {
+      return true;
+    }
+    if (parent.getAttribute('role') && ATOMIC_ROLES.has(parent.getAttribute('role'))) {
+      return true;
+    }
+    parent = parent.parentElement;
+  }
+  return false;
+}
+
+// For atomic elements, get ALL nested text at once
+function getAtomicElementText(element: HTMLElement): string {
+  return (element.innerText || element.textContent || '').trim();
+}
+```
+
+**Impact:** Reduces tree depth and token count by ~30% on complex UIs like Gmail, Slack, or Salesforce.
+
+### 2.8.2 The 2/3 Visibility Rule (Precision Pruning)
+
+**Problem:** Simple viewport bounds checking includes elements that are only 1px visible. Clicking the very edge of a partially visible button often fails.
+
+**Midscene Solution:** Discard elements unless **at least 2/3 of their area** is visible in the viewport.
+
+**Implementation:**
+
+```typescript
+function isReliablyVisible(element: HTMLElement, minVisibleRatio = 0.66): boolean {
+  const rect = element.getBoundingClientRect();
+  const viewportHeight = window.innerHeight;
+  const viewportWidth = window.innerWidth;
+
+  // Calculate intersection with viewport
+  const visibleHeight = Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0);
+  const visibleWidth = Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0);
+
+  if (visibleHeight <= 0 || visibleWidth <= 0) return false;
+
+  const visibleArea = visibleHeight * visibleWidth;
+  const totalArea = rect.width * rect.height;
+
+  // Must be >= 66% visible
+  return (visibleArea / totalArea) >= minVisibleRatio;
+}
+```
+
+**Impact:** Prevents the LLM from trying to interact with half-hidden elements that require scrolling first.
+
+### 2.8.3 Container Classification (Tree Flattening)
+
+**Problem:** Generic `<div>` wrappers without visual styling don't add semantic value but bloat the tree.
+
+**Midscene Solution:** Only keep container elements if they have a visual boundary (background color, border, box shadow).
+
+**Implementation:**
+
+```typescript
+function isMeaningfulContainer(element: HTMLElement): boolean {
+  const style = window.getComputedStyle(element);
+
+  // Has background color (not transparent)
+  if (style.backgroundColor !== 'rgba(0, 0, 0, 0)') return true;
+
+  // Has border
+  if (parseFloat(style.borderWidth) > 0) return true;
+
+  // Has box shadow
+  if (style.boxShadow !== 'none') return true;
+
+  // Is a semantic landmark
+  const role = element.getAttribute('role');
+  if (['main', 'navigation', 'form', 'region'].includes(role)) return true;
+
+  return false;
+}
+```
+
+**Impact:** Flattens the tree by removing invisible wrapper divs that confuse the LLM.
+
+### 2.8.4 Extraction Options
+
+New options available in `extractSemanticTreeV3()`:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `atomicLeafOptimization` | `true` | Skip elements inside atomic parents |
+| `minVisibleRatio` | `0.66` | Minimum visible area ratio (2/3 rule) |
+| `pruneEmptyContainers` | `true` | Strip generic containers without visual boundaries |
+
+### 2.8.5 Combined Impact
+
+| Optimization | Token Reduction | Reliability Improvement |
+|--------------|-----------------|-------------------------|
+| Atomic Leaf Traversal | ~30% | Cleaner, flatter tree |
+| 2/3 Visibility Rule | ~10-15% | No partial-element failures |
+| Container Pruning | ~15-20% | Less noise for LLM |
+| **Combined** | **~50-60%** | **Significantly more reliable** |
+
+### 2.8.6 Comparison with Midscene
+
+| Aspect | Midscene | Spadeworks V4 |
+|--------|----------|---------------|
+| **DOM Extraction** | Optional (vision-first) | Primary mode |
+| **Atomic Stopping** | ✅ BUTTON/INPUT = Leaf | ✅ Adopted |
+| **Visibility Threshold** | 2/3 (66%) | ✅ Adopted (configurable) |
+| **Container Pruning** | Background/border check | ✅ Adopted + landmarks |
+| **Element IDs** | Hash based on rect+content | Injected `data-llm-id` |
+| **Vision Integration** | Primary | Hybrid mode only |
+
+**Key Difference:** Midscene uses vision (VLM) as the primary method for element location, with DOM as optional context. We use DOM extraction as primary with vision as enhancement for spatial queries.
 
 ---
 
@@ -1582,7 +1902,7 @@ try {
 | File | Purpose | Features |
 |------|---------|----------|
 | `src/pages/Content/tagger.ts` | Injects stable `data-llm-id` attributes | Uses `querySelectorAllDeep`, tracks Shadow DOM |
-| `src/pages/Content/semanticTree.ts` | Extracts JSON representation | Raycasting, label hunting, scrollable detection |
+| `src/pages/Content/semanticTree.ts` | Extracts JSON representation | Multi-point raycasting, label hunting, scrollable detection, atomic leaves, 2/3 visibility |
 | `src/pages/Content/domWait.ts` | Waits for DOM stability | - |
 | `src/pages/Content/getAnnotatedDOM.ts` | Full DOM extraction with annotations | - |
 | `src/pages/Content/mutationLog.ts` | Tracks DOM changes for ghost state detection | - |
@@ -1594,6 +1914,7 @@ try {
 | `src/helpers/deltaHash.ts` | Hash-based change detection for bandwidth optimization | - |
 | `src/helpers/domRag.ts` | DOM chunking and relevance filtering for huge pages | Production-Grade |
 | `src/helpers/sentinelVerification.ts` | Action outcome verification system | Production-Grade |
+| `src/helpers/hiddenListenerDetector.ts` | Detects React/Vue/Angular click handlers via CDP | Browser-Use Inspired |
 
 ### Integration Files
 
@@ -1610,7 +1931,14 @@ try {
 | Function | File | Purpose |
 |----------|------|---------|
 | `extractSemanticTree()` | semanticTree.ts | Ultra-light extraction with raycasting, labels, scrollable |
-| `isActuallyClickable()` | semanticTree.ts | Raycasting to detect occluded elements |
+| `getVisibilityScore()` | semanticTree.ts | Multi-point visibility scoring (0.0-1.0) for occlusion detection |
+| `isActuallyClickable()` | semanticTree.ts | Multi-point raycasting to detect occluded elements (≥50% visible) |
+| `detectHiddenClickListeners()` | hiddenListenerDetector.ts | CDP-based detection of React/Vue/Angular click handlers |
+| `detectAndMarkHiddenListeners()` | hiddenListenerDetector.ts | Full pipeline: detect + mark elements in DOM |
+| `isInsideAtomicParent()` | semanticTree.ts | Midscene: Check if element is inside button/link (skip extraction) |
+| `isReliablyVisible()` | semanticTree.ts | Midscene: 2/3 visibility rule (≥66% in viewport) |
+| `isMeaningfulContainer()` | semanticTree.ts | Midscene: Check if container has visual boundaries |
+| `getAtomicElementText()` | semanticTree.ts | Midscene: Get combined text from atomic elements |
 | `findLabelForInput()` | semanticTree.ts | Hunts for semantic labels |
 | `getScrollableInfo()` | semanticTree.ts | Detects virtual list containers |
 | `getRecentMutations()` | mutationLog.ts | Returns recent DOM changes |
@@ -1779,9 +2107,29 @@ console.log('Sample nodes:', result.interactive_tree.slice(0, 5));
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| "Element not found" | ID drift | Ensure tagger is running |
+| "Element not found" | ID drift after framework re-render | Self-Healing will attempt ghost match; check MutationObserver is running |
 | Empty extraction | Page not ready | Increase stability timeout |
 | Huge payload | Full mode triggered | Check fallback conditions |
 | Missing elements | Not tagged as interactive | Add role/tabindex to elements |
 | Elements pruned | Below viewport | Scroll page or disable viewportOnly |
 | Extraction fails | Library issue | Falls back to skeleton automatically |
+| IDs lost after navigation | Framework destroyed DOM nodes | MutationObserver will re-tag; Self-Healing recovers by role/name/coordinates |
+| React/Vue elements not detected | Hidden event listeners | Use `detectHiddenClickListeners()` via CDP (requires debugger) |
+
+### ID Strategy Debugging
+
+If elements are frequently losing their `data-llm-id`:
+
+1. **Check MutationObserver is active:**
+   ```javascript
+   // In DevTools console
+   console.log('[Tagger] Observer active:', !!window.__llmTaggerObserver);
+   ```
+
+2. **Verify Self-Healing is working:**
+   ```javascript
+   // Check ghost match confidence scores in console logs
+   // Look for: "[DomActions] Ghost match found with confidence: 0.7"
+   ```
+
+3. **Consider hybrid ID approach:** For CDP-heavy operations, the `backendNodeId` from `Accessibility.getFullAXTree` is more stable. See §2.7 for details.

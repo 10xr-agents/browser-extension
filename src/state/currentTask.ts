@@ -1276,7 +1276,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           // Reference: DOM_EXTRACTION_ARCHITECTURE.md
           if (USE_SEMANTIC_EXTRACTION) {
             try {
-              const semanticResult = await callRPC('getSemanticDomV3', [{ timeout: 2000 }, { viewportOnly: true, minified: true }], 3, tabId) as SemanticTreeResult | null;
+              console.log('[CurrentTask] Attempting semantic extraction via RPC...');
+              const semanticResult = await callRPC('getSemanticDomV3', [{ timeout: 3000 }, { viewportOnly: true, minified: true }], 5, tabId) as SemanticTreeResult | null;
 
               if (semanticResult && semanticResult.interactive_tree && semanticResult.interactive_tree.length > 0) {
                 interactiveTree = semanticResult.interactive_tree;
@@ -1295,14 +1296,19 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   tokenReduction: `${Math.round((1 - (semanticResult.meta.estimatedTokens * 4) / currentDom.length) * 100)}%`,
                 });
               } else {
-                console.warn('[CurrentTask] Semantic extraction returned empty, falling back to skeleton/hybrid');
+                console.warn('[CurrentTask] Semantic extraction returned empty result:', {
+                  hasResult: !!semanticResult,
+                  hasTree: !!(semanticResult && semanticResult.interactive_tree),
+                  treeLength: semanticResult?.interactive_tree?.length ?? 0,
+                });
+                console.warn('[CurrentTask] Falling back to skeleton/hybrid mode');
                 domMode = selectDomMode(safeInstructions, {
                   interactiveElementCount: skeletonStats.interactiveCount,
                 });
               }
             } catch (semanticError: unknown) {
               const errorMessage = semanticError instanceof Error ? semanticError.message : String(semanticError);
-              console.warn('[CurrentTask] Semantic extraction failed, falling back to skeleton/hybrid:', errorMessage);
+              console.error('[CurrentTask] Semantic extraction RPC failed:', errorMessage);
               domMode = selectDomMode(safeInstructions, {
                 interactiveElementCount: skeletonStats.interactiveCount,
               });

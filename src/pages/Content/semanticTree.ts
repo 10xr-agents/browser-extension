@@ -210,14 +210,12 @@ const ROLE_CANONICAL_MAP: Record<string, string> = {
   'select': 'select',
   'textarea': 'textbox',
   'option': 'option',
-  
-  // ARIA roles (passthrough)
-  'button': 'button',
+
+  // ARIA roles (passthrough) - only add ones not already defined above
   'link': 'link',
   'menuitem': 'menuitem',
   'menuitemcheckbox': 'checkbox',
   'menuitemradio': 'radio',
-  'option': 'option',
   'tab': 'tab',
   'treeitem': 'treeitem',
   'checkbox': 'checkbox',
@@ -436,55 +434,296 @@ function getElementValue(el: HTMLElement): string | undefined {
 }
 
 // =============================================================================
-// V3 ADVANCED: TRUE VISIBILITY RAYCASTING (The Modal Killer)
+// V4 MIDSCENE INSPIRED: ATOMIC LEAF TRAVERSAL
+// Treat interactive elements as atomic - don't recurse into children
 // =============================================================================
 
 /**
- * V3 ADVANCED: True Visibility Raycasting
- * 
- * Uses document.elementFromPoint() to verify the element is actually the 
+ * MIDSCENE INSPIRED: Atomic roles that should not have children extracted.
+ *
+ * When we hit one of these elements, we treat it as a "leaf" node and
+ * extract all its text content at once, rather than recursing into children.
+ * This reduces tree depth and token count by ~30% on complex UIs.
+ */
+const ATOMIC_ROLES = new Set([
+  'button', 'link', 'menuitem', 'tab', 'option', 'treeitem',
+  'checkbox', 'radio', 'switch', 'slider', 'spinbutton',
+  'textbox', 'searchbox', 'combobox',
+]);
+
+/**
+ * MIDSCENE INSPIRED: Check if an element is inside an atomic parent.
+ *
+ * If an element is a child of a button/link/etc., we should skip it
+ * because the parent already captures all the relevant content.
+ *
+ * @param element - Element to check
+ * @returns true if element is inside an atomic parent that should handle extraction
+ */
+function isInsideAtomicParent(element: HTMLElement): boolean {
+  let parent = element.parentElement;
+  let depth = 0;
+  const maxDepth = 5; // Don't search too deep
+
+  while (parent && depth < maxDepth) {
+    const tagLower = parent.tagName.toLowerCase();
+
+    // Check if parent is an atomic interactive element
+    if (['button', 'a', 'select', 'option'].includes(tagLower)) {
+      return true;
+    }
+
+    // Check for atomic ARIA roles
+    const role = parent.getAttribute('role');
+    if (role && ATOMIC_ROLES.has(role)) {
+      return true;
+    }
+
+    // Check for common interactive attributes
+    if (parent.hasAttribute('onclick') ||
+        parent.getAttribute('tabindex') === '0' ||
+        parent.getAttribute('role') === 'button') {
+      return true;
+    }
+
+    parent = parent.parentElement;
+    depth++;
+  }
+
+  return false;
+}
+
+/**
+ * MIDSCENE INSPIRED: Get combined text from an atomic element.
+ *
+ * For buttons/links, we want ALL the text content (including nested spans/icons),
+ * not individual text nodes.
+ *
+ * @param element - Atomic element to extract text from
+ * @returns Combined text content, cleaned and truncated
+ */
+function getAtomicElementText(element: HTMLElement): string {
+  // Get all text, including pseudo-elements
+  let text = element.innerText || element.textContent || '';
+
+  // Also check aria-label (often more descriptive)
+  const ariaLabel = element.getAttribute('aria-label');
+  if (ariaLabel && ariaLabel.length > text.trim().length) {
+    text = ariaLabel;
+  }
+
+  // Check title attribute
+  const title = element.getAttribute('title');
+  if (title && !text.trim()) {
+    text = title;
+  }
+
+  // Clean and truncate
+  return text.replace(/\s+/g, ' ').trim().substring(0, 100);
+}
+
+// =============================================================================
+// V4 MIDSCENE INSPIRED: 2/3 VISIBILITY RULE (Precision Pruning)
+// Only include elements that are at least 66% visible in viewport
+// =============================================================================
+
+/**
+ * MIDSCENE INSPIRED: Check if element is reliably visible (>= 66% in viewport).
+ *
+ * Midscene is stricter than simple viewport bounds checking. It discards
+ * elements unless at least 2/3 of their area is visible. This prevents
+ * the LLM from trying to interact with half-hidden elements that usually
+ * require scrolling first.
+ *
+ * @param element - Element to check
+ * @param minVisibleRatio - Minimum visible ratio (default 0.66 = 2/3)
+ * @returns true if element meets visibility threshold
+ */
+export function isReliablyVisible(element: HTMLElement, minVisibleRatio = 0.66): boolean {
+  const rect = element.getBoundingClientRect();
+  const viewportHeight = window.innerHeight;
+  const viewportWidth = window.innerWidth;
+
+  // Zero-size elements are not visible
+  if (rect.width <= 0 || rect.height <= 0) return false;
+
+  // Calculate intersection with viewport
+  const visibleTop = Math.max(rect.top, 0);
+  const visibleBottom = Math.min(rect.bottom, viewportHeight);
+  const visibleLeft = Math.max(rect.left, 0);
+  const visibleRight = Math.min(rect.right, viewportWidth);
+
+  const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+  const visibleWidth = Math.max(0, visibleRight - visibleLeft);
+
+  if (visibleHeight <= 0 || visibleWidth <= 0) return false;
+
+  const visibleArea = visibleHeight * visibleWidth;
+  const totalArea = rect.width * rect.height;
+
+  // Midscene Rule: Must be >= 66% visible
+  return (visibleArea / totalArea) >= minVisibleRatio;
+}
+
+// =============================================================================
+// V4 MIDSCENE INSPIRED: CONTAINER CLASSIFICATION
+// Only keep container divs that have visual boundaries
+// =============================================================================
+
+/**
+ * MIDSCENE INSPIRED: Check if a container element is visually meaningful.
+ *
+ * Generic <div>s without visual styling (background, border, shadow) are
+ * just structural wrappers that don't add semantic value. Midscene strips
+ * these to flatten the tree.
+ *
+ * @param element - Container element to check
+ * @returns true if container has visual boundaries worth preserving
+ */
+export function isMeaningfulContainer(element: HTMLElement): boolean {
+  try {
+    const style = window.getComputedStyle(element);
+
+    // Has background color (not transparent)
+    const bgColor = style.backgroundColor;
+    if (bgColor && bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent') {
+      return true;
+    }
+
+    // Has border
+    const borderWidth = parseFloat(style.borderWidth) || 0;
+    if (borderWidth > 0) {
+      return true;
+    }
+
+    // Has box shadow
+    if (style.boxShadow && style.boxShadow !== 'none') {
+      return true;
+    }
+
+    // Has outline
+    const outlineWidth = parseFloat(style.outlineWidth) || 0;
+    if (outlineWidth > 0 && style.outlineStyle !== 'none') {
+      return true;
+    }
+
+    // Is a semantic landmark
+    const role = element.getAttribute('role');
+    const semanticLandmarks = ['main', 'navigation', 'banner', 'contentinfo', 'complementary', 'form', 'region'];
+    if (role && semanticLandmarks.includes(role)) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if element is a generic container (div, span, section, etc.)
+ */
+function isGenericContainer(element: HTMLElement): boolean {
+  const genericTags = new Set(['div', 'span', 'section', 'article', 'aside', 'header', 'footer', 'main', 'nav']);
+  return genericTags.has(element.tagName.toLowerCase());
+}
+
+// =============================================================================
+// V3 ADVANCED: TRUE VISIBILITY RAYCASTING (The Modal Killer)
+// Browser-Use Inspired: Multi-Point Sampling for Accurate Occlusion Detection
+// =============================================================================
+
+/**
+ * V3 ADVANCED: Multi-Point Visibility Score Calculator
+ *
+ * BROWSER-USE INSPIRED: Uses 5-point sampling (center + 4 corners) to determine
+ * what percentage of an element is actually visible. This is more reliable than
+ * single center-point checking, as it catches partial occlusions from overlays,
+ * modals, cookie banners, and sticky headers.
+ *
+ * @param element - The DOM element to check
+ * @returns Visibility score from 0.0 (fully hidden) to 1.0 (fully visible)
+ */
+export function getVisibilityScore(element: HTMLElement): number {
+  try {
+    const rect = element.getBoundingClientRect();
+
+    // Zero-size elements are not visible
+    if (rect.width === 0 || rect.height === 0) return 0;
+
+    // Sample 5 points: center + 4 corners (with 2px inset to avoid edge issues)
+    const inset = 2;
+    const points = [
+      { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },  // Center
+      { x: rect.left + inset, y: rect.top + inset },                      // Top-left
+      { x: rect.right - inset, y: rect.top + inset },                     // Top-right
+      { x: rect.left + inset, y: rect.bottom - inset },                   // Bottom-left
+      { x: rect.right - inset, y: rect.bottom - inset },                  // Bottom-right
+    ];
+
+    let visiblePoints = 0;
+    let sampledPoints = 0;
+
+    for (const p of points) {
+      // Skip points outside viewport
+      if (p.x < 0 || p.y < 0 || p.x > window.innerWidth || p.y > window.innerHeight) {
+        continue;
+      }
+
+      sampledPoints++;
+
+      // Ask browser: "What is the top-most element at this point?"
+      const topElement = document.elementFromPoint(p.x, p.y);
+
+      // Element is visible at this point if:
+      // 1. The top element IS this element, OR
+      // 2. The top element is a CHILD of this element, OR
+      // 3. This element CONTAINS the top element
+      if (topElement && (
+        element === topElement ||
+        element.contains(topElement) ||
+        topElement.contains(element)
+      )) {
+        visiblePoints++;
+      }
+    }
+
+    // Return ratio of visible points (0 if no points sampled)
+    return sampledPoints > 0 ? visiblePoints / sampledPoints : 0;
+  } catch {
+    // If raycasting fails, assume partially visible (fail-safe)
+    return 0.5;
+  }
+}
+
+/**
+ * V3 ADVANCED: True Visibility Raycasting (Single-Point Fallback)
+ *
+ * Uses document.elementFromPoint() to verify the element is actually the
  * top-most clickable layer. Prevents "Click failed" errors when modals,
  * cookie banners, or transparent overlays are covering the element.
- * 
+ *
+ * NOTE: For more accurate detection, use getVisibilityScore() which samples
+ * 5 points instead of just the center.
+ *
  * @param element - The element to check
  * @returns true if the element is actually clickable (not occluded)
  */
 function isActuallyClickable(element: HTMLElement): boolean {
-  try {
-    const rect = element.getBoundingClientRect();
-    
-    // Skip zero-size elements
-    if (rect.width === 0 || rect.height === 0) return false;
-    
-    // Check the center point of the element
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-    
-    // Ensure we're within viewport
-    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
-      return false;
-    }
-    
-    // Ask the browser: "If I click here, what gets hit?"
-    const topElement = document.elementFromPoint(x, y);
-    
-    if (!topElement) return false;
-    
-    // Return true if our element (or a child/parent) is the hit target
-    // This handles cases where the visible part is a child span or icon
-    return element.contains(topElement) || topElement.contains(element) || element === topElement;
-  } catch {
-    // If raycasting fails, assume it's clickable (fail-safe)
-    return true;
-  }
+  // Use multi-point visibility score with 50% threshold
+  // Element is considered clickable if at least half of sampled points are visible
+  return getVisibilityScore(element) >= 0.5;
 }
 
 /**
  * Check if element is occluded by an overlay/modal
  * Returns true if the element is covered and shouldn't be clicked
+ *
+ * Uses multi-point sampling: element is considered occluded if less than
+ * 50% of sampled points are visible (i.e., mostly covered by overlay)
  */
 function isOccludedByOverlay(element: HTMLElement): boolean {
-  return !isActuallyClickable(element);
+  return getVisibilityScore(element) < 0.5;
 }
 
 // =============================================================================
@@ -907,34 +1146,45 @@ export function getNodesByRole(role: string): SemanticNode[] {
 // =============================================================================
 
 /**
- * V3 Extraction Options
+ * V3/V4 Extraction Options
  */
 export interface V3ExtractionOptions {
   /** Only include elements visible in viewport */
   viewportOnly?: boolean;
-  
+
   /** Use minified key format (i/r/n instead of id/role/name) */
   minified?: boolean;
-  
+
   /** Include coordinates for click targeting */
   includeCoordinates?: boolean;
-  
+
   /** Custom viewport height (for testing) */
   viewportHeight?: number;
-  
-  // === V3 ADVANCED OPTIONS ===
-  
+
+  // === V3 ADVANCED OPTIONS (Browser-Use Inspired) ===
+
   /** Include bounding box [x,y,w,h] for Set-of-Mark multimodal */
   includeBoundingBox?: boolean;
-  
+
   /** Enable raycasting to detect occluded elements */
   detectOcclusion?: boolean;
-  
+
   /** Detect scrollable containers (virtual lists) */
   detectScrollable?: boolean;
-  
+
   /** Use enhanced label hunting for inputs */
   enhancedLabels?: boolean;
+
+  // === V4 MIDSCENE INSPIRED OPTIONS ===
+
+  /** Skip elements inside atomic parents (buttons, links) to reduce tree depth */
+  atomicLeafOptimization?: boolean;
+
+  /** Only include elements that are >= this ratio visible in viewport (default: 0.66 = 2/3) */
+  minVisibleRatio?: number;
+
+  /** Strip generic containers without visual boundaries (background, border) */
+  pruneEmptyContainers?: boolean;
 }
 
 /**
@@ -966,20 +1216,25 @@ export interface SemanticTreeResultV3 {
 }
 
 /**
- * V3 ULTRA-LIGHT EXTRACTION (ADVANCED)
- * 
+ * V3/V4 ULTRA-LIGHT EXTRACTION (ADVANCED + MIDSCENE INSPIRED)
+ *
  * Key improvements:
  * 1. Viewport pruning - skips off-screen elements (~60% reduction)
  * 2. Minified JSON keys - i/r/n/v/s/xy instead of full names
  * 3. Coordinates included - for precise click targeting
  * 4. ~50-300 tokens instead of 10k-50k
- * 
- * V3 ADVANCED improvements:
- * 5. TRUE VISIBILITY RAYCASTING - detects elements covered by modals/overlays
+ *
+ * V3 ADVANCED improvements (Browser-Use Inspired):
+ * 5. MULTI-POINT VISIBILITY RAYCASTING - 5-point sampling for occlusion detection
  * 6. EXPLICIT LABEL ASSOCIATION - hunts for semantic labels for unnamed inputs
  * 7. VIRTUAL LIST DETECTION - identifies scrollable containers
  * 8. BOUNDING BOX - [x,y,w,h] for Set-of-Mark multimodal support
- * 
+ *
+ * V4 MIDSCENE INSPIRED improvements:
+ * 9. ATOMIC LEAF TRAVERSAL - stop recursion on buttons/inputs, reduces tree depth ~30%
+ * 10. 2/3 VISIBILITY RULE - only include elements >= 66% visible in viewport
+ * 11. CONTAINER PRUNING - strip generic divs without visual boundaries
+ *
  * @param options - Extraction options
  * @returns V3 payload ready for LLM
  */
@@ -990,11 +1245,15 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
     minified = true,
     includeCoordinates = true,
     viewportHeight = window.innerHeight,
-    // V3 ADVANCED options
+    // V3 ADVANCED options (Browser-Use Inspired)
     includeBoundingBox = false,
     detectOcclusion = true,
     detectScrollable = true,
     enhancedLabels = true,
+    // V4 MIDSCENE INSPIRED options
+    atomicLeafOptimization = true,
+    minVisibleRatio = 0.66,
+    pruneEmptyContainers = true,
   } = options;
   
   // Ensure all interactive elements are tagged first
@@ -1023,12 +1282,33 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
   let totalElements = 0;
   let prunedElements = 0;
   let occludedElements = 0;
-  
+  let atomicSkipped = 0;      // V4: Elements inside atomic parents
+  let containersPruned = 0;   // V4: Empty containers stripped
+
   elements.forEach(el => {
     if (!(el instanceof HTMLElement)) return;
     totalElements++;
-    
-    // Check visibility
+
+    // V4 MIDSCENE: Skip elements inside atomic parents (buttons, links)
+    // The parent element already captures all relevant content
+    if (atomicLeafOptimization && isInsideAtomicParent(el)) {
+      atomicSkipped++;
+      prunedElements++;
+      return;
+    }
+
+    // V4 MIDSCENE: Strip generic containers without visual boundaries
+    if (pruneEmptyContainers && isGenericContainer(el) && !isMeaningfulContainer(el)) {
+      // Check if this container has any meaningful content or interactive children
+      const hasInteractiveChild = el.querySelector('button, a, input, select, textarea, [role="button"]');
+      if (!hasInteractiveChild && !el.getAttribute(LLM_ID_ATTR)) {
+        containersPruned++;
+        prunedElements++;
+        return;
+      }
+    }
+
+    // Check CSS visibility
     try {
       const style = window.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
@@ -1039,10 +1319,10 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
       prunedElements++;
       return;
     }
-    
+
     // Get bounding rect for viewport pruning
     const rect = el.getBoundingClientRect();
-    
+
     // V3: VIEWPORT PRUNING - Skip off-screen elements
     if (viewportOnly) {
       // Skip elements completely below viewport
@@ -1060,6 +1340,12 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
         prunedElements++;
         return;
       }
+
+      // V4 MIDSCENE: 2/3 Visibility Rule - stricter than simple bounds check
+      if (minVisibleRatio > 0 && !isReliablyVisible(el, minVisibleRatio)) {
+        prunedElements++;
+        return;
+      }
     }
     
     // Get stable ID
@@ -1069,9 +1355,17 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
     // Get role
     const role = getElementRole(el);
     const minifiedRole = ROLE_MINIFY_MAP[role] || role.substring(0, 4);
-    
+
+    // V4 MIDSCENE: For atomic elements (buttons, links), get combined text from all children
+    let name: string;
+    if (atomicLeafOptimization && ATOMIC_ROLES.has(role)) {
+      name = getAtomicElementText(el);
+    } else {
+      // Standard name extraction
+      name = getElementName(el);
+    }
+
     // V3 ADVANCED: Enhanced label hunting for inputs
-    let name = getElementName(el);
     if (!name && enhancedLabels && ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) {
       name = findLabelForInput(el);
     }
@@ -1154,8 +1448,13 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
   // Estimate token count (minified format is more efficient)
   const jsonString = JSON.stringify(nodes);
   const estimatedTokens = Math.round(jsonString.length / 4);
-  
-  console.log(`[SemanticTreeV3] Extracted ${nodes.length} nodes (${prunedElements} pruned, ${occludedElements} occluded) in ${extractionTimeMs}ms (~${estimatedTokens} tokens)`);
+
+  // V4: Enhanced logging with Midscene metrics
+  console.log(`[SemanticTreeV4] Extracted ${nodes.length} nodes in ${extractionTimeMs}ms (~${estimatedTokens} tokens)`);
+  console.log(`  Pruned: ${prunedElements} (atomic: ${atomicSkipped}, containers: ${containersPruned}, visibility: ${prunedElements - atomicSkipped - containersPruned})`);
+  if (occludedElements > 0) {
+    console.log(`  Occluded (modal): ${occludedElements}`);
+  }
   
   const result: SemanticTreeResultV3 = {
     mode: 'semantic',

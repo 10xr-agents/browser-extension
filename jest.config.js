@@ -5,4 +5,10 @@ module.exports = {
   transform: {
     '\\.[jt]sx?$': 'babel-jest',
   },
+  // Transform ESM modules that Jest can't handle natively
+  transformIgnorePatterns: [
+    '/node_modules/(?!(query-selector-shadow-dom)/)',
+  ],
+  // Setup files for test environment
+  setupFilesAfterEnv: ['<rootDir>/src/test/setupTests.ts'],
 };

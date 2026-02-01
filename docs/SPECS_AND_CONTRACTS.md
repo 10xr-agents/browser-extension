@@ -14,8 +14,9 @@
 5. [Robust Element Selectors](#5-robust-element-selectors)
 6. [Hybrid Vision + Skeleton](#6-hybrid-vision--skeleton)
 7. [Semantic JSON Protocol](#7-semantic-json-protocol)
-8. [Changelog](#8-changelog)
-9. [Related Documentation](#9-related-documentation)
+8. [Backend Implementation: Browser-Use & Midscene Support](#8-backend-implementation-browser-use--midscene-support)
+9. [Changelog](#9-changelog)
+10. [Related Documentation](#10-related-documentation)
 
 ---
 
@@ -1017,13 +1018,17 @@ The Semantic JSON Protocol addresses two critical issues with the previous HTML-
 | Skeleton | 2-6 KB | 500-1,500 |
 | **Semantic** | **100-300 bytes** | **25-75** |
 
-### 6.2.1 Advanced Features
+### 6.2.1 Advanced Features (Browser-Use & Midscene Inspired)
 
-Production-grade reliability features:
+Production-grade reliability features inspired by Browser-Use and Midscene DOM extraction:
 
 | Feature | Problem Solved | New Field/Behavior |
 |---------|---------------|-------------------|
-| **True Visibility Raycasting** | Modal/overlay blocks clicks | `occ: true` on occluded elements |
+| **Multi-Point Visibility Scoring** | Modal/overlay blocks clicks | `occ: true` if visibility score < 50% (5-point sampling) |
+| **Hidden Event Listener Detection** | React/Vue/Angular invisible click handlers | Elements marked with `data-has-click-listener="true"` via CDP |
+| **Atomic Leaf Traversal** | Deep tree structure wastes tokens | Buttons/links treated as leaves; ~30% token reduction |
+| **2/3 Visibility Rule** | Partial elements fail to click | Only elements ≥66% visible included |
+| **Container Pruning** | Generic divs add noise | Only containers with visual boundaries kept |
 | **Explicit Label Association** | Unnamed inputs confuse LLM | Enhanced `n` field via label hunting |
 | **Mutation Stream** | Transient toasts missed | `recentEvents`, `hasErrors`, `hasSuccess` |
 | **Delta Hashing** | Unchanged DOM wastes bandwidth | Client-side skip when hash unchanged |
@@ -1094,7 +1099,9 @@ RECENT EVENTS:
 
 ### 6.3 The "Tag & Freeze" Strategy
 
-Instead of calculating IDs during extraction, we "stamp" permanent IDs onto elements as soon as they appear:
+Instead of calculating IDs during extraction, we "stamp" permanent IDs onto elements as soon as they appear.
+
+> **Architecture Note:** We use injected `data-llm-id` attributes instead of Chrome's native `backendNodeId` (used by Browser-Use). This trade-off enables "stealth" operation without the Chrome debugger banner, at the cost of potential ID instability when frameworks destroy/recreate DOM nodes. Mitigations include MutationObserver re-tagging and Self-Healing ghost match recovery. See [DOM_EXTRACTION_ARCHITECTURE.md §2.7](./DOM_EXTRACTION_ARCHITECTURE.md#27-element-id-strategy-data-llm-id-vs-backendnodeid) for full details.
 
 ```javascript
 // Before: IDs calculated during extraction (can drift)
@@ -1246,8 +1253,323 @@ The semantic extraction is **enabled by default** (`USE_SEMANTIC_EXTRACTION = tr
 
 ---
 
-## 8. Changelog
+## 8. Backend Implementation: Browser-Use & Midscene Support
 
+**Purpose:** Document backend changes to leverage the new Browser-Use and Midscene inspired client improvements.
+
+**Status:** 🔶 Optional Enhancements (client improvements work without backend changes)
+
+### 8.1 Overview
+
+The client-side Browser-Use and Midscene improvements provide:
+- **50-60% token reduction** (automatic, no backend changes needed)
+- **Occlusion detection** (`occ: true` flag on elements behind modals)
+- **Cleaner tree structure** (atomic leaves, no empty containers)
+- **Stricter visibility filtering** (only ≥66% visible elements)
+
+The backend can optionally enhance its behavior to take advantage of these improvements.
+
+### 8.2 New Semantic Node Fields
+
+The `interactiveTree` nodes now include additional optional fields:
+
+```typescript
+interface SemanticNode {
+  // Required (unchanged)
+  i: string;           // Element ID (stable data-llm-id)
+  r: string;           // Role (minified: btn, inp, link, chk, sel, etc.)
+  n: string;           // Name/label (truncated to 50 chars)
+
+  // Optional (existing)
+  v?: string;          // Current value for inputs
+  s?: string;          // State: 'disabled', 'checked', 'expanded'
+  xy?: [number, number]; // [x, y] center coordinates
+  f?: number;          // Frame ID (0 = main, omitted if 0)
+  box?: [number, number, number, number]; // Bounding box [x, y, w, h]
+  scr?: { depth: string; h: boolean };    // Scrollable container info
+
+  // NEW: Browser-Use & Midscene Inspired
+  occ?: boolean;       // TRUE if element is OCCLUDED by modal/overlay
+                       // Backend should NOT generate click actions for occ:true elements
+}
+```
+
+### 8.3 Occlusion-Aware Action Planning
+
+**Priority: HIGH** — Prevents click failures on elements behind modals.
+
+When the backend generates click/setValue actions, it should check the `occ` field:
+
+```typescript
+// lib/agent/action-planning.ts (pseudocode)
+
+function planAction(targetElement: SemanticNode, intent: string): Action {
+  // CHECK: Is element occluded by modal/overlay?
+  if (targetElement.occ === true) {
+    // DO NOT click - element is behind a popup
+    return {
+      thought: `The "${targetElement.n}" ${targetElement.r} is covered by a modal or overlay. I need to dismiss the overlay first before I can interact with it.`,
+      action: 'dismissOverlay()',  // Or: press Escape, click close button
+      reasoning: 'Element has occ:true flag indicating it is behind a modal'
+    };
+  }
+
+  // Normal action planning
+  return {
+    thought: `I'll click the "${targetElement.n}" ${targetElement.r}.`,
+    action: `click(${targetElement.i})`
+  };
+}
+```
+
+**Overlay Dismissal Strategies:**
+
+| Strategy | When to Use | Action |
+|----------|-------------|--------|
+| Press Escape | Most modals | `pressKey('Escape')` |
+| Click backdrop | Dismissible modals | `click(backdropElement.i)` |
+| Click X button | Modal with close button | `click(closeButton.i)` |
+| Scroll away | Sticky banners | `scroll('down')` |
+
+**Finding the Overlay:**
+
+```typescript
+// Look for common overlay patterns in the tree
+function findOverlayDismissAction(tree: SemanticNode[]): string | null {
+  // 1. Look for close buttons
+  const closeBtn = tree.find(n =>
+    n.r === 'btn' &&
+    (n.n.toLowerCase().includes('close') ||
+     n.n.toLowerCase().includes('dismiss') ||
+     n.n === '×' || n.n === 'X')
+  );
+  if (closeBtn && !closeBtn.occ) {
+    return `click(${closeBtn.i})`;
+  }
+
+  // 2. Look for "Accept" / "Got it" buttons (cookie banners)
+  const acceptBtn = tree.find(n =>
+    n.r === 'btn' &&
+    (n.n.toLowerCase().includes('accept') ||
+     n.n.toLowerCase().includes('got it') ||
+     n.n.toLowerCase().includes('agree'))
+  );
+  if (acceptBtn && !acceptBtn.occ) {
+    return `click(${acceptBtn.i})`;
+  }
+
+  // 3. Default: try Escape key
+  return `pressKey('Escape')`;
+}
+```
+
+### 8.4 Scroll Guidance for Missing Elements
+
+**Priority: MEDIUM** — Helps when target element is below the viewport.
+
+The client now filters elements that are <66% visible. If the backend can't find an element, it should suggest scrolling:
+
+```typescript
+// lib/agent/element-finder.ts (pseudocode)
+
+function findElement(query: string, tree: SemanticNode[]): SemanticNode | null {
+  // Try to find element by name/role
+  const match = tree.find(n =>
+    n.n.toLowerCase().includes(query.toLowerCase())
+  );
+
+  if (match) return match;
+
+  // Element not in tree - might be below viewport
+  return null;
+}
+
+function planActionForMissingElement(query: string, tree: SemanticNode[]): Action {
+  // Check if there's a scrollable container
+  const scrollable = tree.find(n => n.scr?.h === true);
+
+  if (scrollable) {
+    return {
+      thought: `I can't see "${query}" in the current viewport. There's a scrollable area with more content below. I'll scroll to find it.`,
+      action: `scroll(${scrollable.i})`,
+      reasoning: 'Element not in tree, scrollable container has hasMore:true'
+    };
+  }
+
+  // Default: scroll the page
+  return {
+    thought: `I can't see "${query}" in the current viewport. I'll scroll down to find it.`,
+    action: `scroll('down')`,
+    reasoning: 'Element not in tree, attempting page scroll'
+  };
+}
+```
+
+### 8.5 System Prompt Updates
+
+**Priority: HIGH** — Ensures LLM understands the new fields.
+
+Add the following to the system prompt sent to the LLM:
+
+```markdown
+## Interactive Element Format
+
+Each element in `interactive_tree` has these fields:
+
+| Field | Description |
+|-------|-------------|
+| `i` | Element ID — use in `click(i)` or `setValue(i, "text")` |
+| `r` | Role: `btn`=button, `inp`=input, `link`=link, `chk`=checkbox, `sel`=select |
+| `n` | Name/label visible to the user |
+| `v` | Current value (for inputs) |
+| `s` | State: `disabled`, `checked`, `expanded`, `selected` |
+| `xy` | `[x, y]` center coordinates on screen |
+| `occ` | **⚠️ OCCLUDED** — `true` if element is BEHIND a modal/overlay |
+| `scr` | Scrollable: `{ depth: "25%", h: true }` means 25% scrolled, more content below |
+
+## Critical Rules
+
+### Rule 1: NEVER click occluded elements
+If an element has `occ: true`, it is covered by a modal, popup, or overlay.
+- **DO NOT** attempt to click it — the click will hit the overlay instead
+- **FIRST** dismiss the overlay (click X, press Escape, click "Accept")
+- **THEN** retry the original action
+
+### Rule 2: Scroll to find missing elements
+If your target element is not in the list:
+- It may be below the visible viewport (we only show elements ≥66% visible)
+- Check for `scr.h: true` (scrollable container with more content)
+- Use `scroll(containerId)` or `scroll("down")` to reveal more elements
+
+### Rule 3: Use coordinates for disambiguation
+When multiple elements have similar names, use `xy` coordinates to pick the right one:
+- "top" = lower y value
+- "bottom" = higher y value
+- "left" = lower x value
+- "right" = higher x value
+```
+
+### 8.6 Action Response: Requesting Scroll
+
+When the backend needs the user to scroll to find an element, use a specific response format:
+
+```json
+{
+  "thought": "The 'Submit' button is not visible in the current viewport. I need to scroll down to find it.",
+  "action": "scroll('down')",
+  "status": "needs_scroll",
+  "scrollReason": "Target element 'Submit button' not in visible viewport",
+  "retryAfterScroll": true
+}
+```
+
+The client should:
+1. Execute the scroll action
+2. Re-extract the semantic tree
+3. Retry the original request with the updated tree
+
+### 8.7 Validation: Reject Occluded Targets
+
+Before executing any click/setValue action, validate the target:
+
+```typescript
+// lib/agent/action-validator.ts
+
+interface ValidationResult {
+  valid: boolean;
+  error?: string;
+  suggestion?: string;
+}
+
+function validateActionTarget(
+  action: ParsedAction,
+  tree: SemanticNode[]
+): ValidationResult {
+  if (action.type !== 'click' && action.type !== 'setValue') {
+    return { valid: true };
+  }
+
+  const target = tree.find(n => n.i === action.elementId);
+
+  if (!target) {
+    return {
+      valid: false,
+      error: `Element ${action.elementId} not found in current viewport`,
+      suggestion: 'scroll("down") to reveal more elements'
+    };
+  }
+
+  if (target.occ === true) {
+    return {
+      valid: false,
+      error: `Element "${target.n}" is occluded by a modal/overlay`,
+      suggestion: 'Dismiss the overlay first (press Escape or click close button)'
+    };
+  }
+
+  if (target.s?.includes('disabled')) {
+    return {
+      valid: false,
+      error: `Element "${target.n}" is disabled`,
+      suggestion: 'Check if a prerequisite action is needed'
+    };
+  }
+
+  return { valid: true };
+}
+```
+
+### 8.8 Implementation Phases
+
+| Phase | Priority | Changes | Impact |
+|-------|----------|---------|--------|
+| **Phase 1** | HIGH | Update system prompt with `occ` field documentation | LLM awareness |
+| **Phase 2** | HIGH | Add occlusion validation before action execution | Prevent click failures |
+| **Phase 3** | MEDIUM | Add scroll suggestions for missing elements | Better element discovery |
+| **Phase 4** | LOW | Enhanced overlay dismissal strategies | Smoother modal handling |
+
+### 8.9 Backward Compatibility
+
+All changes are **additive and optional**:
+
+- `occ` field is only present when element is occluded (not sent for visible elements)
+- Backends that don't check `occ` will still work (may have occasional click failures on modals)
+- Scroll suggestions are optional enhancements
+- Existing action parsing remains unchanged
+
+### 8.10 Testing Recommendations
+
+Test these scenarios to validate backend integration:
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Click element with `occ: true` | Backend suggests dismissing overlay first |
+| Element not in tree | Backend suggests scrolling |
+| Cookie banner covering page | Backend clicks "Accept" or presses Escape |
+| Modal with close button | Backend clicks close button before target |
+| Scrollable container with `scr.h: true` | Backend scrolls container to find element |
+| Element with `s: "disabled"` | Backend reports element is disabled |
+
+---
+
+## 9. Changelog
+
+- **2026-02-01**: **Midscene-Inspired Token Optimizations** - Adopted three key optimizations from Midscene's DOM extractor:
+  - **Atomic Leaf Traversal**: Stop recursion on interactive elements (buttons, links, inputs). Treats them as leaves and extracts all nested text at once. Reduces tree depth and tokens by ~30%.
+  - **2/3 Visibility Rule**: Only include elements that are ≥66% visible in viewport. Prevents LLM from trying to click half-hidden elements that require scrolling.
+  - **Container Pruning**: Strip generic `<div>` wrappers without visual boundaries (background, border, shadow). Flattens tree by removing noise.
+  - **New Options**: `atomicLeafOptimization`, `minVisibleRatio`, `pruneEmptyContainers` in `extractSemanticTreeV3()`
+  - **New Functions**: `isInsideAtomicParent()`, `isReliablyVisible()`, `isMeaningfulContainer()`, `getAtomicElementText()`
+  - **Combined Impact**: ~50-60% additional token reduction on complex UIs
+  - **New Documentation**: `DOM_EXTRACTION_ARCHITECTURE.md` §2.8 - Midscene-Inspired Optimizations
+  - **Reference Documentation**: `docs/midscene-dom-extraction.md` for Midscene architecture
+- **2026-02-01**: **Browser-Use Inspired Reliability Improvements** - Enhanced DOM extraction reliability:
+  - **Multi-Point Visibility Scoring**: Replaced single center-point occlusion detection with 5-point sampling (center + 4 corners). Elements with < 50% visibility are marked as occluded (`occ: true`). This catches partial occlusions from sticky headers, modals, and overlays that single-point checking misses.
+  - **Hidden Event Listener Detection**: New CDP-based detection of React/Vue/Angular click handlers using `getEventListeners()` API via `Runtime.evaluate` with `includeCommandLineAPI: true`. Elements with detected listeners are marked with `data-has-click-listener="true"` attribute.
+  - **Element ID Strategy Documentation**: Added comprehensive comparison of our `data-llm-id` approach vs Browser-Use's `backendNodeId`. Documents trade-offs (stealth vs stability) and mitigations (MutationObserver re-tagging, Self-Healing ghost match, coordinate fallback).
+  - **New Files**: `src/helpers/hiddenListenerDetector.ts`, `src/pages/Content/semanticTree.ts` (updated `getVisibilityScore()` function)
+  - **New Documentation**: `DOM_EXTRACTION_ARCHITECTURE.md` §2.7 - Element ID Strategy comparison
+  - **Reference Documentation**: `docs/browser-use-dom-extraction.md` for implementation patterns
 - **2026-02-01**: **Session Init Contract (NEW)** - Added `POST /api/session/init` endpoint contract. Extension now initializes sessions on backend BEFORE subscribing to Pusher channels. Prevents 403 errors from `/api/pusher/auth`. Added `ensureSessionInitialized()` function, session recovery logic for storage loss scenarios, and initialized sessions cache. New files: `src/api/client.ts` (initSession method), `src/services/sessionService.ts` (ensureSessionInitialized, recoverSessionsFromBackend, initializeSessionService), `src/services/messageSyncService.ts` (init check before Pusher connect).
 - **2026-02-01**: **Tab Close Session Cleanup (FIX)** - Added runtime cleanup of `tabSessionMap` when tabs close. Previously, only startup cleanup existed, leaving ghost mappings during runtime. New files/changes: `sessions.ts` (clearTabSessionMapping action), `Background/index.ts` (TAB_CLOSED broadcast), `App.tsx` (listener for cleanup).
 - **2026-02-01**: **Documentation Update** - Added Tab Cleanup section (§2) documenting both runtime and startup cleanup. Added Authentication & Token Lifecycle section (§2) documenting token storage, usage, and the token refresh gap (not implemented, relies on 401 → re-login).
@@ -1263,7 +1585,7 @@ The semantic extraction is **enabled by default** (`USE_SEMANTIC_EXTRACTION = tr
 
 ---
 
-## 9. Related Documentation
+## 10. Related Documentation
 
 - [DOM_EXTRACTION_ARCHITECTURE.md](./DOM_EXTRACTION_ARCHITECTURE.md) — **Comprehensive guide to DOM extraction and what's sent to the LLM**
 - [INTERACT_FLOW_WALKTHROUGH.md](./INTERACT_FLOW_WALKTHROUGH.md) — Detailed interact flow

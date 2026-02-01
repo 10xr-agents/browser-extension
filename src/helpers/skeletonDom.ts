@@ -116,10 +116,13 @@ function extractSkeletonNode(element: Element): SkeletonElement | null {
   
   // For interactive elements, extract essential attributes
   if (isInteractive) {
-    // Get element ID (from data-id or id)
+    // Get element ID from multiple sources
+    // Priority: data-llm-id (tagger) > data-element-id (fallback) > data-id (legacy) > native id
+    const llmId = element.getAttribute('data-llm-id');
+    const elementDataId = element.getAttribute('data-element-id');
     const dataId = element.getAttribute('data-id');
     const elementId = element.id;
-    skeleton.id = dataId || elementId || undefined;
+    skeleton.id = llmId || elementDataId || dataId || elementId || undefined;
     
     // Get backend node ID if available
     const backendNodeId = element.getAttribute('data-backend-node-id');
