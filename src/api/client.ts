@@ -164,13 +164,12 @@ interface AgentInteractRequest {
   
   /**
    * Processing mode hint for server.
+   * - "semantic": Use minified semantic JSON (primary, ~95% token reduction)
    * - "skeleton": Use skeletonDom only (fast, low tokens)
    * - "full": Use full dom only (backward compatible)
    * - "hybrid": Use screenshot + skeletonDom (best for visual tasks)
-   * - "semantic_v3": Use minified semantic JSON (primary)
-   * - "semantic": Use semanticNodes JSON (v2 fallback)
    */
-  domMode?: 'semantic_v3' | 'semantic' | 'skeleton' | 'hybrid' | 'full';
+  domMode?: 'semantic' | 'skeleton' | 'hybrid' | 'full';
   
   /**
    * Skeleton DOM containing only interactive elements.
@@ -185,33 +184,8 @@ interface AgentInteractRequest {
    */
   screenshotHash?: string;
   
-  // === SEMANTIC JSON PROTOCOL FIELDS (new, recommended) ===
-  // Reference: SEMANTIC_JSON_PROTOCOL.md
-  
-  /**
-   * Semantic nodes array - lightweight JSON representation of interactive elements.
-   * This is the recommended format for DOM data (~95% token reduction).
-   * 
-   * Each node has:
-   * - id: Stable ID that persists across re-renders (data-llm-id)
-   * - role: Semantic role (button, link, input, etc.)
-   * - name: Human-readable name/label
-   * - value?: Current value for inputs
-   * - state?: Element state (checked, disabled, etc.)
-   */
-  semanticNodes?: Array<{
-    id: string;
-    role: string;
-    name: string;
-    value?: string;
-    state?: string;
-    type?: string;
-    placeholder?: string;
-    href?: string;
-  }>;
-
-  // === SEMANTIC JSON PROTOCOL (V3) ===
-  // Reference: docs/DOM_EXTRACTION_ARCHITECTURE.md (V3)
+  // === SEMANTIC JSON PROTOCOL ===
+  // Reference: docs/DOM_EXTRACTION_ARCHITECTURE.md
   interactiveTree?: Array<{
     i: string;
     r: string;
@@ -410,10 +384,10 @@ interface NextActionResponse {
    * NEW CONTRACT (development): backend-driven payload negotiation.
    * Backend can request additional artifacts for the *next* call.
    *
-   * Client should always send semantic_v3 first; only send requested artifacts
+   * Client should always send semantic first; only send requested artifacts
    * on retry.
    */
-  requestedDomMode?: 'semantic_v3' | 'semantic' | 'skeleton' | 'hybrid' | 'full';
+  requestedDomMode?: 'semantic' | 'skeleton' | 'hybrid' | 'full';
   needsScreenshot?: boolean;
   needsSkeletonDom?: boolean;
 }
@@ -908,21 +882,10 @@ class ApiClient {
     hybridParams?: {
       screenshot?: string | null;
       skeletonDom?: string;
-      domMode?: 'semantic_v3' | 'semantic' | 'skeleton' | 'full' | 'hybrid';
+      domMode?: 'semantic' | 'skeleton' | 'full' | 'hybrid';
       screenshotHash?: string;
-      // Semantic JSON Protocol fields (new, recommended)
-      semanticNodes?: Array<{
-        id: string;
-        role: string;
-        name: string;
-        value?: string;
-        state?: string;
-        type?: string;
-        placeholder?: string;
-        href?: string;
-      }>;
       pageTitle?: string;
-      // V3 semantic fields
+      // Semantic fields
       interactiveTree?: AgentInteractRequest['interactiveTree'];
       viewport?: AgentInteractRequest['viewport'];
       scrollPosition?: string;
@@ -946,16 +909,12 @@ class ApiClient {
     const domMode = hybridParams?.domMode || 'full';
     
     // Log mode-specific info
-    if (domMode === 'semantic_v3' && hybridParams?.interactiveTree) {
+    if (domMode === 'semantic' && hybridParams?.interactiveTree) {
       console.log(
-        `[ApiClient] Using SEMANTIC_V3 mode - ${hybridParams.interactiveTree.length} nodes (~${Math.round(
+        `[ApiClient] Using SEMANTIC mode - ${hybridParams.interactiveTree.length} nodes (~${Math.round(
           JSON.stringify(hybridParams.interactiveTree).length / 4
         )} tokens)`
       );
-    } else if (domMode === 'semantic' && hybridParams?.semanticNodes) {
-      // SEMANTIC MODE: JSON-based representation (~95% token reduction)
-      // The semanticNodes array contains stable IDs that don't drift
-      console.log(`[ApiClient] Using SEMANTIC mode - ${hybridParams.semanticNodes.length} nodes (~${Math.round(JSON.stringify(hybridParams.semanticNodes).length / 4)} tokens)`);
     } else if ((domMode === 'skeleton' || domMode === 'hybrid') && hybridParams?.skeletonDom) {
       // Skeleton DOM is typically 500-2000 chars, no truncation needed
       console.log(`[ApiClient] Using ${domMode} mode - skeleton: ${hybridParams.skeletonDom.length} chars, full: ${(dom || '').length} chars`);
@@ -1000,7 +959,6 @@ class ApiClient {
       domMode: hybridParams?.domMode,
       screenshotHash: hybridParams?.screenshotHash,
       // Semantic JSON Protocol fields
-      semanticNodes: hybridParams?.semanticNodes,
       interactiveTree: hybridParams?.interactiveTree,
       viewport: hybridParams?.viewport,
       scrollPosition: hybridParams?.scrollPosition,
@@ -1191,9 +1149,48 @@ class ApiClient {
   }
 
   /**
+   * Initialize a session on the backend
+   * MUST be called before subscribing to Pusher channels for a new session.
+   * This ensures the session row exists for /api/pusher/auth.
+   *
+   * @param sessionId - Client-generated UUID for the session
+   * @param metadata - Optional metadata (url, domain, initialQuery)
+   * @returns { success: true, data: { sessionId, created: boolean } }
+   *          created=true if new session was created, false if it already existed
+   *
+   * Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md (Session Init Contract)
+   */
+  async initSession(
+    sessionId: string,
+    metadata?: {
+      url?: string;
+      domain?: string;
+      initialQuery?: string;
+      tabId?: number;
+    }
+  ): Promise<{
+    success: boolean;
+    data: {
+      sessionId: string;
+      created: boolean;
+    };
+  }> {
+    return this.request<{
+      success: boolean;
+      data: {
+        sessionId: string;
+        created: boolean;
+      };
+    }>('POST', '/api/session/init', {
+      sessionId,
+      ...metadata,
+    });
+  }
+
+  /**
    * Archive a session
    * Marks a session as archived (excluded from Chrome extension queries)
-   * 
+   *
    * Reference: SERVER_SIDE_AGENT_ARCH.md §4.8.3 (POST /api/session)
    */
   async archiveSession(sessionId: string): Promise<{

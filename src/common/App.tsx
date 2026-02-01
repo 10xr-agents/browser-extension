@@ -79,6 +79,7 @@ const App = () => {
 
   // Reconnect WebSocket when the extension panel becomes visible again
   // This handles cases where the user switches tabs or minimizes the browser
+  // Uses forceReconnectWithFreshToken to validate token and bypass cooldown
   // Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md (Known Issues & Troubleshooting)
   useEffect(() => {
     const handleVisibilityChange = async () => {
@@ -86,14 +87,13 @@ const App = () => {
         const currentSessionId = useAppState.getState().sessions.currentSessionId;
         if (currentSessionId && user) {
           try {
-            const { messageSyncManager } = await import('../services/messageSyncService');
-            const currentState = (await import('../services/pusherTransport')).pusherTransport.getConnectionState();
-            // Only reconnect if disconnected or in fallback mode
+            const { pusherTransport } = await import('../services/pusherTransport');
+            const currentState = pusherTransport.getConnectionState();
+            // Only reconnect if disconnected, failed, or in fallback mode
             if (currentState === 'disconnected' || currentState === 'failed' || currentState === 'fallback') {
-              console.log('[App] Reconnecting WebSocket after visibility change, state was:', currentState);
-              void messageSyncManager.startSync(currentSessionId).catch((err: unknown) => {
-                console.debug('[App] WebSocket reconnect failed:', err);
-              });
+              console.log('[App] Force reconnecting WebSocket after visibility change, state was:', currentState);
+              // Use forceReconnectWithFreshToken to bypass cooldown and validate token
+              await pusherTransport.forceReconnectWithFreshToken(currentSessionId);
             }
           } catch (err: unknown) {
             console.debug('[App] Failed to reconnect WebSocket on visibility change:', err);
@@ -114,6 +114,7 @@ const App = () => {
   // Tab-scoped session management (with domain awareness metadata)
   const initializeDomainAwareSessions = useAppState((state) => state.sessions.actions.initializeDomainAwareSessions);
   const switchToTabSession = useAppState((state) => state.sessions.actions.switchToTabSession);
+  const clearTabSessionMapping = useAppState((state) => state.sessions.actions.clearTabSessionMapping);
   // Use user directly from store - this will trigger re-render when login updates it
   const user = useAppState((state) => state.settings.user);
   // CRITICAL: Get task status to prevent session switching during active task
@@ -291,13 +292,30 @@ const App = () => {
     
     chrome.tabs.onUpdated.addListener(handleTabUpdate);
     chrome.tabs.onActivated.addListener(handleTabActivation);
-    
+
     return () => {
       chrome.tabs.onUpdated.removeListener(handleTabUpdate);
       chrome.tabs.onActivated.removeListener(handleTabActivation);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]); // switchToTabSession is stable from Zustand
+
+  // Listen for TAB_CLOSED messages from background to clean up session mappings
+  // This prevents ghost sessions when Chrome reuses tabIds for new tabs
+  // Reference: SPECS_AND_CONTRACTS.md §2 (Tab Cleanup on Tab Close)
+  useEffect(() => {
+    const handleMessage = (message: { type: string; tabId?: number }) => {
+      if (message.type === 'TAB_CLOSED' && typeof message.tabId === 'number') {
+        clearTabSessionMapping(message.tabId);
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(handleMessage);
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleMessage);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // clearTabSessionMapping is stable from Zustand
 
   // Dark mode color values - defined at component top level
   const bgColor = useColorModeValue('white', 'gray.900');

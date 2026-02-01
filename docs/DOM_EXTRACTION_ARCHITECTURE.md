@@ -1,32 +1,59 @@
-# DOM Extraction Architecture (V3)
+# DOM Extraction Architecture
 
 **Purpose:** Comprehensive documentation of how DOM extraction works in the Spadeworks Copilot AI browser extension and what data is sent to the LLM for decision-making.
 
-**Version:** 3.0 (Ultra-Light Semantic + Viewport Pruning)  
 **Last Updated:** February 1, 2026
+
+**Implementation Status:** ✅ Fully Integrated
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| Semantic Extraction (PRIMARY) | ✅ Active | `semanticTree.ts` → `currentTask.ts` |
+| Skeleton/Hybrid (Fallback) | ✅ Active | `skeletonDom.ts`, `hybridCapture.ts` |
+| Viewport Pruning | ✅ Active | `extractSemanticTreeV3()` |
+| Raycasting (Modal Killer) | ✅ Active | `isActuallyClickable()` |
+| Label Hunting | ✅ Active | `findLabelForInput()` |
+| Mutation Stream | ✅ Implemented | `mutationLog.ts` |
+| Delta Hashing | ✅ Implemented | `deltaHash.ts` |
+| DOM RAG | ✅ Implemented | `domRag.ts` |
+| Sentinel Verification | ✅ Implemented | `sentinelVerification.ts` |
+| AXTree (CDP) | ✅ Implemented | `axTreeExtractor.ts` |
+| Backend Negotiation | ✅ Active | `currentTask.ts` (needs_context handling) |
+
+## Extraction Flow
+
+```
+1. Semantic Extraction (PRIMARY) - ~25-75 tokens
+   └── getSemanticDomV3() with viewport pruning, raycasting
+
+2. Skeleton/Hybrid (FALLBACK) - ~500-3000 tokens
+   └── selectDomMode() based on query keywords (if semantic fails)
+
+3. Backend Negotiation (ON REQUEST)
+   └── needs_context/needs_full_dom → retry with requested artifacts
+```
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [V3 Architecture - Ultra-Light Extraction](#2-v3-architecture---ultra-light-extraction)
-   - 2.5 [V3 Advanced Features](#25-v3-advanced-features-production-grade)
+2. [Semantic Architecture - Ultra-Light Extraction](#2-semantic-architecture---ultra-light-extraction)
+   - 2.5 [Advanced Features](#25-advanced-features-production-grade)
    - 2.6 [Production-Grade Features](#26-production-grade-features)
-3. [V2 Architecture Upgrades](#3-v2-architecture-upgrades)
-4. [Extraction Pipeline](#4-extraction-pipeline)
-5. [The Tag & Freeze Strategy](#5-the-tag--freeze-strategy)
-6. [Shadow DOM Support](#6-shadow-dom-support)
-7. [Iframe Support (Distributed Extraction)](#7-iframe-support-distributed-extraction)
-8. [Extraction Modes](#8-extraction-modes)
-9. [Semantic JSON Protocol (V2/V3)](#9-semantic-json-protocol-v2v3)
-10. [Skeleton DOM Extraction](#10-skeleton-dom-extraction)
-11. [Full DOM Extraction](#11-full-dom-extraction)
-12. [DOM Stability Waiting](#12-dom-stability-waiting)
-13. [What Gets Sent to the LLM](#13-what-gets-sent-to-the-llm)
-14. [Mode Selection Logic](#14-mode-selection-logic)
-15. [Fallback Handling](#15-fallback-handling)
-16. [Source Files Reference](#16-source-files-reference)
+3. [Extraction Pipeline](#3-extraction-pipeline)
+4. [The Tag & Freeze Strategy](#4-the-tag--freeze-strategy)
+5. [Shadow DOM Support](#5-shadow-dom-support)
+6. [Iframe Support (Distributed Extraction)](#6-iframe-support-distributed-extraction)
+7. [Extraction Modes](#7-extraction-modes)
+8. [Semantic JSON Protocol](#8-semantic-json-protocol)
+9. [Skeleton DOM Extraction](#9-skeleton-dom-extraction)
+10. [Full DOM Extraction](#10-full-dom-extraction)
+11. [DOM Stability Waiting](#11-dom-stability-waiting)
+12. [What Gets Sent to the LLM](#12-what-gets-sent-to-the-llm)
+13. [Mode Selection Logic](#13-mode-selection-logic)
+14. [Fallback Handling](#14-fallback-handling)
+15. [Source Files Reference](#15-source-files-reference)
 
 ---
 
@@ -69,15 +96,15 @@ We use a multi-layered extraction system:
 
 ---
 
-## 2. V3 Architecture - Ultra-Light Extraction
+## 2. Semantic Architecture - Ultra-Light Extraction
 
-**Version 3 is the current PRIMARY extraction mode.** It provides 99.8% token reduction through three key innovations.
+**Semantic JSON is the current PRIMARY extraction mode.** It provides 99.8% token reduction through key innovations.
 
 ### Key Principle
 
 > **Semantic JSON is the ONLY source of truth. Full DOM should NEVER be sent proactively — only when the backend explicitly requests it via `needs_full_dom` response.**
 
-### V3 Enhancements
+### Semantic Enhancements
 
 | Enhancement | Description | Impact |
 |-------------|-------------|--------|
@@ -92,14 +119,13 @@ We use a multi-layered extraction system:
 |------|--------------|----------------|-----------------|
 | Full DOM | 50-200 KB | 10,000-50,000 | $0.10-0.50 |
 | Skeleton | 2-6 KB | 500-1,500 | $0.005-0.015 |
-| Semantic V2 | 200-500 bytes | 50-125 | $0.0005-0.00125 |
-| **Semantic V3** | **100-300 bytes** | **25-75** | **$0.00025-0.00075** |
+| **Semantic** | **100-300 bytes** | **25-75** | **$0.00025-0.00075** |
 
-### V3 Payload Example
+### Semantic Payload Example
 
 ```json
 {
-  "mode": "semantic_v3",
+  "mode": "semantic",
   "url": "https://google.com",
   "title": "Google",
   "viewport": { "width": 1280, "height": 800 },
@@ -111,7 +137,7 @@ We use a multi-layered extraction system:
 }
 ```
 
-### V3 Key Legend (for System Prompt)
+### Key Legend (for System Prompt)
 
 Include this legend in the system prompt so the LLM understands the minified format:
 
@@ -126,7 +152,7 @@ LEGEND for interactive_tree format:
 - f: frame ID (0 = main frame, omitted if 0)
 ```
 
-### V3 Role Mapping
+### Role Mapping
 
 | Full Role | Minified |
 |-----------|----------|
@@ -145,7 +171,7 @@ LEGEND for interactive_tree format:
 ### Viewport Pruning Algorithm
 
 ```typescript
-// V3: Skip off-screen elements
+// Skip off-screen elements (viewport pruning)
 const rect = element.getBoundingClientRect();
 
 // Skip elements completely below viewport
@@ -168,7 +194,7 @@ if (rect.width === 0 && rect.height === 0) {
 
 ### AXTree Extraction (Alternative)
 
-V3 also provides an AXTree-based extraction via CDP for 100% reliable element detection:
+Semantic mode also provides an AXTree-based extraction via CDP for 100% reliable element detection:
 
 ```typescript
 // src/helpers/axTreeExtractor.ts
@@ -203,9 +229,9 @@ async function extractAXTree(tabId: number) {
 
 ---
 
-## 2.5 V3 Advanced Features (Production-Grade)
+## 2.5 Advanced Features (Production-Grade)
 
-V3 Advanced brings production-grade reliability features that match state-of-the-art agents like Browser Use and OpenHands.
+The semantic architecture includes production-grade reliability features that match state-of-the-art agents like Browser Use and OpenHands.
 
 ### Advanced Feature Summary
 
@@ -242,7 +268,7 @@ function isActuallyClickable(element: HTMLElement): boolean {
 }
 ```
 
-**V3 Node Field:** `occ: true` if element is occluded
+**Node Field:** `occ: true` if element is occluded
 
 ### 2.5.2 Explicit Label Association (Form Fix)
 
@@ -337,7 +363,7 @@ if (element.scrollHeight > element.clientHeight + 50) {
 }
 ```
 
-**V3 Node Field:**
+**Node Field:**
 ```json
 { "i": "feed", "r": "list", "n": "Timeline", "scr": { "depth": "10%", "h": true } }
 ```
@@ -390,11 +416,11 @@ async function findGhostMatch(config: GhostMatchConfig): Promise<GhostMatchResul
 
 **Future Use:** Overlay IDs visually on screenshot for GPT-4o vision
 
-### Complete V3 Advanced Payload
+### Complete Advanced Payload
 
 ```json
 {
-  "mode": "semantic_v3",
+  "mode": "semantic",
   "url": "https://amazon.com/checkout",
   "title": "Checkout",
   "scroll_position": "25%",
@@ -430,7 +456,7 @@ These features bring the extension to parity with state-of-the-art agents like D
 
 ### 2.6.1 Self-Healing (Ghost Match Recovery)
 
-**Already implemented in V3 Advanced.** See [Section 2.5.6](#256-self-healing-element-recovery-stale-id-fix).
+**Already implemented.** See [Section 2.5.6](#256-self-healing-element-recovery-stale-id-fix).
 
 ### 2.6.2 DOM RAG (Retrieval-Augmented Generation)
 
@@ -446,7 +472,7 @@ These features bring the extension to parity with state-of-the-art agents like D
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  1. EXTRACTION: Full tree (5000 nodes)                      │
-│     └── extractSemanticTreeV3()                             │
+│     └── extractSemanticTree()                               │
 │                                                              │
 │  2. CHUNKING: Group by spatial proximity/containers         │
 │     └── chunkDomNodes() → 50 chunks                         │
@@ -633,93 +659,13 @@ interface VerificationResult {
 
 ---
 
-## 3. V2 Architecture Upgrades
+## 3. Extraction Pipeline
 
-Version 2 of the DOM extraction architecture addresses critical reliability issues on enterprise applications (Salesforce, Google Workspace) that use Shadow DOM and iframes.
-
-### What's New in V2
-
-| Feature | V1 (Legacy) | V2 (Current) |
-|---------|-------------|--------------|
-| **Shadow DOM** | Ignored / Partial | **Full support via `query-selector-shadow-dom`** |
-| **Iframes** | Blocked / Main frame only | **Distributed extraction (`all_frames: true`)** |
-| **Element IDs** | Calculated during extraction | **Pre-tagged persistent IDs** |
-| **Data Format** | HTML strings | **Semantic JSON with metadata** |
-| **Token Cost** | 1,000-20,000 tokens | **50-300 tokens** |
-
-### V2 Pipeline Diagram
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                    V2 DOM EXTRACTION PIPELINE                           │
-├────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌─────────────┐    ┌─────────────┐    ┌───────────────────────────┐  │
-│  │   TAGGER    │───▶│   WAITER    │───▶│       EXTRACTOR           │  │
-│  │ (all frames)│    │             │    │                           │  │
-│  │             │    │ Network +   │    │  ┌─────────────────────┐  │  │
-│  │ Uses        │    │ DOM Idle    │    │  │ querySelectorAllDeep│  │  │
-│  │ shadowDOM   │    │             │    │  │ (pierces Shadow)    │  │  │
-│  │ library     │    │             │    │  └─────────────────────┘  │  │
-│  └─────────────┘    └─────────────┘    └───────────────────────────┘  │
-│        │                                          │                    │
-│        ▼                                          ▼                    │
-│  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │                    AGGREGATOR (Background)                       │  │
-│  │                                                                  │  │
-│  │  Main Frame (frameId=0)  +  Iframe 1 (frameId=1)  +  ...        │  │
-│  │  ───────────────────────────────────────────────────            │  │
-│  │                    Stitched Semantic Tree                        │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
-│                                    │                                   │
-│                                    ▼                                   │
-│                          ┌─────────────────┐                          │
-│                          │  LLM PAYLOAD    │                          │
-│                          │  (JSON + meta)  │                          │
-│                          └─────────────────┘                          │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-### V2 SemanticNode Structure
-
-```typescript
-interface SemanticNode {
-  id: string;           // Stable data-llm-id (persists across re-renders)
-  role: string;         // 'button', 'link', 'input', etc.
-  name: string;         // Human-readable label
-  value?: string;       // Current value for inputs
-  state?: string;       // 'checked', 'disabled', etc.
-  
-  // === V2 FIELDS ===
-  isInShadow?: boolean; // true if inside Shadow DOM
-  frameId?: number;     // 0 = main frame, 1+ = iframe
-  bounds?: {            // For visual tasks
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  };
-}
-```
-
-### Key Libraries Used
-
-| Library | Purpose |
-|---------|---------|
-| **[query-selector-shadow-dom](https://github.com/nicktaylor/querySelector-shadow-dom)** | Pierces Shadow DOM boundaries when querying |
-| **chrome.scripting.executeScript** | Runs extraction in all frames |
-
-### Migration from V1
-
-V2 is **backward compatible**. Existing code continues to work, but:
-
-1. **New projects** should use `getSemanticDom()` (returns JSON with V2 fields)
-2. **Legacy code** can still use `getAnnotatedDOM()` (returns HTML)
-3. **Element finding** should use `findElementByIdDeep()` (pierces Shadow DOM)
+This section is now integrated into the main extraction pipeline documentation below.
 
 ---
 
-## 4. Extraction Pipeline
+## 4. The Tag & Freeze Strategy
 
 ### Step-by-Step Flow
 
@@ -843,7 +789,7 @@ These IDs persist even if the page re-renders, because the tagger only adds IDs 
 
 ---
 
-## 6. Shadow DOM Support (V2)
+## 6. Shadow DOM Support
 
 ### The Problem
 
@@ -859,7 +805,7 @@ Enterprise applications (Salesforce LWC, Google products, Shopify) use Shadow DO
 
 ### The Solution: `query-selector-shadow-dom`
 
-V2 uses the `query-selector-shadow-dom` library to pierce Shadow DOM boundaries:
+The extension uses the `query-selector-shadow-dom` library to pierce Shadow DOM boundaries:
 
 ```typescript
 // V1 (broken for Shadow DOM)
@@ -909,13 +855,13 @@ function isInShadowDom(el: Element): boolean {
   "id": "42",
   "role": "button",
   "name": "Save",
-  "isInShadow": true  // V2: Indicates element is inside Shadow DOM
+  "isInShadow": true  // Indicates element is inside Shadow DOM
 }
 ```
 
 ---
 
-## 7. Iframe Support - Distributed Extraction (V2)
+## 7. Iframe Support - Distributed Extraction
 
 ### The Problem
 
@@ -1007,12 +953,11 @@ To avoid ID collisions across frames, IDs are prefixed:
 
 ## 8. Extraction Modes
 
-The extension supports five extraction modes (V3 is PRIMARY):
+The extension supports four extraction modes:
 
 | Mode | Primary Data | Token Cost | Use Case |
 |------|--------------|------------|----------|
-| **`semantic_v3`** | **Minified JSON + viewport pruning** | **~25-75 tokens** | **PRIMARY - Default** |
-| `semantic` | Full-key JSON array | ~50-200 tokens | V3 fails/fallback |
+| **`semantic`** | **Minified JSON + viewport pruning** | **~25-75 tokens** | **PRIMARY - Default** |
 | `skeleton` | Minimal HTML | ~500-1500 tokens | Semantic fails |
 | `hybrid` | Screenshot + skeleton | ~2000-3000 tokens | Visual/spatial queries |
 | `full` | Complete HTML | ~10000-50000 tokens | **ONLY on explicit backend request** |
@@ -1020,18 +965,11 @@ The extension supports five extraction modes (V3 is PRIMARY):
 ### Mode Comparison
 
 ```
-V3 SEMANTIC MODE (~25-50 tokens) ← PRIMARY
-────────────────────────────────
+SEMANTIC MODE (~25-75 tokens) ← PRIMARY
+───────────────────────────────────────
 [
   { "i": "1", "r": "btn", "n": "Submit", "xy": [600, 400] },
   { "i": "2", "r": "inp", "n": "Search", "xy": [400, 300] }
-]
-
-V2 SEMANTIC MODE (~50-125 tokens)
-─────────────────────────────────
-[
-  { "id": "1", "role": "button", "name": "Submit" },
-  { "id": "2", "role": "searchbox", "name": "Search", "placeholder": "Type here..." }
 ]
 
 SKELETON MODE (~500 tokens)
@@ -1059,7 +997,7 @@ FULL MODE (~10000+ tokens) ← ONLY ON BACKEND REQUEST
 
 ---
 
-## 9. Semantic JSON Protocol (V2/V3)
+## 9. Semantic JSON Protocol
 
 **File:** `src/pages/Content/semanticTree.ts`
 
@@ -1370,7 +1308,7 @@ if (waitForNetwork) {
 
 ## 13. What Gets Sent to the LLM
 
-### API Request Structure (V3)
+### API Request Structure
 
 **Endpoint:** `POST /api/agent/interact`
 
@@ -1417,16 +1355,13 @@ interface AgentInteractRequest {
     didUrlChange?: boolean;
   };
   
-  // === V3 DOM MODE (PRIMARY) ===
-  domMode?: 'semantic_v3' | 'semantic' | 'skeleton' | 'hybrid' | 'full';
-  
-  // V3 SEMANTIC MODE (recommended - PRIMARY)
-  interactiveTree?: SemanticNodeV3[];  // Minified JSON array
+  // === DOM MODE ===
+  domMode?: 'semantic' | 'skeleton' | 'hybrid' | 'full';
+
+  // SEMANTIC MODE (PRIMARY - recommended)
+  interactiveTree?: SemanticNode[];  // Minified JSON array
   viewport?: { width: number; height: number };
   pageTitle?: string;
-  
-  // V2 SEMANTIC MODE (fallback)
-  semanticNodes?: SemanticNode[];  // Full-key JSON array
   
   // SKELETON/HYBRID MODE
   skeletonDom?: string;            // Minimal HTML
@@ -1435,14 +1370,14 @@ interface AgentInteractRequest {
 }
 ```
 
-### Example: V3 Semantic Mode Request (PRIMARY)
+### Example: Semantic Mode Request (PRIMARY)
 
 ```json
 {
   "url": "https://www.google.com",
   "query": "Search for SpaceX",
   "dom": "<html>...</html>",
-  "domMode": "semantic_v3",
+  "domMode": "semantic",
   "viewport": { "width": 1280, "height": 800 },
   "interactiveTree": [
     { "i": "1", "r": "inp", "n": "Search", "v": "", "xy": [400, 300] },
@@ -1456,25 +1391,6 @@ interface AgentInteractRequest {
 ```
 
 **Token count:** ~50-75 tokens (vs 10k+ for full DOM)
-
-### Example: V2 Semantic Mode Request (Fallback)
-
-```json
-{
-  "url": "https://www.google.com",
-  "query": "Search for SpaceX",
-  "dom": "<html>...</html>",
-  "domMode": "semantic",
-  "semanticNodes": [
-    { "id": "1", "role": "searchbox", "name": "Search", "value": "" },
-    { "id": "2", "role": "button", "name": "Google Search" },
-    { "id": "3", "role": "button", "name": "I'm Feeling Lucky" },
-    { "id": "4", "role": "link", "name": "Gmail" },
-    { "id": "5", "role": "link", "name": "Images" }
-  ],
-  "pageTitle": "Google"
-}
-```
 
 ### Example: Skeleton Mode Request
 
@@ -1508,12 +1424,12 @@ interface AgentInteractRequest {
 
 **File:** `src/state/currentTask.ts` and `src/api/client.ts`
 
-**Key Principle:** The extension **always sends semantic_v3 first** and the **backend decides** if it needs additional artifacts (skeleton, screenshot, or full DOM).
+**Key Principle:** The extension **always sends semantic first** and the **backend decides** if it needs additional artifacts (skeleton, screenshot, or full DOM).
 
 ### Default Mode (Client)
 
 The extension ALWAYS starts with:
-- `domMode: "semantic_v3"`
+- `domMode: "semantic"`
 - `interactiveTree`, `viewport`, `pageTitle` (+ V3 advanced fields)
 - No `dom`, no `skeletonDom`, no `screenshot`
 
@@ -1530,7 +1446,7 @@ If the backend cannot plan/verify using semantic JSON alone, it responds request
 ### Negotiation Flow
 
 ```
-1) Client sends semantic_v3 only
+1) Client sends semantic only
 2) Backend responds:
    - normal action → proceed
    - OR requests additional context → client retries with only what was requested
@@ -1540,12 +1456,34 @@ If the backend cannot plan/verify using semantic JSON alone, it responds request
 ### Why Backend-Driven?
 
 - Keeps client simple (no keyword heuristics)
-- Avoids sending heavy payloads “just in case”
+- Avoids sending heavy payloads "just in case"
 - Guarantees the backend controls what it needs for verification
 
-### Visual/Spatial Keywords
+### Actual Implementation (currentTask.ts)
 
-These keywords trigger hybrid mode:
+```typescript
+// Semantic extraction is PRIMARY
+if (USE_SEMANTIC_EXTRACTION) {
+  // 1. Try semantic extraction (ultra-light, ~25-75 tokens)
+  const semanticResult = await callRPC('getSemanticDomV3', ...);
+  if (semanticResult?.interactive_tree?.length > 0) {
+    domMode = 'semantic'; // API field name for backend compatibility
+    interactiveTree = semanticResult.interactive_tree;
+  } else {
+    // 2. Fallback to skeleton/hybrid based on query keywords
+    domMode = selectDomMode(query, context);
+  }
+}
+
+// 3. Backend requests more → retry with requested artifacts
+if (response.status === 'needs_context' || response.status === 'needs_full_dom') {
+  // Send skeleton/hybrid/full as backend requested
+}
+```
+
+### Visual/Spatial Keywords (Fallback Mode Selection)
+
+These keywords trigger hybrid mode when semantic extraction fails:
 
 ```typescript
 const VISUAL_KEYWORDS = [
@@ -1639,23 +1577,23 @@ try {
 
 ## 16. Source Files Reference
 
-### Core Extraction Files (V3 Advanced)
+### Core Extraction Files
 
-| File | Purpose | V3 Advanced Changes |
-|------|---------|---------------------|
+| File | Purpose | Features |
+|------|---------|----------|
 | `src/pages/Content/tagger.ts` | Injects stable `data-llm-id` attributes | Uses `querySelectorAllDeep`, tracks Shadow DOM |
-| `src/pages/Content/semanticTree.ts` | Extracts JSON representation | **V3 Advanced:** Raycasting, label hunting, scrollable detection |
+| `src/pages/Content/semanticTree.ts` | Extracts JSON representation | Raycasting, label hunting, scrollable detection |
 | `src/pages/Content/domWait.ts` | Waits for DOM stability | - |
 | `src/pages/Content/getAnnotatedDOM.ts` | Full DOM extraction with annotations | - |
-| **`src/pages/Content/mutationLog.ts`** | **Tracks DOM changes for ghost state detection** | **NEW in V3 Advanced** |
+| `src/pages/Content/mutationLog.ts` | Tracks DOM changes for ghost state detection | - |
 | `src/helpers/skeletonDom.ts` | Skeleton HTML extraction | - |
 | `src/helpers/shrinkHTML/templatize.ts` | HTML compression | - |
 | `src/helpers/hybridCapture.ts` | Mode selection logic | - |
-| `src/helpers/domAggregator.ts` | Aggregates DOM from all frames | V2 |
-| `src/helpers/axTreeExtractor.ts` | CDP-based accessibility tree extraction | V3 |
-| `src/helpers/deltaHash.ts` | Hash-based change detection for bandwidth optimization | V3 Advanced |
-| **`src/helpers/domRag.ts`** | **DOM chunking and relevance filtering for huge pages** | **NEW: Production-Grade** |
-| **`src/helpers/sentinelVerification.ts`** | **Action outcome verification system** | **NEW: Production-Grade** |
+| `src/helpers/domAggregator.ts` | Aggregates DOM from all frames | - |
+| `src/helpers/axTreeExtractor.ts` | CDP-based accessibility tree extraction | - |
+| `src/helpers/deltaHash.ts` | Hash-based change detection for bandwidth optimization | - |
+| `src/helpers/domRag.ts` | DOM chunking and relevance filtering for huge pages | Production-Grade |
+| `src/helpers/sentinelVerification.ts` | Action outcome verification system | Production-Grade |
 
 ### Integration Files
 
@@ -1665,42 +1603,40 @@ try {
 | `src/state/currentTask.ts` | Main action loop orchestration |
 | `src/api/client.ts` | API client with payload construction |
 | `src/pages/Content/index.ts` | Content script entry (starts tagger + mutation logger) |
-| `src/helpers/domActions.ts` | Action execution with **V3 self-healing recovery** |
+| `src/helpers/domActions.ts` | Action execution with self-healing recovery |
 
-### Key Functions (V3 Advanced)
+### Key Functions
 
 | Function | File | Purpose |
 |----------|------|---------|
-| **`extractSemanticTreeV3()`** | semanticTree.ts | **V3 PRIMARY:** Ultra-light extraction with raycasting, labels, scrollable |
-| **`isActuallyClickable()`** | semanticTree.ts | **V3 Advanced:** Raycasting to detect occluded elements |
-| **`findLabelForInput()`** | semanticTree.ts | **V3 Advanced:** Hunts for semantic labels |
-| **`getScrollableInfo()`** | semanticTree.ts | **V3 Advanced:** Detects virtual list containers |
-| **`getRecentMutations()`** | mutationLog.ts | **V3 Advanced:** Returns recent DOM changes |
-| **`getMutationSummary()`** | mutationLog.ts | **V3 Advanced:** Summary with error/success flags |
-| **`shouldSendTree()`** | deltaHash.ts | **V3 Advanced:** Hash-based change detection |
-| **`findGhostMatch()`** | domActions.ts | **V3 Advanced:** Self-healing element recovery |
-| `getSemanticDomV3()` | pageRPC.ts | V3: RPC wrapper for V3 extraction |
-| `extractAXTree()` | axTreeExtractor.ts | V3: CDP-based accessibility tree |
-| `getV3Legend()` | semanticTree.ts | V3: Returns legend for system prompt |
-| `minifyToV3()` | semanticTree.ts | V3: Converts full nodes to minified format |
+| `extractSemanticTree()` | semanticTree.ts | Ultra-light extraction with raycasting, labels, scrollable |
+| `isActuallyClickable()` | semanticTree.ts | Raycasting to detect occluded elements |
+| `findLabelForInput()` | semanticTree.ts | Hunts for semantic labels |
+| `getScrollableInfo()` | semanticTree.ts | Detects virtual list containers |
+| `getRecentMutations()` | mutationLog.ts | Returns recent DOM changes |
+| `getMutationSummary()` | mutationLog.ts | Summary with error/success flags |
+| `shouldSendTree()` | deltaHash.ts | Hash-based change detection |
+| `findGhostMatch()` | domActions.ts | Self-healing element recovery |
+| `getSemanticDom()` | pageRPC.ts | RPC wrapper for semantic extraction |
+| `extractAXTree()` | axTreeExtractor.ts | CDP-based accessibility tree |
+| `getSemanticLegend()` | semanticTree.ts | Returns legend for system prompt |
 | `ensureStableIds()` | tagger.ts | Tags all interactive elements (pierces Shadow DOM) |
 | `startAutoTagger()` | tagger.ts | Starts MutationObserver |
-| `startMutationLogger()` | mutationLog.ts | **V3 Advanced:** Starts mutation tracking |
-| `findElementByIdDeep()` | tagger.ts | V2: Finds element by ID, piercing Shadow DOM |
-| `isInShadowDom()` | tagger.ts | V2: Checks if element is in Shadow Root |
-| `extractSemanticTree()` | semanticTree.ts | V2: Returns JSON array with full keys |
+| `startMutationLogger()` | mutationLog.ts | Starts mutation tracking |
+| `findElementByIdDeep()` | tagger.ts | Finds element by ID, piercing Shadow DOM |
+| `isInShadowDom()` | tagger.ts | Checks if element is in Shadow Root |
 | `waitForDomStability()` | domWait.ts | Waits for mutations to stop |
 | `extractSkeletonDom()` | skeletonDom.ts | Returns minimal HTML |
 | `getAnnotatedDOM()` | getAnnotatedDOM.ts | Returns full annotated HTML |
 | `selectDomMode()` | hybridCapture.ts | Chooses extraction mode |
 | `agentInteract()` | client.ts | Sends payload to backend |
-| `extractFromAllFrames()` | domAggregator.ts | V2: Aggregates extraction from all frames |
+| `extractFromAllFrames()` | domAggregator.ts | Aggregates extraction from all frames |
 
-### V3 Advanced Types
+### Types
 
 ```typescript
-// V3 Advanced minified node (with new fields)
-interface SemanticNodeV3 {
+// Minified semantic node
+interface SemanticNode {
   i: string;                           // Element ID
   r: string;                           // Role (minified)
   n: string;                           // Name
@@ -1708,21 +1644,21 @@ interface SemanticNodeV3 {
   s?: string;                          // State
   xy?: [number, number];               // Center coordinates
   f?: number;                          // Frame ID
-  // V3 ADVANCED FIELDS:
+  // Advanced fields:
   box?: [number, number, number, number]; // Bounding box [x,y,w,h]
   scr?: { depth: string; h: boolean };    // Scrollable info
   occ?: boolean;                          // Occluded by overlay
 }
 
-// V3 Advanced extraction result
-interface SemanticTreeResultV3 {
-  mode: 'semantic_v3';
+// Semantic extraction result
+interface SemanticTreeResult {
+  mode: 'semantic';
   url: string;
   title: string;
   viewport: { width: number; height: number };
-  scroll_position?: string;           // V3 Advanced: Page scroll depth
-  interactive_tree: SemanticNodeV3[];
-  scrollable_containers?: Array<{     // V3 Advanced: Virtual lists
+  scroll_position?: string;           // Page scroll depth
+  interactive_tree: SemanticNode[];
+  scrollable_containers?: Array<{     // Virtual lists
     id: string;
     depth: string;
     hasMore: boolean;
@@ -1731,13 +1667,13 @@ interface SemanticTreeResultV3 {
     totalElements: number;
     viewportElements: number;
     prunedElements: number;
-    occludedElements: number;         // V3 Advanced: Elements behind modals
+    occludedElements: number;         // Elements behind modals
     extractionTimeMs: number;
     estimatedTokens: number;
   };
 }
 
-// V3 Advanced: Self-healing ghost match config
+// Self-healing ghost match config
 interface GhostMatchConfig {
   name: string | null;
   role: string | null;
@@ -1746,7 +1682,7 @@ interface GhostMatchConfig {
   minConfidence: number;
 }
 
-// V3 Advanced: Mutation entry
+// Mutation entry
 interface MutationEntry {
   timestamp: number;
   type: 'added' | 'removed' | 'changed';
@@ -1767,13 +1703,12 @@ interface MutationEntry {
 
 | Mode | Typical Size | Token Estimate | Cost @ $0.01/1k tokens |
 |------|--------------|----------------|------------------------|
-| **Semantic V3** | **100-300 bytes** | **25-75 tokens** | **$0.00025-0.00075** |
-| Semantic V2 | 200-500 bytes | 50-125 tokens | $0.0005-0.00125 |
+| **Semantic** | **100-300 bytes** | **25-75 tokens** | **$0.00025-0.00075** |
 | Skeleton | 2-6 KB | 500-1500 tokens | $0.005-0.015 |
 | Hybrid | 2-6 KB + 100KB image | 2000-3000 tokens | $0.02-0.03 |
 | Full | 40-200 KB | 10000-50000 tokens | $0.10-0.50 |
 
-**V3 Semantic mode provides 99.8%+ cost reduction compared to full mode.**
+**Semantic mode provides 99.8%+ cost reduction compared to full mode.**
 
 ---
 
@@ -1792,7 +1727,7 @@ document.querySelectorAll('[data-llm-id]').forEach(el => {
   console.log(el.getAttribute('data-llm-id'), el.tagName, el.innerText?.slice(0,30));
 });
 
-// V3: Check viewport pruning stats
+// Check viewport pruning stats
 const viewportHeight = window.innerHeight;
 const allElements = document.querySelectorAll('[data-llm-id]');
 const visibleElements = [...allElements].filter(el => {
@@ -1807,15 +1742,10 @@ console.log(`Total: ${allElements.length}, Visible: ${visibleElements.length}, P
 In `src/state/currentTask.ts`:
 
 ```typescript
-// Force V3 semantic mode (PRIMARY - recommended)
-const USE_V3_EXTRACTION = true;
-
-// Force V2 semantic mode
-const USE_V3_EXTRACTION = false;
+// Enable semantic extraction (default)
 const USE_SEMANTIC_EXTRACTION = true;
 
-// Force legacy mode (skeleton/hybrid)
-const USE_V3_EXTRACTION = false;
+// Force legacy mode (skeleton/hybrid) - disable semantic
 const USE_SEMANTIC_EXTRACTION = false;
 ```
 
@@ -1824,31 +1754,23 @@ const USE_SEMANTIC_EXTRACTION = false;
 Enable debug logging:
 
 ```typescript
-// V3 logging
-console.log('[CurrentTask] V3 SEMANTIC extraction:', {
-  nodeCount: v3Result.interactive_tree.length,
-  viewport: v3Result.viewport,
-  prunedElements: v3Result.meta.prunedElements,
-  estimatedTokens: v3Result.meta.estimatedTokens,
-  extractionTimeMs: v3Result.meta.extractionTimeMs,
-});
-
-// V2 logging
-console.log('[CurrentTask] V2 SEMANTIC extraction:', {
-  nodeCount: semanticNodes.length,
-  estimatedTokens: semanticResult.meta.estimatedTokens,
-  extractionTimeMs: semanticResult.meta.extractionTimeMs,
+console.log('[CurrentTask] SEMANTIC extraction:', {
+  nodeCount: result.interactive_tree.length,
+  viewport: result.viewport,
+  prunedElements: result.meta.prunedElements,
+  estimatedTokens: result.meta.estimatedTokens,
+  extractionTimeMs: result.meta.extractionTimeMs,
 });
 ```
 
-### Test V3 Extraction Directly
+### Test Extraction Directly
 
 In content script context:
 
 ```javascript
-// Get V3 extraction result
-const result = await extractSemanticTreeV3({ viewportOnly: true, minified: true });
-console.log('V3 Result:', result);
+// Get semantic extraction result
+const result = await extractSemanticTree({ viewportOnly: true, minified: true });
+console.log('Result:', result);
 console.log('Token estimate:', result.meta.estimatedTokens);
 console.log('Sample nodes:', result.interactive_tree.slice(0, 5));
 ```
@@ -1862,4 +1784,4 @@ console.log('Sample nodes:', result.interactive_tree.slice(0, 5));
 | Huge payload | Full mode triggered | Check fallback conditions |
 | Missing elements | Not tagged as interactive | Add role/tabindex to elements |
 | Elements pruned | Below viewport | Scroll page or disable viewportOnly |
-| V3 extraction fails | Library issue | Falls back to V2 automatically |
+| Extraction fails | Library issue | Falls back to skeleton automatically |

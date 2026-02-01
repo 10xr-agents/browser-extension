@@ -1,6 +1,6 @@
 # Real-Time Message Sync — Documentation & Implementation Feedback
 
-**Document Version:** 2.2  
+**Document Version:** 2.3
 **Last Updated:** February 1, 2026  
 **Status:** Implemented (client + backend). Stability fixes applied (Jan 31).  
 **Purpose:** Documentation of the implemented push-based message sync (Pusher/Sockudo) and implementation feedback.
@@ -64,7 +64,13 @@ The backend repo may keep a separate copy of this doc. **Extension-side source o
 Additional issues discovered and fixed during testing:
 
 - **Sync Deduplication:** Multiple entry points (`App.tsx`, `loadMessages`, visibility handler) could trigger `startSync` simultaneously, causing parallel polling instances. Fixed by tracking `currentSyncSessionId` and `syncInProgress` promise in `messageSyncService`.
-- **Auth Failure Cooldown:** On 403 errors, `pusherTransport` was retrying immediately, causing rate limits. Added cooldown mechanism with `authFailureCount` and `AUTH_FAILURE_COOLDOWN` (30 seconds after 3 failures).
+- **Auth Failure Handling & Reauth Strategy:** On 403/401 errors, `pusherTransport` now implements smart reauth:
+  1. **Token Validation First:** On auth failure, calls `apiClient.getSession()` to verify if token is still valid
+  2. **Transient Error Recovery:** If token is valid (race condition, server blip), reset failures and retry immediately
+  3. **Graceful Fallback:** If token is invalid, enter cooldown and switch to polling
+  4. **Visibility Reconnect:** When tab becomes visible after idle, calls `forceReconnectWithFreshToken()` to bypass cooldown and attempt fresh connection
+  - Cooldown periods: 1 minute after any auth failure, 5 minutes after 3+ consecutive failures
+  - Cooldown resets on successful connection or token validation
 - **Frozen Array Mutations:** Zustand with Immer creates immutable state drafts. Calling `.sort()` directly on `state.currentTask.messages` failed with "Cannot assign to read only property". Fixed by using `[...array].sort()` to create a new array.
 - **Store Merge Deep Clone:** `lodash.merge` in the `persist` middleware was preserving frozen array references from localStorage. Fixed by explicitly deep cloning `sessions.sessions` array in the merge function.
 - **API Call Deduplication:** `sessionService.listSessions` was called on every UI interaction. Added caching with 5-minute TTL and `inFlight` promise deduplication.
@@ -199,6 +205,33 @@ Optional but recommended (same as GET session messages): `status`, `sequenceNumb
 
 Sockudo requires channel auth for private channels. When the client subscribes to `private-session-<sessionId>`, pusher-js calls **POST /api/pusher/auth** on the main server with `socket_id`, `channel_name`, and Bearer token. Main server must validate the user and session and return signed auth. **403** = server rejected auth (e.g. invalid token or user not allowed for that session). See **§6** and **docs/PUSHER_AUTH_403_FIX.md** for fixes.
 
+### 5.4 Session Init Requirement (NEW - Feb 2026)
+
+**CRITICAL:** Before subscribing to a Pusher channel, the session MUST exist on the backend. The extension now calls `POST /api/session/init` before subscribing.
+
+**Why This Matters:**
+- When a new tab opens, the extension generates a local UUID for the session
+- If the extension immediately tries to subscribe to Pusher, `/api/pusher/auth` returns 403 because the session doesn't exist yet
+- The `POST /api/session/init` endpoint creates the session row on the backend BEFORE Pusher subscription
+
+**Flow:**
+```
+1. Extension generates sessionId (UUID)
+2. POST /api/session/init { sessionId, url, domain } → Backend creates session
+3. messageSyncManager.startSync(sessionId) calls ensureSessionInitialized()
+4. Only after init succeeds: pusherTransport.connect(sessionId)
+5. POST /api/pusher/auth → 200 OK (session exists)
+```
+
+**Implementation:**
+- `src/services/sessionService.ts`: `ensureSessionInitialized()` — checks cache, calls init API, marks session as initialized
+- `src/services/messageSyncService.ts`: `startSync()` now awaits `ensureSessionInitialized()` before `pusherTransport.connect()`
+- Cache: `initialized_sessions` in `chrome.storage.local` tracks which sessions are known to exist on backend
+
+**Fallback:** If init fails (offline, network error), the extension falls back to polling instead of Pusher.
+
+See **SPECS_AND_CONTRACTS.md §3 (Session Init Contract)** for full API specification.
+
 ---
 
 ## 6. Known Issues & Troubleshooting
@@ -207,7 +240,9 @@ Sockudo requires channel auth for private channels. When the client subscribes t
 |-------|--------|------------|--------|
 | **"WebSocket is already in CLOSING or CLOSED state"** | pusher-js calling close/send on an already closing/closed socket (e.g. session switch). | Only unsubscribe when `connection.state === 'connected'`; only disconnect when not already disconnected/failed/unavailable; try/catch; suppress this message in App.tsx error handler. | May still appear in console in some cases; harmless; sync and fallback work. |
 | **"Failed to get annotated DOM: Content script is not loaded"** | Restricted page or tab not refreshed after extension reload. | N/A (expected). | User should refresh the tab and use a normal HTTP(S) page. |
-| **POST /api/pusher/auth 403** | Server rejected channel auth. Common: session not found or user mismatch (tenantId/userId). | Backend: ensure session lookup uses same tenantId/userId as auth; optional dev-only 403 body (e.g. `SESSION_NOT_FOUND`, `USER_MISMATCH`). See **docs/PUSHER_AUTH_403_FIX.md**. **Jan 31 fix:** Added auth failure cooldown in `pusherTransport`. | Sync falls back to polling; messages still load via REST. |
+| **POST /api/pusher/auth 403** | Server rejected channel auth. Common: session not found or user mismatch (tenantId/userId). | Backend: ensure session lookup uses same tenantId/userId as auth; optional dev-only 403 body (e.g. `SESSION_NOT_FOUND`, `USER_MISMATCH`). See **docs/PUSHER_AUTH_403_FIX.md**. **Jan 31 fix:** Added auth failure cooldown in `pusherTransport` (1 min default, 5 min after 3+ failures). **Feb 1 fix:** Added `POST /api/session/init` before Pusher subscribe to ensure session exists on backend. | Sync falls back to polling; messages still load via REST. |
+| **New tab opens → 403 on Pusher auth** | (Fixed Feb 2026) Session created locally but not on backend before Pusher subscription. | Extension now calls `POST /api/session/init` before subscribing to Pusher channels. `ensureSessionInitialized()` in `sessionService.ts` handles this. | Pusher auth succeeds; real-time sync works. |
+| **Local storage cleared → lost sessions** | (Fixed Feb 2026) Chrome storage wiped (user action, extension reinstall) but sessions exist on backend. | On startup, `recoverSessionsFromBackend()` fetches sessions from backend if local storage is empty; marks recovered sessions as initialized. | Sessions recovered; user sees their chat history. |
 | **WebSocket disconnects on tab switch** | Browser may throttle or suspend WebSocket connections when extension panel is not visible. | Auto-reconnect with exponential backoff (max 3 attempts); visibility change handler reconnects when panel becomes visible again; polling fallback ensures messages are still received. | May see brief "reconnecting" state; sync resumes automatically within seconds. |
 | **WebSocket stuck in "connecting" indefinitely** | Sockudo server unreachable, port blocked, or network issue. | 8-second connection timeout in `pusherTransport`; emits `fallback` event to switch to polling if not connected within timeout. | Polling fallback activates automatically; no user action required. |
 | **startSync not called after session change** | (Fixed Jan 2026) Previously, `messageSyncManager.startSync()` was only called at initialization, not when sessions changed. | `loadMessages(sessionId)` now calls `startSync(sessionId)` after loading. | Real-time updates now work for the active session. |
@@ -225,8 +260,8 @@ Sockudo requires channel auth for private channels. When the client subscribes t
 **Removed:**  
 `src/services/websocketService.ts`, `src/services/websocketTypes.ts`, `src/services/websocketService.test.ts`.
 
-**Modified:**  
-`src/state/currentTask.ts` (wsConnectionState, wsFallbackReason, isServerTyping, serverTypingContext; getSimplifiedDom null check; **Jan 2026: startSync call in loadMessages**), `src/state/store.ts` (init message sync manager; **Jan 31: deep clone sessions in merge function**), `src/common/TaskUI.tsx` (TypingIndicator, startSync/stopSync, visibility reconnect), `src/common/SystemView.tsx` (ConnectionStatusBadge in debug panel), `src/common/App.tsx` (error handler for pusher-js; **Jan 2026: visibility change handler for WebSocket reconnect**), `src/services/pusherTransport.ts` (**Jan 2026: auto-reconnect with exponential backoff; Jan 31: auth failure cooldown**), `src/services/messageSyncService.ts` (**Jan 31: sync deduplication, handleInteractResponse debounce, array mutation fix**), `src/services/pollingFallbackService.ts` (**Jan 31: array mutation fix**), `src/services/sessionService.ts` (**Jan 31: listSessions caching and deduplication**), `webpack.config.js` (WEBPACK_PUSHER_*).
+**Modified:**
+`src/state/currentTask.ts` (wsConnectionState, wsFallbackReason, isServerTyping, serverTypingContext; getSimplifiedDom null check; **Jan 2026: startSync call in loadMessages**), `src/state/store.ts` (init message sync manager; **Jan 31: deep clone sessions in merge function**), `src/state/sessions.ts` (**Feb 2026: initializeDomainAwareSessions calls session init and recovery**), `src/common/TaskUI.tsx` (TypingIndicator, startSync/stopSync, visibility reconnect), `src/common/SystemView.tsx` (ConnectionStatusBadge in debug panel), `src/common/App.tsx` (error handler for pusher-js; **Jan 2026: visibility change handler for WebSocket reconnect**), `src/services/pusherTransport.ts` (**Jan 2026: auto-reconnect with exponential backoff; Jan 31: auth failure cooldown**), `src/services/messageSyncService.ts` (**Jan 31: sync deduplication, handleInteractResponse debounce, array mutation fix; Feb 2026: ensureSessionInitialized before Pusher connect**), `src/services/pollingFallbackService.ts` (**Jan 31: array mutation fix**), `src/services/sessionService.ts` (**Jan 31: listSessions caching and deduplication; Feb 2026: ensureSessionInitialized, recoverSessionsFromBackend, initializeSessionService, initialized sessions cache**), `src/api/client.ts` (**Feb 2026: initSession method**), `webpack.config.js` (WEBPACK_PUSHER_*).
 
 ---
 
@@ -248,6 +283,9 @@ Sockudo requires channel auth for private channels. When the client subscribes t
 - [x] API call rate limiting (listSessions caching, handleInteractResponse debounce) — **Jan 31, 2026**
 - [x] Array mutation fix (frozen Zustand state compatibility) — **Jan 31, 2026**
 - [x] Deep clone sessions in store merge (prevent read-only errors) — **Jan 31, 2026**
+- [x] **Session Init before Pusher Subscribe** — `POST /api/session/init` called before Pusher connect to prevent 403 errors — **Feb 1, 2026**
+- [x] **Session Recovery from Backend** — When local storage is empty, recover sessions from backend API — **Feb 1, 2026**
+- [x] **Initialized Sessions Cache** — Track which sessions exist on backend to avoid redundant init calls — **Feb 1, 2026**
 - [ ] Manual QA (connect, send message, switch session, badge states) — **pending**
 
 ---

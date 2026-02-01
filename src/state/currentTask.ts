@@ -57,22 +57,47 @@ import {
 import { selectDomMode, type DomMode } from '../helpers/hybridCapture';
 
 // === SEMANTIC JSON PROTOCOL ===
-// Configuration flag to enable new semantic extraction
-// When enabled, uses stable IDs and JSON format instead of HTML
-// This reduces tokens by ~95% and eliminates "Element not found" errors
-// Reference: SEMANTIC_JSON_PROTOCOL.md
-const USE_SEMANTIC_EXTRACTION = true; // Set to true to enable new extraction
+// Ultra-light semantic extraction with viewport pruning (~25-75 tokens)
+// If semantic fails → fallback to skeleton/hybrid based on query keywords
+// If backend needs more → responds to negotiation (needs_context/needs_full_dom)
+// Reference: DOM_EXTRACTION_ARCHITECTURE.md
+const USE_SEMANTIC_EXTRACTION = true;
 
-// Import semantic node type for type safety
+// Semantic node type (minified keys for token efficiency)
 interface SemanticNode {
-  id: string;
-  role: string;
-  name: string;
-  value?: string;
-  state?: string;
-  type?: string;
-  placeholder?: string;
-  href?: string;
+  i: string;                           // Element ID
+  r: string;                           // Role (minified: btn, inp, link, chk, etc.)
+  n: string;                           // Name/label
+  v?: string;                          // Value
+  s?: string;                          // State
+  xy?: [number, number];               // Center coordinates
+  f?: number;                          // Frame ID (0 = main frame, omitted if 0)
+  box?: [number, number, number, number]; // Bounding box [x,y,w,h]
+  scr?: { depth: string; h: boolean }; // Scrollable container info
+  occ?: boolean;                       // Occluded by overlay
+}
+
+// Semantic extraction result
+interface SemanticTreeResult {
+  mode: 'semantic';
+  url: string;
+  title: string;
+  viewport: { width: number; height: number };
+  scroll_position?: string;
+  interactive_tree: SemanticNode[];
+  scrollable_containers?: Array<{
+    id: string;
+    depth: string;
+    hasMore: boolean;
+  }>;
+  meta: {
+    totalElements: number;
+    viewportElements: number;
+    prunedElements: number;
+    occludedElements: number;
+    extractionTimeMs: number;
+    estimatedTokens: number;
+  };
 }
 // Dynamic import for messageSyncManager to avoid circular dependency
 // Used for starting WebSocket sync when session changes
@@ -1235,60 +1260,55 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           const skeletonDom = extractSkeletonDom(annotatedDomHtml);
           const skeletonStats = getSkeletonStats(annotatedDomHtml.length, skeletonDom);
           
-          // Variables for semantic extraction
-          let semanticNodes: SemanticNode[] | undefined;
+          // Semantic extraction variables
+          let interactiveTree: SemanticNode[] | undefined;
           let pageTitle: string | undefined;
+          let viewport: { width: number; height: number } | undefined;
           let domMode: DomMode | 'semantic' = 'skeleton'; // Default
-          
+
           // Screenshot capture variables
           let screenshotBase64: string | null = null;
           let screenshotHash: string | null = null;
-          
+
+          // === SEMANTIC EXTRACTION (PRIMARY) ===
+          // Ultra-light format: ~25-75 tokens instead of 10k+ for full DOM
+          // If fails → fallback to skeleton/hybrid based on query keywords
+          // Reference: DOM_EXTRACTION_ARCHITECTURE.md
           if (USE_SEMANTIC_EXTRACTION) {
-            // === SEMANTIC JSON PROTOCOL (new, recommended) ===
-            // Use stable IDs and JSON format for ~95% token reduction
-            // Reference: SEMANTIC_JSON_PROTOCOL.md
             try {
-              // Call the semantic extraction via RPC
-              // This runs in the content script context where the DOM is accessible
-              const semanticResult = await callRPC('getSemanticDom', [{ timeout: 2000 }], 3, tabId) as {
-                type: 'semantic_tree';
-                url: string;
-                title: string;
-                nodes: SemanticNode[];
-                meta: { elementCount: number; extractionTimeMs: number; estimatedTokens: number };
-              } | null;
-              
-              if (semanticResult && semanticResult.nodes && semanticResult.nodes.length > 0) {
-                semanticNodes = semanticResult.nodes;
+              const semanticResult = await callRPC('getSemanticDomV3', [{ timeout: 2000 }, { viewportOnly: true, minified: true }], 3, tabId) as SemanticTreeResult | null;
+
+              if (semanticResult && semanticResult.interactive_tree && semanticResult.interactive_tree.length > 0) {
+                interactiveTree = semanticResult.interactive_tree;
                 pageTitle = semanticResult.title;
+                viewport = semanticResult.viewport;
                 domMode = 'semantic';
-                
-                console.log('[CurrentTask] SEMANTIC extraction:', {
+
+                console.log('[CurrentTask] Semantic extraction:', {
                   mode: 'semantic',
-                  nodeCount: semanticNodes.length,
+                  nodeCount: interactiveTree.length,
+                  viewportNodes: semanticResult.meta.viewportElements,
+                  prunedNodes: semanticResult.meta.prunedElements,
+                  occludedNodes: semanticResult.meta.occludedElements,
                   estimatedTokens: semanticResult.meta.estimatedTokens,
                   extractionTimeMs: semanticResult.meta.extractionTimeMs,
-                  fullDomLength: currentDom.length,
                   tokenReduction: `${Math.round((1 - (semanticResult.meta.estimatedTokens * 4) / currentDom.length) * 100)}%`,
                 });
               } else {
-                // Fallback to skeleton if semantic extraction failed
-                console.warn('[CurrentTask] Semantic extraction returned empty, falling back to skeleton');
+                console.warn('[CurrentTask] Semantic extraction returned empty, falling back to skeleton/hybrid');
                 domMode = selectDomMode(safeInstructions, {
                   interactiveElementCount: skeletonStats.interactiveCount,
                 });
               }
             } catch (semanticError: unknown) {
-              // Fallback to skeleton if semantic extraction throws
               const errorMessage = semanticError instanceof Error ? semanticError.message : String(semanticError);
-              console.warn('[CurrentTask] Semantic extraction failed, falling back to skeleton:', errorMessage);
+              console.warn('[CurrentTask] Semantic extraction failed, falling back to skeleton/hybrid:', errorMessage);
               domMode = selectDomMode(safeInstructions, {
                 interactiveElementCount: skeletonStats.interactiveCount,
               });
             }
           } else {
-            // Legacy mode selection (skeleton/hybrid/full)
+            // Semantic disabled - use skeleton/hybrid mode selection
             domMode = selectDomMode(safeInstructions, {
               interactiveElementCount: skeletonStats.interactiveCount,
             });
@@ -1467,17 +1487,17 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                 } : undefined,
                 lastDOMChanges || undefined,
                 clientObservations,
-                // Hybrid Vision + Skeleton + Semantic parameters
-                // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §3 (Payload Contract)
-                // Reference: SEMANTIC_JSON_PROTOCOL.md (new semantic mode)
+                // V3 Semantic (PRIMARY) + Skeleton/Hybrid (fallback)
+                // Reference: DOM_EXTRACTION_ARCHITECTURE.md §2 (V3 Architecture)
                 {
                   screenshot: screenshotBase64,
                   skeletonDom,
                   domMode: domMode as 'skeleton' | 'full' | 'hybrid' | 'semantic',
                   screenshotHash: screenshotHash || undefined,
-                  // Semantic JSON Protocol fields (only sent when domMode === 'semantic')
-                  semanticNodes: domMode === 'semantic' ? semanticNodes : undefined,
-                  pageTitle: domMode === 'semantic' ? pageTitle : undefined,
+                  // Semantic JSON Protocol (PRIMARY - ultra-light format)
+                  interactiveTree: domMode === 'semantic' ? interactiveTree : undefined,
+                  viewport: domMode === 'semantic' ? viewport : undefined,
+                  pageTitle: pageTitle,
                 },
                 tabId
               );
@@ -1492,16 +1512,37 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               ? (response as { data: Record<string, unknown> }).data
               : (response as Record<string, unknown>);
 
-            // HYBRID FALLBACK: Handle NEEDS_FULL_DOM response
-            // When skeleton DOM is insufficient, server requests full DOM retry
-            // Reference: HYBRID_VISION_SKELETON_EXTENSION_SPEC.md §6 (Fallback Handling)
-            if (response.status === 'needs_full_dom') {
-              console.log('[CurrentTask] Server requested full DOM, retrying with full mode:', {
-                reason: response.needsFullDomReason,
+            // BACKEND-DRIVEN NEGOTIATION: Handle needs_full_dom or needs_context responses
+            // When semantic/skeleton DOM is insufficient, server requests additional artifacts
+            // Reference: SPECS_AND_CONTRACTS.md §5.4.3 (Backend-Driven Negotiation)
+            if (response.status === 'needs_full_dom' || response.status === 'needs_context') {
+              const requestedMode = response.requestedDomMode || 'full';
+              const needsScreenshot = response.needsScreenshot ?? (requestedMode === 'hybrid');
+              const needsSkeleton = response.needsSkeletonDom ?? true;
+
+              console.log('[CurrentTask] Server requested additional context:', {
+                status: response.status,
+                requestedMode,
+                needsScreenshot,
+                needsSkeleton,
+                reason: response.reason || response.needsFullDomReason,
                 requestedElement: response.requestedElement,
               });
-              
-              // Retry the same request with full DOM mode
+
+              // Capture screenshot if requested and not already available
+              let retryScreenshot = screenshotBase64;
+              if (needsScreenshot && !retryScreenshot) {
+                try {
+                  const screenshotResult = await captureAndOptimizeScreenshot();
+                  if (screenshotResult) {
+                    retryScreenshot = screenshotResult.base64;
+                  }
+                } catch (err) {
+                  console.warn('[CurrentTask] Screenshot capture failed for retry:', err);
+                }
+              }
+
+              // Retry the same request with requested artifacts
               await startKeepAlive();
               try {
                 response = await apiClient.agentInteract(
@@ -1525,11 +1566,11 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   } : undefined,
                   lastDOMChanges || undefined,
                   clientObservations,
-                  // Force full DOM mode for fallback
+                  // Send only what backend requested
                   {
-                    screenshot: screenshotBase64,
-                    skeletonDom,
-                    domMode: 'full', // Override to full mode
+                    screenshot: needsScreenshot ? retryScreenshot : undefined,
+                    skeletonDom: needsSkeleton ? skeletonDom : undefined,
+                    domMode: requestedMode as 'skeleton' | 'full' | 'hybrid',
                     screenshotHash: screenshotHash || undefined,
                   },
                   tabId
@@ -1537,8 +1578,8 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               } finally {
                 await stopKeepAlive();
               }
-              
-              console.log('[CurrentTask] Full DOM retry completed');
+
+              console.log('[CurrentTask] Retry with', requestedMode, 'mode completed');
             }
 
             // Store taskId from response so follow-up requests send it (required for loop to advance)

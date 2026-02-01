@@ -614,6 +614,24 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // Handle tab removal
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await handleTabRemoved(tabId);
+
+  // Clean up content script readiness tracking
+  contentScriptReadiness.delete(tabId);
+
+  // Broadcast TAB_CLOSED to UI so it can clean up session mappings
+  // This prevents ghost sessions when Chrome reuses tabIds
+  try {
+    chrome.runtime.sendMessage({
+      type: 'TAB_CLOSED',
+      tabId,
+      timestamp: Date.now(),
+    }).catch(() => {
+      // No listeners - UI may not be open, which is fine
+    });
+    console.log(`[Background] Tab ${tabId} closed - notified UI for session cleanup`);
+  } catch (error) {
+    // Ignore errors - UI may not be open
+  }
 });
 
 // Handle new tab creation (for auto-follow during task)

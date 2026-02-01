@@ -23,6 +23,9 @@ import * as sessionService from '../services/sessionService';
 import type { Session, Message } from '../services/sessionService';
 import { extractDomain } from '../helpers/domainUtils';
 
+// Re-export session init function for use in Pusher flow
+export { ensureSessionInitialized } from '../services/sessionService';
+
 /**
  * Chat session summary (matches Session from sessionService)
  */
@@ -60,6 +63,8 @@ export type SessionsSlice = {
     saveMessage: (sessionId: string, message: Message) => Promise<void>;
     /** Load messages for a session */
     loadMessages: (sessionId: string, limit?: number, since?: string) => Promise<Message[]>;
+    /** Clear the session mapping for a closed tab (prevents ghost sessions) */
+    clearTabSessionMapping: (tabId: number) => void;
   };
 };
 
@@ -486,15 +491,36 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
     
     /**
      * Initialize sessions on extension startup
+     * - Initializes session service (loads caches)
+     * - Recovers sessions from backend if local storage is empty (storage loss scenario)
      * - Migrates existing sessions to add domain field
      * - Loads sessions list
      * - Cleans up stale tab mappings (tabIds don't survive browser restarts)
      */
     initializeDomainAwareSessions: async () => {
       try {
+        // === STEP 0: Initialize session service (load caches) ===
+        await sessionService.initializeSessionService();
+
+        // === STEP 1: Check for storage loss and recover from backend ===
+        // Get current tab URL for domain matching during recovery
+        let currentTabUrl: string | undefined;
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          currentTabUrl = tab?.url;
+        } catch {
+          // Ignore tab query errors
+        }
+
+        const recoveredSessionId = await sessionService.recoverSessionsFromBackend(currentTabUrl);
+        if (recoveredSessionId) {
+          console.log('[Sessions] Recovered session from backend:', recoveredSessionId.slice(0, 8));
+          // Will be used below to set currentSessionId
+        }
+
         // Migrate existing sessions to add domain field
         await sessionService.migrateSessionsWithDomain();
-        
+
         // Load sessions directly using sessionService to avoid nested get() calls
         const sessions = await sessionService.listSessions({
           includeArchived: false,
@@ -558,6 +584,30 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         // Domain-aware switching (App.tsx) may override this shortly after based on active tab URL.
         const existingCurrentSessionId = get().sessions.currentSessionId;
         if (!existingCurrentSessionId) {
+          // 0) If we recovered a session from backend (storage loss scenario), use it
+          if (recoveredSessionId) {
+            const recoveredSession = sessions.find((s) => s.sessionId === recoveredSessionId);
+            set((state) => {
+              state.sessions.currentSessionId = recoveredSessionId;
+              state.sessions.currentDomain = recoveredSession?.domain || null;
+            });
+
+            try {
+              const { currentTask } = get();
+              if (currentTask.actions.loadMessages) {
+                await currentTask.actions.loadMessages(recoveredSessionId);
+              }
+            } catch (loadError: unknown) {
+              console.debug('[Sessions] Failed to preload messages for recovered session:', loadError);
+            }
+
+            // Persist as last session for future opens
+            void chrome.storage.local.set({ last_session_id: recoveredSessionId }).catch(() => {});
+
+            console.log('[Sessions] Using recovered session from backend');
+            return;
+          }
+
           // 1) Prefer a persisted last session id (works even if session list is empty/offline).
           try {
             const stored = await chrome.storage.local.get('last_session_id');
@@ -654,6 +704,33 @@ export const createSessionsSlice: MyStateCreator<SessionsSlice> = (set, get) => 
         console.error(`Error loading messages for session ${sessionId}:`, error);
         return [];
       }
+    },
+
+    /**
+     * Clear the tab-to-session mapping when a tab is closed.
+     * This prevents ghost sessions that could be reused if Chrome assigns
+     * the same tabId to a new tab later.
+     *
+     * Called from App.tsx when receiving TAB_CLOSED message from background.
+     */
+    clearTabSessionMapping: (tabId: number) => {
+      set((state) => {
+        const tabKey = String(tabId);
+        const existingSessionId = state.sessions.tabSessionMap[tabKey];
+
+        if (existingSessionId) {
+          console.log(`[Sessions] Clearing session mapping for closed tab ${tabId} (was: ${existingSessionId.slice(0, 8)}...)`);
+
+          // Create a new object without the closed tab's mapping
+          const { [tabKey]: _, ...remainingMappings } = state.sessions.tabSessionMap;
+          state.sessions.tabSessionMap = remainingMappings;
+
+          // If the closed tab was the current tab, clear currentTabId
+          if (state.sessions.currentTabId === tabId) {
+            state.sessions.currentTabId = null;
+          }
+        }
+      });
     },
   },
 });

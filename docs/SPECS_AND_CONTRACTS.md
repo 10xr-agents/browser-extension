@@ -9,12 +9,13 @@
 
 1. [Verification Contract (Extension → Backend)](#1-verification-contract-extension--backend)
 2. [Tab-Scoped Sessions (Domain Metadata)](#2-tab-scoped-sessions-domain-metadata)
-3. [Chat UI Contract (Backend → Extension)](#3-chat-ui-contract-backend--extension)
-4. [Robust Element Selectors](#4-robust-element-selectors)
-5. [Hybrid Vision + Skeleton](#5-hybrid-vision--skeleton)
-6. [Semantic JSON Protocol](#6-semantic-json-protocol)
-7. [Changelog](#7-changelog)
-8. [Related Documentation](#8-related-documentation)
+3. [Session Init Contract (Extension → Backend)](#3-session-init-contract-extension--backend)
+4. [Chat UI Contract (Backend → Extension)](#4-chat-ui-contract-backend--extension)
+5. [Robust Element Selectors](#5-robust-element-selectors)
+6. [Hybrid Vision + Skeleton](#6-hybrid-vision--skeleton)
+7. [Semantic JSON Protocol](#7-semantic-json-protocol)
+8. [Changelog](#8-changelog)
+9. [Related Documentation](#9-related-documentation)
 
 ---
 
@@ -62,8 +63,8 @@ These are supported by the current request schema (`lib/agent/schemas.ts`):
   clientVerification?: { elementFound: boolean, selector?: string, urlChanged?: boolean, timestamp?: number },
   clientObservations?: { didNetworkOccur?: boolean, didDomMutate?: boolean, didUrlChange?: boolean },
 
-  // === V3 SEMANTIC FIELDS (PRIMARY - use these) ===
-  domMode?: "semantic_v3" | "semantic" | "skeleton" | "hybrid" | "full",
+  // === SEMANTIC FIELDS (PRIMARY) ===
+  domMode?: "semantic" | "skeleton" | "hybrid" | "full",  // "semantic" is the API field name
   interactiveTree?: Array<{
     i: string,                              // Element ID
     r: string,                              // Role (minified: btn, inp, link, chk, etc.)
@@ -71,15 +72,14 @@ These are supported by the current request schema (`lib/agent/schemas.ts`):
     v?: string,                             // Value
     s?: string,                             // State (disabled, checked, etc.)
     xy?: [number, number],                  // Center coordinates
-    // V3 ADVANCED FIELDS:
     box?: [number, number, number, number], // Bounding box [x, y, w, h]
     scr?: { depth: string, h: boolean },    // Scrollable container info
     occ?: boolean,                          // Occluded by modal/overlay
   }>,
   viewport?: { width: number, height: number },
   pageTitle?: string,
-  
-  // === V3 ADVANCED FIELDS ===
+
+  // === ADVANCED SEMANTIC FIELDS ===
   scrollPosition?: string,                  // Page scroll depth "0%", "50%", etc.
   scrollableContainers?: Array<{            // Virtual list containers detected
     id: string,
@@ -89,21 +89,18 @@ These are supported by the current request schema (`lib/agent/schemas.ts`):
   recentEvents?: string[],                  // Mutation log: ["Added: 'Success'", "Error: 'Invalid'"]
   hasErrors?: boolean,                      // Recent errors detected
   hasSuccess?: boolean,                     // Recent success messages detected
-  
-  // === PRODUCTION-GRADE: SENTINEL VERIFICATION ===
+
+  // === SENTINEL VERIFICATION ===
   verification_passed?: boolean,            // Previous action verification result
   verification_message?: string,            // Human-readable verification feedback
   errors_detected?: string[],               // Errors caught by verification
   success_messages?: string[],              // Success messages caught by verification
-  
-  // === PRODUCTION-GRADE: DOM RAG (for huge pages) ===
+
+  // === DOM RAG (for huge pages) ===
   dom_filtered?: boolean,                   // True if DOM was filtered
   filter_reason?: string,                   // Why filtering was applied
   original_node_count?: number,             // Count before filtering
   token_reduction?: number,                 // Percentage reduction achieved
-
-  // === V2 SEMANTIC FIELDS (fallback) ===
-  semanticNodes?: Array<{ id: string, role: string, name: string, value?: string, state?: string }>,
 
   // === HYBRID/SKELETON FIELDS ===
   screenshot?: string | null,
@@ -161,9 +158,241 @@ No backend changes are required for tab-scoped sessions because:
   - `extractDomain(url)` — extracts root domain (supports `co.uk`-style TLDs, `localhost`, IPs)
   - `generateSessionTitle(domain, taskDescription)` — `{domain}: {taskDescription}`
 
+### Tab Cleanup
+
+Session mappings (`tabId → sessionId`) are cleaned up in two scenarios:
+
+#### 1. On Tab Close (Runtime Cleanup)
+
+When a tab is closed during runtime:
+
+- **Why:** Prevents ghost sessions. Chrome may reuse the same tabId for a new tab, which would incorrectly reuse the old session.
+- **How:**
+  1. Background service worker broadcasts `TAB_CLOSED` message
+  2. UI (`App.tsx`) receives message and calls `clearTabSessionMapping(tabId)`
+  3. Removes entry from `tabSessionMap` and clears `currentTabId` if it was the closed tab
+- **Location:**
+  - `src/pages/Background/index.ts` - broadcasts `TAB_CLOSED`
+  - `src/common/App.tsx` - listens and calls cleanup
+  - `src/state/sessions.ts` - `clearTabSessionMapping()` action
+
+#### 2. On Startup (Stale Cleanup)
+
+When the extension initializes:
+
+- **Why:** Tab IDs are not stable across browser restarts. Old mappings from crashed/closed tabs would point to non-existent tabs.
+- **How:** `initializeDomainAwareSessions()` queries all open Chrome tabs and removes any `tabSessionMap` entries for tabs that no longer exist.
+- **Location:** `src/state/sessions.ts` (lines 486-535)
+
+```typescript
+// Clean up stale tabId -> sessionId mappings
+const tabs = await chrome.tabs.query({});
+const openTabIds = new Set(tabs.map(t => t.id));
+// Remove mappings for tabs not in openTabIds
+```
+
+### Authentication & Token Lifecycle
+
+**Token Storage:**
+- Access token stored in `chrome.storage.local` as `accessToken`
+- Additional fields: `expiresAt`, `user`, `tenantId`, `tenantName`
+
+**Token Usage:**
+- All API requests include `Authorization: Bearer ${token}` header
+- Pusher/WebSocket auth via `/api/pusher/auth` also includes Bearer token
+
+**Token Refresh:**
+- **Current behavior:** Token refresh is NOT implemented
+- On 401 response, extension clears stored token and user must re-login
+- The `expiresAt` field is stored but not used for proactive refresh
+- For short-lived automation tasks, this is acceptable; long sessions may require re-login
+
+**Location:** `src/api/client.ts` (token storage: lines 466-529, auth header: line 648)
+
 ---
 
-## 3. Chat UI Contract (Backend → Extension)
+## 3. Session Init Contract (Extension → Backend)
+
+**Status:** ✅ Implemented (February 2026)
+
+**Purpose:** Ensure sessions exist on the backend BEFORE subscribing to Pusher channels. This prevents 403 errors from `/api/pusher/auth` when a new tab opens or local storage is lost.
+
+### 3.1 The Problem
+
+When a new tab opens (or local storage is cleared), the extension creates a local session with a UUID. However, if the extension immediately tries to subscribe to Pusher for real-time updates, the `/api/pusher/auth` endpoint returns **403 Forbidden** because the session doesn't exist on the backend yet.
+
+**Problematic Flow (Before):**
+```
+New tab opens
+    ↓
+Extension generates local UUID (sessionId)
+    ↓
+Saves to chrome.storage.local (local only)
+    ↓
+Tries to subscribe to Pusher channel: private-session-{sessionId}
+    ↓
+POST /api/pusher/auth → 403 FORBIDDEN (session doesn't exist!)
+```
+
+### 3.2 The Solution: POST /api/session/init
+
+The extension now calls `POST /api/session/init` to create the session on the backend BEFORE subscribing to Pusher.
+
+**Correct Flow (After):**
+```
+New tab opens
+    ↓
+Extension generates local UUID (sessionId)
+    ↓
+POST /api/session/init { sessionId, url, domain }
+    ↓
+Backend creates session row, returns { created: true }
+    ↓
+Extension saves to chrome.storage.local
+    ↓
+Pusher subscribes to private-session-{sessionId}
+    ↓
+POST /api/pusher/auth → 200 OK (session exists!)
+```
+
+### 3.3 API Contract
+
+#### POST /api/session/init
+
+**Request:**
+```json
+{
+  "sessionId": "uuid-v4",
+  "url": "https://example.com/page",
+  "domain": "example.com",
+  "initialQuery": "Optional task description",
+  "tabId": 123
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sessionId` | string | ✅ | Client-generated UUID v4 |
+| `url` | string | No | URL where session was started |
+| `domain` | string | No | Root domain (e.g., "google.com") |
+| `initialQuery` | string | No | Initial task description |
+| `tabId` | number | No | Chrome tab ID (client-only metadata) |
+
+**Response (Success):**
+```json
+{
+  "success": true,
+  "data": {
+    "sessionId": "uuid-v4",
+    "created": true
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | boolean | Always `true` on 2xx |
+| `data.sessionId` | string | The session ID that was created/verified |
+| `data.created` | boolean | `true` if new session was created, `false` if already existed |
+
+**Response (Error):**
+- **401 Unauthorized:** Invalid or missing Bearer token
+- **400 Bad Request:** Invalid sessionId format
+- **500 Server Error:** Database error
+
+### 3.4 Extension Implementation
+
+#### When Init is Called
+
+| Scenario | When Called | Location |
+|----------|-------------|----------|
+| **New tab opened** | In `createNewSession()` after generating UUID | `src/services/sessionService.ts` |
+| **Before Pusher subscribe** | In `messageSyncManager.startSync()` before `pusherTransport.connect()` | `src/services/messageSyncService.ts` |
+| **Session recovery** | When recovering sessions from backend after storage loss | `src/services/sessionService.ts` |
+
+#### Key Functions
+
+**`ensureSessionInitialized(sessionId, metadata)`** — The critical function that ensures a session exists on the backend.
+
+```typescript
+// src/services/sessionService.ts
+export async function ensureSessionInitialized(
+  sessionId: string,
+  metadata?: { url?: string; domain?: string; initialQuery?: string; tabId?: number }
+): Promise<boolean> {
+  // 1. Check cache (already initialized)
+  if (isSessionInitialized(sessionId)) return true;
+
+  // 2. Check in-flight (prevent duplicate calls)
+  if (initInFlightMap.has(sessionId)) return initInFlightMap.get(sessionId);
+
+  // 3. Call backend
+  const response = await apiClient.initSession(sessionId, metadata);
+  if (response.success) {
+    await markSessionInitialized(sessionId);
+    return true;
+  }
+  return false;
+}
+```
+
+**`recoverSessionsFromBackend(currentUrl)`** — Handles the storage loss scenario.
+
+```typescript
+// src/services/sessionService.ts
+export async function recoverSessionsFromBackend(currentUrl?: string): Promise<string | null> {
+  // 1. Check if local storage is empty
+  const localSessions = await getLocalSessions();
+  if (localSessions.length > 0) return null; // No recovery needed
+
+  // 2. Fetch sessions from backend
+  const response = await apiClient.listSessions({ status: 'active' });
+
+  // 3. Save recovered sessions to local storage
+  // 4. Mark all as initialized (they already exist on backend)
+  // 5. Return best match (by domain) or most recent
+}
+```
+
+#### Caching & Deduplication
+
+- **`initialized_sessions`** key in `chrome.storage.local` tracks which sessions are known to exist on backend
+- **In-memory cache** (`initializedSessionsCache`) prevents redundant API calls within the same session
+- **In-flight deduplication** (`initInFlightMap`) prevents parallel init calls for the same session
+
+### 3.5 Scenarios Handled
+
+| Scenario | How It's Handled |
+|----------|------------------|
+| **New tab + extension active** | `createNewSession()` calls `ensureSessionInitialized()` (fire-and-forget), then `startSync()` awaits init before Pusher connect |
+| **Open extension on existing tab** | Same as above — init happens in `startSync()` before Pusher |
+| **Storage loss + browser restart** | `initializeDomainAwareSessions()` calls `recoverSessionsFromBackend()` which fetches sessions from backend and marks them as initialized |
+| **Offline mode** | Init fails gracefully; falls back to polling (no Pusher) |
+
+### 3.6 Backend Requirements
+
+The backend must implement `POST /api/session/init` that:
+
+1. **Accepts a client-generated sessionId** (UUID v4)
+2. **Creates the session row** if it doesn't exist (idempotent)
+3. **Returns `created: true/false`** indicating if new or existing
+4. **Associates session with authenticated user** (from Bearer token)
+5. **Stores optional metadata** (url, domain, initialQuery)
+
+**Idempotency:** Calling init multiple times with the same sessionId should be safe and return `created: false` on subsequent calls.
+
+### 3.7 Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/api/client.ts` | `initSession()` method — calls `POST /api/session/init` |
+| `src/services/sessionService.ts` | `ensureSessionInitialized()`, `recoverSessionsFromBackend()`, `initializeSessionService()` |
+| `src/services/messageSyncService.ts` | Calls `ensureSessionInitialized()` before Pusher connect |
+| `src/state/sessions.ts` | `initializeDomainAwareSessions()` calls recovery logic on startup |
+
+---
+
+## 4. Chat UI Contract (Backend → Extension)
 
 **Purpose:** Define what the Side Panel chat UI expects from the backend so the user can distinguish user vs agent messages, see the live plan, and understand task completion.
 
@@ -295,6 +524,25 @@ Real-time message sync uses **Pusher/Sockudo**: channel `private-session-<sessio
 }
 ```
 
+#### WebSocket Auth & Reauth Strategy
+
+**Channel Auth:** POST `/api/pusher/auth` with Bearer token. Returns signed auth string for private channel.
+
+**Reauth on 403/401 Errors:**
+
+When Pusher channel auth fails (403 Forbidden, 401 Unauthorized):
+
+1. **Token Validation First:** Client calls `GET /api/v1/auth/session` to check if token is still valid
+2. **If Valid (Transient Error):** Reset failure count, retry connection immediately with fresh credentials
+3. **If Invalid:** Enter cooldown period (1 min default, 5 min after 3+ failures), switch to polling fallback
+4. **Visibility Reconnect:** When tab becomes visible after idle, calls `forceReconnectWithFreshToken()` which:
+   - Bypasses cooldown
+   - Validates token via `/api/v1/auth/session`
+   - Reconnects with fresh credentials if token is valid
+   - Falls back gracefully if token expired (user needs to re-login)
+
+**Location:** `src/services/pusherTransport.ts` (`handleAuthFailure`, `forceReconnectWithFreshToken`, `validateToken`)
+
 ### 3.6 What the Backend Does NOT Need to Do
 
 - **No new endpoints** — only correct shape of existing responses.
@@ -365,7 +613,7 @@ export async function triggerNewMessage(
 
 ---
 
-## 4. Robust Element Selectors
+## 5. Robust Element Selectors
 
 **Purpose:** Prevent “stale element ID” failures on dynamic sites by returning a robust `selectorPath` alongside element-id-based actions.
 
@@ -411,7 +659,7 @@ When automating dynamic sites (Google.com, React apps, etc.), element IDs become
 
 ---
 
-## 5. Hybrid Vision + Skeleton
+## 6. Hybrid Vision + Skeleton
 
 **Purpose:** Define the optional fields for the hybrid vision + skeleton mode, which reduces token usage by ~80% while improving accuracy for visual/spatial tasks.
 
@@ -626,22 +874,61 @@ The full DOM is **always sent** in the `dom` field, even in `skeleton` or `hybri
 - Default: 50,000 chars
 - Extended (for complex pages): 200,000 chars (auto-selected when DOM exceeds 50k)
 
+#### Backend-Driven Negotiation
+
+The extension follows a "semantic-first" principle: send lightweight `semantic` data first, then add heavier artifacts only when the backend explicitly requests them.
+
+**Negotiation Flow:**
+1. **Step A (always):** Extension sends `domMode: "semantic"` with `interactiveTree`
+2. **Step B (optional):** Backend responds requesting additional artifacts if needed
+3. **Step C:** Extension retries with *only* the requested artifacts
+
+**Backend Negotiation Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `"needs_context"` or `"needs_full_dom"` | Indicates more context is needed |
+| `requestedDomMode` | `"skeleton"` \| `"hybrid"` \| `"full"` | Which mode to use on retry |
+| `needsSkeletonDom` | `boolean` | Request skeleton HTML |
+| `needsScreenshot` | `boolean` | Request screenshot |
+| `reason` | `string` | Why additional context is needed (for debugging) |
+
+**Example negotiation response:**
+
+```json
+{
+  "status": "needs_context",
+  "requestedDomMode": "hybrid",
+  "needsScreenshot": true,
+  "needsSkeletonDom": true,
+  "reason": "User asked about the 'blue' button; semantic tree doesn't encode color reliably."
+}
+```
+
+**When Backend Should Request More Artifacts:**
+
+| Request | When to Use |
+|---------|-------------|
+| `skeleton` | Semantic tree lacks surrounding structure (e.g., duplicated labels) |
+| `hybrid` | Visual references (color, icon-only, "top-right gear", "second card"), many similar elements |
+| `full` | Raw HTML details needed, server-side selector generation requires missing attributes |
+
 #### Fallback Handling
 
-When the server determines skeleton DOM is insufficient, it responds with `status: 'needs_full_dom'`. The extension automatically retries with `domMode: 'full'`:
+When the server determines semantic/skeleton DOM is insufficient, it responds with negotiation fields. The extension automatically retries:
 
 ```typescript
-if (response.status === 'needs_full_dom') {
-  // Retry the same request with full DOM mode
+if (response.status === 'needs_full_dom' || response.status === 'needs_context') {
+  const requestedMode = response.requestedDomMode || 'full';
   response = await apiClient.agentInteract(
     currentUrl,
     safeInstructions,
     currentDom,
     // ... other params
     {
-      screenshot: screenshotBase64,
-      skeletonDom,
-      domMode: 'full', // Override to full mode
+      screenshot: response.needsScreenshot ? screenshotBase64 : undefined,
+      skeletonDom: response.needsSkeletonDom ? skeletonDom : undefined,
+      domMode: requestedMode,
       screenshotHash: screenshotHash || undefined,
     }
   );
@@ -668,11 +955,11 @@ if (response.status === 'needs_full_dom') {
 
 ---
 
-## 6. Semantic JSON Protocol (V3)
+## 7. Semantic JSON Protocol
 
 **Purpose:** Replace heavy HTML-based DOM extraction with a lightweight JSON protocol that provides ~95-99% token reduction and eliminates "Element not found" errors through stable element IDs.
 
-**Status:** ✅ V3 Implementation Complete (February 2026)
+**Status:** ✅ Implementation Complete (February 2026)
 
 **Key Principle:** Semantic JSON is the PRIMARY and ONLY source of truth. Full DOM should ONLY be sent when the backend explicitly requests it via `needs_full_dom` response.
 
@@ -688,21 +975,19 @@ The Semantic JSON Protocol addresses two critical issues with the previous HTML-
 - **JSON Format:** Send a simple JSON array instead of nested HTML
 - **DOM Stability Waiting:** Wait for the DOM to stop changing before extraction
 
-### 6.2 V3 Enhancements (NEW)
+### 6.2 Key Features
 
-V3 introduces three major optimizations on top of the V2 semantic protocol:
-
-| Enhancement | Description | Token Impact |
-|-------------|-------------|--------------|
+| Feature | Description | Token Impact |
+|---------|-------------|--------------|
 | **Viewport Pruning** | Skip off-screen elements (below/above viewport) | ~60% reduction on long pages |
 | **Minified JSON Keys** | `i/r/n/v/s/xy` instead of `id/role/name/value/state/coordinates` | ~30% reduction |
 | **Coordinates Included** | `[x, y]` for direct click targeting | Eliminates coordinate lookups |
 
-**V3 Payload Example:**
+**Semantic Payload Example:**
 
 ```json
 {
-  "mode": "semantic_v3",
+  "mode": "semantic",
   "url": "https://google.com",
   "title": "Google",
   "viewport": { "width": 1280, "height": 800 },
@@ -714,7 +999,7 @@ V3 introduces three major optimizations on top of the V2 semantic protocol:
 }
 ```
 
-**V3 Legend (included in system prompt):**
+**Legend (included in system prompt):**
 ```
 - i: element ID (use this in click(i) or setValue(i, text))
 - r: role (btn=button, inp=input, link=link, chk=checkbox, sel=select)
@@ -730,12 +1015,11 @@ V3 introduces three major optimizations on top of the V2 semantic protocol:
 |------|--------------|----------------|
 | Full DOM | 50-200 KB | 10,000-50,000 |
 | Skeleton | 2-6 KB | 500-1,500 |
-| Semantic V2 | 200-500 bytes | 50-125 |
-| **Semantic V3** | **100-300 bytes** | **25-75** |
+| **Semantic** | **100-300 bytes** | **25-75** |
 
-### 6.2.1 V3 Advanced Features (Production-Grade)
+### 6.2.1 Advanced Features
 
-V3 Advanced adds production-grade reliability features:
+Production-grade reliability features:
 
 | Feature | Problem Solved | New Field/Behavior |
 |---------|---------------|-------------------|
@@ -747,11 +1031,11 @@ V3 Advanced adds production-grade reliability features:
 | **Self-Healing Recovery** | Stale IDs after re-render | Ghost match by role/name/coordinates |
 | **Bounding Box** | Multimodal vision support | `box: [x, y, w, h]` |
 
-**V3 Advanced Payload Example:**
+**Advanced Payload Example:**
 
 ```json
 {
-  "mode": "semantic_v3",
+  "mode": "semantic",
   "url": "https://amazon.com/checkout",
   "title": "Checkout",
   "viewport": { "width": 1280, "height": 800 },
@@ -773,7 +1057,7 @@ V3 Advanced adds production-grade reliability features:
 }
 ```
 
-**V3 Advanced Node Fields:**
+**Advanced Node Fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -781,7 +1065,7 @@ V3 Advanced adds production-grade reliability features:
 | `scr` | `{ depth, h }` | Scrollable container: depth=scroll%, h=hasMore |
 | `occ` | `boolean` | True if covered by overlay (don't click) |
 
-**V3 Advanced Legend (for system prompt):**
+**Advanced Legend (for system prompt):**
 
 ```
 LEGEND for interactive_tree format:
@@ -827,21 +1111,19 @@ Instead of calculating IDs during extraction, we "stamp" permanent IDs onto elem
 
 ### 6.4 Request Fields (Extension → Backend)
 
-**V3 Format (PRIMARY - recommended):**
-
-When `domMode` is `"semantic_v3"`, the extension sends:
+When `domMode` is `"semantic"`, the extension sends:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `domMode` | `"semantic_v3"` | Indicates V3 ultra-light format |
-| `interactiveTree` | `SemanticNodeV3[]` | Minified array with viewport pruning |
+| `domMode` | `"semantic"` | Indicates semantic format (API field name) |
+| `interactiveTree` | `SemanticNode[]` | Minified array with viewport pruning |
 | `pageTitle` | `string` | Page title for context |
 | `viewport` | `{ width, height }` | Viewport dimensions |
 
-**SemanticNodeV3 Structure (minified keys):**
+**SemanticNode Structure (minified keys for token efficiency):**
 
 ```typescript
-interface SemanticNodeV3 {
+interface SemanticNode {
   i: string;         // Element ID (stable data-llm-id)
   r: string;         // Role (minified: btn, inp, link, chk, sel, etc.)
   n: string;         // Name/label (truncated to 50 chars)
@@ -849,35 +1131,9 @@ interface SemanticNodeV3 {
   s?: string;        // State: 'disabled', 'checked', 'expanded'
   xy?: [number, number]; // [x, y] center coordinates
   f?: number;        // Frame ID (0 = main, omitted if 0)
-}
-```
-
-**V2 Format (fallback):**
-
-When `domMode` is `"semantic"`, the extension sends:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `domMode` | `"semantic"` | Indicates V2 semantic format |
-| `semanticNodes` | `SemanticNode[]` | Full-key array of interactive elements |
-| `pageTitle` | `string` | Page title for context |
-| `dom` | `string` | Minimal DOM fallback (truncated to 10KB) |
-
-**SemanticNode Structure (full keys):**
-
-```typescript
-interface SemanticNode {
-  id: string;         // Stable data-llm-id (persists across re-renders)
-  role: string;       // Semantic role: 'button', 'link', 'input', 'textbox', etc.
-  name: string;       // Human-readable label (aria-label > innerText > placeholder)
-  value?: string;     // Current value for inputs
-  state?: string;     // Element state: 'checked', 'disabled', 'selected', 'expanded'
-  type?: string;      // Input type if applicable
-  placeholder?: string;
-  href?: string;      // For links
-  isInShadow?: boolean; // V2: Inside Shadow DOM
-  frameId?: number;   // V2: Frame ID (0 = main)
-  bounds?: { x, y, width, height }; // V2: Bounding box
+  box?: [number, number, number, number]; // Bounding box [x, y, w, h]
+  scr?: { depth: string; h: boolean }; // Scrollable container info
+  occ?: boolean;     // True if occluded by overlay
 }
 ```
 
@@ -902,36 +1158,39 @@ interface SemanticNode {
 ]
 ```
 
-**Token Reduction:** ~99.8% (12,000 → 25-50 tokens with V3)
+**Token Reduction:** ~99.8% (12,000 → 25-50 tokens)
 
-### 6.6 DOM Mode Selection (V3 Priority)
+### 6.6 DOM Mode Selection
 
-**IMPORTANT:** Semantic V3 is now the PRIMARY mode. Full DOM should ONLY be sent when explicitly requested by the backend.
+**IMPORTANT:** Semantic is the PRIMARY mode. Full DOM should ONLY be sent when explicitly requested by the backend.
 
 | Priority | Condition | Mode Selected | Payload | Tokens |
 |----------|-----------|---------------|---------|--------|
-| **1 (Default)** | V3 enabled | `semantic_v3` | Minified JSON + viewport pruning | 25-75 |
-| 2 | V3 fails/empty | `semantic` | Full-key JSON | 50-125 |
-| 3 | Semantic fails | `skeleton` | Skeleton HTML | 500-1500 |
-| 4 | Visual query | `hybrid` | Screenshot + skeleton | 2000-3000 |
-| **5 (ONLY on request)** | Backend returns `needs_full_dom` | `full` | Full HTML | 10k-50k |
+| **1 (Default)** | Semantic enabled | `semantic` | Minified JSON + viewport pruning | 25-75 |
+| 2 | Semantic fails | `skeleton` | Skeleton HTML | 500-1500 |
+| 3 | Visual query | `hybrid` | Screenshot + skeleton | 2000-3000 |
+| **4 (ONLY on request)** | Backend returns `needs_full_dom` | `full` | Full HTML | 10k-50k |
 
 **Key Principle:** The extension should NEVER send full DOM proactively. Only send it when the backend explicitly requests it in a `needs_full_dom` response.
 
 ```typescript
 // Decision flow in currentTask.ts
-const mode = 
-  USE_V3_EXTRACTION ? 'semantic_v3' :    // First choice
-  USE_SEMANTIC_EXTRACTION ? 'semantic' : // Second choice
-  selectDomMode(query, context);         // Fallback to hybrid/skeleton
+if (USE_SEMANTIC_EXTRACTION) {
+  const result = await callRPC('getSemanticDomV3', ...);
+  if (result?.interactive_tree?.length > 0) {
+    domMode = 'semantic';  // API field name
+  } else {
+    domMode = selectDomMode(query, context); // Fallback to skeleton/hybrid
+  }
+}
 
 // Full DOM ONLY on explicit backend request
-if (backendResponse.action === 'needs_full_dom') {
+if (backendResponse.status === 'needs_full_dom') {
   retryWithFullDom();
 }
 ```
 
-### 6.6 Stability Waiting
+### 6.7 Stability Waiting
 
 Before extracting, the extension waits for the DOM to stabilize:
 
@@ -945,14 +1204,14 @@ await waitForDomStability({
 
 This prevents extracting "skeleton" pages that are still loading (e.g., Google search results).
 
-### 6.7 Backend Integration Requirements
+### 6.8 Backend Integration Requirements
 
-For full semantic mode support, the backend should:
+For semantic mode support, the backend should:
 
-1. **Accept `domMode: "semantic"`** as a valid mode
-2. **Parse `semanticNodes` array** when present
+1. **Accept `domMode: "semantic"`** as the primary mode
+2. **Parse `interactiveTree` array** when present
 3. **Use stable IDs** for action targeting (e.g., `click("6")` instead of `click(6)`)
-4. **Fallback gracefully** - if `semanticNodes` is empty, use `dom` field
+4. **Request more context** - if semantic data is insufficient, respond with `needs_context` or `needs_full_dom`
 
 **Response format unchanged** - the backend still returns:
 
@@ -987,13 +1246,16 @@ The semantic extraction is **enabled by default** (`USE_SEMANTIC_EXTRACTION = tr
 
 ---
 
-## 7. Changelog
+## 8. Changelog
 
+- **2026-02-01**: **Session Init Contract (NEW)** - Added `POST /api/session/init` endpoint contract. Extension now initializes sessions on backend BEFORE subscribing to Pusher channels. Prevents 403 errors from `/api/pusher/auth`. Added `ensureSessionInitialized()` function, session recovery logic for storage loss scenarios, and initialized sessions cache. New files: `src/api/client.ts` (initSession method), `src/services/sessionService.ts` (ensureSessionInitialized, recoverSessionsFromBackend, initializeSessionService), `src/services/messageSyncService.ts` (init check before Pusher connect).
+- **2026-02-01**: **Tab Close Session Cleanup (FIX)** - Added runtime cleanup of `tabSessionMap` when tabs close. Previously, only startup cleanup existed, leaving ghost mappings during runtime. New files/changes: `sessions.ts` (clearTabSessionMapping action), `Background/index.ts` (TAB_CLOSED broadcast), `App.tsx` (listener for cleanup).
+- **2026-02-01**: **Documentation Update** - Added Tab Cleanup section (§2) documenting both runtime and startup cleanup. Added Authentication & Token Lifecycle section (§2) documenting token storage, usage, and the token refresh gap (not implemented, relies on 401 → re-login).
 - **2026-02-01**: **PRODUCTION-GRADE FEATURES** - Added DOM RAG for handling massive pages (5000+ elements) with client-side chunking and relevance filtering. Added Sentinel Verification System for verifying action outcomes (catches silent failures like vanishing error toasts). New files: `domRag.ts`, `sentinelVerification.ts`. New request fields: `verification_passed`, `verification_message`, `errors_detected`.
-- **2026-02-01**: **V3 ADVANCED (PRODUCTION-GRADE)** - Added production-grade reliability features: True Visibility Raycasting (modal detection), Explicit Label Association (form fix), Mutation Stream (ghost state detection), Delta Hashing (bandwidth optimization), Virtual List Detection (infinite scroll), Self-Healing Recovery (stale ID fix), Bounding Box (Set-of-Mark multimodal). New files: `mutationLog.ts`, `deltaHash.ts`. New fields: `box`, `scr`, `occ`, `scrollPosition`, `scrollableContainers`, `recentEvents`, `hasErrors`, `hasSuccess`.
-- **2026-02-01**: **V3 ULTRA-LIGHT PROTOCOL** - Major upgrade to semantic extraction. New features: viewport pruning (~60% reduction), minified JSON keys (i/r/n/v/s/xy), coordinates included. New `domMode: "semantic_v3"`. Semantic is now PRIMARY; full DOM only on explicit backend request. New files: `axTreeExtractor.ts`. Token reduction: 99.8% (10k → 25-75 tokens).
-- **2026-02-01**: **Shadow DOM & Iframe Support (V2)** - Added `query-selector-shadow-dom` library for piercing Shadow DOM. Added `domAggregator.ts` for multi-frame extraction. New fields: `isInShadow`, `frameId`, `bounds`.
-- **2026-02-01**: Added Semantic JSON Protocol (section 6). New DOM extraction approach with ~95% token reduction and stable IDs. New files: `tagger.ts`, `semanticTree.ts`, `domWait.ts`. New request fields: `semanticNodes`, `pageTitle`, `domMode: "semantic"`.
+- **2026-02-01**: **ADVANCED SEMANTIC FEATURES** - Added production-grade reliability features: True Visibility Raycasting (modal detection), Explicit Label Association (form fix), Mutation Stream (ghost state detection), Delta Hashing (bandwidth optimization), Virtual List Detection (infinite scroll), Self-Healing Recovery (stale ID fix), Bounding Box (Set-of-Mark multimodal). New files: `mutationLog.ts`, `deltaHash.ts`. New fields: `box`, `scr`, `occ`, `scrollPosition`, `scrollableContainers`, `recentEvents`, `hasErrors`, `hasSuccess`.
+- **2026-02-01**: **ULTRA-LIGHT SEMANTIC PROTOCOL** - Major upgrade to semantic extraction. New features: viewport pruning (~60% reduction), minified JSON keys (i/r/n/v/s/xy), coordinates included. Semantic is now PRIMARY; full DOM only on explicit backend request. New files: `axTreeExtractor.ts`. Token reduction: 99.8% (10k → 25-75 tokens).
+- **2026-02-01**: **Shadow DOM & Iframe Support** - Added `query-selector-shadow-dom` library for piercing Shadow DOM. Added `domAggregator.ts` for multi-frame extraction. New fields: `isInShadow`, `frameId`, `bounds`.
+- **2026-02-01**: Added Semantic JSON Protocol (section 6). New DOM extraction approach with ~95% token reduction and stable IDs. New files: `tagger.ts`, `semanticTree.ts`, `domWait.ts`. New request fields: `interactiveTree`, `pageTitle`, `domMode: "semantic"`.
 - **2026-02-01**: Added Extension Implementation (Current Behavior) section (5.8). Documents exactly what DOM data is sent: full DOM always, skeleton DOM always, screenshot only in hybrid mode.
 - **2026-01-31**: Added Robust Element Selectors Contract (section 4). Backend implementation complete.
 - **2026-01-31**: Added Hybrid Vision + Skeleton Contract (section 5). New request fields: `screenshot`, `domMode`, `skeletonDom`, `screenshotHash`.
@@ -1001,7 +1263,7 @@ The semantic extraction is **enabled by default** (`USE_SEMANTIC_EXTRACTION = tr
 
 ---
 
-## 8. Related Documentation
+## 9. Related Documentation
 
 - [DOM_EXTRACTION_ARCHITECTURE.md](./DOM_EXTRACTION_ARCHITECTURE.md) — **Comprehensive guide to DOM extraction and what's sent to the LLM**
 - [INTERACT_FLOW_WALKTHROUGH.md](./INTERACT_FLOW_WALKTHROUGH.md) — Detailed interact flow

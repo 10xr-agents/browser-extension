@@ -380,14 +380,14 @@ export function buildV3Payload(
   title: string,
   viewport: { width: number; height: number }
 ): {
-  mode: 'semantic_v3';
+  mode: 'semantic';
   url: string;
   title: string;
   viewport: { width: number; height: number };
   interactive_tree: SemanticNodeV3[];
 } {
   return {
-    mode: 'semantic_v3',
+    mode: 'semantic',
     url,
     title,
     viewport,

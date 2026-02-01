@@ -5,6 +5,12 @@
  * private-session-<sessionId>, binds new_message and interact_response.
  * Channel auth: POST to main server (e.g. port 3000) /api/pusher/auth with Bearer token.
  *
+ * **Reauth Strategy (for 403/401 errors):**
+ * 1. On auth failure, attempt to refresh the token first
+ * 2. If token refresh succeeds, retry connection immediately
+ * 3. If token refresh fails, enter cooldown (prevents spam)
+ * 4. On visibility change (tab becomes active), force reconnect with fresh token
+ *
  * Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md §11.11, Client TODO List
  */
 
@@ -12,6 +18,7 @@ import { EventEmitter } from 'events';
 import Pusher from 'pusher-js';
 import type { Channel } from 'pusher-js';
 import type { ChatMessage } from '../types/chatMessage';
+import { apiClient } from '../api/client';
 
 export type ConnectionState =
   | 'disconnected'
@@ -138,6 +145,81 @@ class PusherTransport extends EventEmitter {
     this.lastAuthFailureTime = 0;
   }
 
+  /**
+   * Validate current token by calling getSession API.
+   * Returns true if token is valid, false otherwise.
+   * This is used to check if we should retry connection or enter cooldown.
+   */
+  private async validateToken(): Promise<boolean> {
+    try {
+      await apiClient.getSession();
+      console.log('[PusherTransport] Token validation successful');
+      return true;
+    } catch (error: unknown) {
+      console.warn('[PusherTransport] Token validation failed:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Handle auth failure with token refresh attempt.
+   * If token is still valid (race condition, transient error), retry immediately.
+   * If token is invalid, enter cooldown.
+   */
+  private async handleAuthFailure(): Promise<boolean> {
+    // First, check if the token is actually invalid or if it was a transient error
+    const tokenValid = await this.validateToken();
+
+    if (tokenValid) {
+      // Token is valid - this was a transient error, reset failures and allow retry
+      console.log('[PusherTransport] Token still valid after auth failure - will retry');
+      this.resetAuthFailures();
+      return true; // Caller should retry
+    }
+
+    // Token is invalid - record failure and enter cooldown
+    this.recordAuthFailure();
+    console.warn('[PusherTransport] Token invalid - user may need to re-login');
+    return false; // Caller should not retry
+  }
+
+  /**
+   * Force reconnect with fresh token, bypassing cooldown.
+   * Called when tab becomes visible after being idle.
+   * This gives the user a chance to reconnect if their token was refreshed.
+   */
+  async forceReconnectWithFreshToken(sessionId?: string): Promise<void> {
+    const targetSession = sessionId || this.currentSessionId;
+    if (!targetSession) {
+      console.warn('[PusherTransport] No session ID for force reconnect');
+      return;
+    }
+
+    console.log('[PusherTransport] Force reconnecting with fresh token for session:', targetSession);
+
+    // Validate token first - if it's expired, no point in reconnecting
+    const tokenValid = await this.validateToken();
+    if (!tokenValid) {
+      console.warn('[PusherTransport] Token invalid - cannot force reconnect, user needs to re-login');
+      this.setConnectionState('failed');
+      this.emit('fallback', { reason: 'Token expired - please re-login' });
+      return;
+    }
+
+    // Token is valid - reset auth failures and reconnect
+    this.resetAuthFailures();
+
+    // Clean disconnect (without setting isManualDisconnect to true permanently)
+    if (this.pusher) {
+      const prevManual = this.isManualDisconnect;
+      await this.disconnect();
+      this.isManualDisconnect = prevManual; // Restore
+    }
+
+    // Reconnect with fresh token
+    await this.connect(targetSession);
+  }
+
   private async getToken(): Promise<string | null> {
     try {
       if (typeof chrome === 'undefined' || !chrome.storage?.local) return null;
@@ -197,25 +279,32 @@ class PusherTransport extends EventEmitter {
       const statusCode = status?.status ?? 0;
       const errorType = status?.type ?? 'unknown';
       const errorMessage = status?.error ?? 'Channel subscription failed';
-      
+
       console.warn(`[PusherTransport] Channel subscription error for ${channelName}:`, {
         status: statusCode,
         type: errorType,
         error: errorMessage,
       });
-      
+
       // 403 = Forbidden (auth rejected), 401 = Unauthorized (token invalid)
       if (statusCode === 403 || statusCode === 401) {
-        // Record auth failure for cooldown tracking
-        this.recordAuthFailure();
-        
-        console.warn('[PusherTransport] Channel auth failed with', statusCode, '- switching to polling fallback');
-        this.setConnectionState('failed');
-        this.emit('fallback', { 
-          reason: `Channel auth failed (${statusCode}): ${errorMessage}`,
+        // Try token validation before giving up - might be a transient error
+        void this.handleAuthFailure().then((shouldRetry) => {
+          if (shouldRetry && this.currentSessionId) {
+            // Token is valid, retry connection with fresh credentials
+            console.log('[PusherTransport] Retrying connection after transient auth error');
+            void this.forceReconnectWithFreshToken(this.currentSessionId);
+          } else {
+            // Token invalid, switch to polling fallback
+            console.warn('[PusherTransport] Channel auth failed with', statusCode, '- switching to polling fallback');
+            this.setConnectionState('failed');
+            this.emit('fallback', {
+              reason: `Channel auth failed (${statusCode}): ${errorMessage}`,
+            });
+            // Disconnect to prevent retry loops - polling will take over
+            void this.disconnect();
+          }
         });
-        // Disconnect to prevent retry loops - polling will take over
-        void this.disconnect();
       } else if (statusCode >= 500) {
         // Server error - might be temporary, let reconnect logic handle it
         console.warn('[PusherTransport] Channel auth server error', statusCode, '- will retry');
@@ -392,8 +481,16 @@ class PusherTransport extends EventEmitter {
             clearTimeout(this.connectTimeout);
             this.connectTimeout = null;
           }
-          this.setConnectionState('failed');
-          this.emit('fallback', { reason: 'Pusher auth failed' });
+          // Try token validation before failing
+          void this.handleAuthFailure().then((shouldRetry) => {
+            if (shouldRetry && this.currentSessionId) {
+              console.log('[PusherTransport] Retrying after connection auth error');
+              void this.forceReconnectWithFreshToken(this.currentSessionId);
+            } else {
+              this.setConnectionState('failed');
+              this.emit('fallback', { reason: 'Pusher auth failed' });
+            }
+          });
         }
       });
 

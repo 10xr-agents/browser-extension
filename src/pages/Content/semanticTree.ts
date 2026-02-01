@@ -941,7 +941,7 @@ export interface V3ExtractionOptions {
  * V3 Extraction Result with minified payload
  */
 export interface SemanticTreeResultV3 {
-  mode: 'semantic_v3';
+  mode: 'semantic';
   url: string;
   title: string;
   viewport: { width: number; height: number };
@@ -1158,7 +1158,7 @@ export function extractSemanticTreeV3(options: V3ExtractionOptions = {}): Semant
   console.log(`[SemanticTreeV3] Extracted ${nodes.length} nodes (${prunedElements} pruned, ${occludedElements} occluded) in ${extractionTimeMs}ms (~${estimatedTokens} tokens)`);
   
   const result: SemanticTreeResultV3 = {
-    mode: 'semantic_v3',
+    mode: 'semantic',
     url: window.location.href,
     title: document.title,
     viewport: { width: viewportWidth, height: actualViewportHeight },

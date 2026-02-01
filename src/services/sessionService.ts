@@ -79,6 +79,61 @@ export interface Message {
 const SESSIONS_INDEX_KEY = 'chat_sessions_index';
 const SESSION_PREFIX = 'session_';
 
+// === SESSION INIT TRACKING ===
+// Tracks which sessions have been successfully initialized on the backend
+// to avoid redundant init calls and prevent race conditions
+const INITIALIZED_SESSIONS_KEY = 'initialized_sessions';
+
+/** Cache of sessionIds that have been confirmed to exist on backend */
+let initializedSessionsCache: Set<string> = new Set();
+
+/** In-flight init requests to prevent duplicate calls */
+const initInFlightMap: Map<string, Promise<boolean>> = new Map();
+
+/**
+ * Load initialized sessions from storage into cache
+ */
+async function loadInitializedSessionsCache(): Promise<void> {
+  try {
+    const result = await chrome.storage.local.get(INITIALIZED_SESSIONS_KEY);
+    const sessions = result[INITIALIZED_SESSIONS_KEY];
+    if (Array.isArray(sessions)) {
+      initializedSessionsCache = new Set(sessions);
+    }
+  } catch (error) {
+    console.debug('[sessionService] Error loading initialized sessions cache:', error);
+  }
+}
+
+/**
+ * Mark a session as initialized (exists on backend)
+ */
+async function markSessionInitialized(sessionId: string): Promise<void> {
+  initializedSessionsCache.add(sessionId);
+  try {
+    await chrome.storage.local.set({
+      [INITIALIZED_SESSIONS_KEY]: Array.from(initializedSessionsCache),
+    });
+  } catch (error) {
+    console.debug('[sessionService] Error saving initialized sessions cache:', error);
+  }
+}
+
+/**
+ * Check if a session is known to be initialized on backend
+ */
+function isSessionInitialized(sessionId: string): boolean {
+  return initializedSessionsCache.has(sessionId);
+}
+
+/**
+ * Clear initialized sessions cache (call on logout or storage wipe)
+ */
+export function clearInitializedSessionsCache(): void {
+  initializedSessionsCache.clear();
+  chrome.storage.local.remove(INITIALIZED_SESSIONS_KEY).catch(() => {});
+}
+
 // === SESSION LIST CACHING ===
 // Prevents excessive API calls when no task is running
 // Cache is invalidated after MIN_REFRESH_INTERVAL or when explicitly requested
@@ -383,23 +438,103 @@ export async function loadSession(
 }
 
 /**
+ * Ensure a session exists on the backend before Pusher subscription.
+ * This is the CRITICAL function that prevents 403 errors from /api/pusher/auth.
+ *
+ * Call flow:
+ * 1. Check if session is already known to be initialized (cache)
+ * 2. If not, call POST /api/session/init to create/verify on backend
+ * 3. Mark as initialized in cache for future calls
+ *
+ * @param sessionId - Session UUID to ensure exists
+ * @param metadata - Optional metadata for session creation
+ * @returns true if session exists on backend, false if initialization failed
+ */
+export async function ensureSessionInitialized(
+  sessionId: string,
+  metadata?: {
+    url?: string;
+    domain?: string;
+    initialQuery?: string;
+    tabId?: number;
+  }
+): Promise<boolean> {
+  // 1. Check cache first - already initialized
+  if (isSessionInitialized(sessionId)) {
+    console.debug(`[sessionService] Session ${sessionId.slice(0, 8)}... already initialized (cached)`);
+    return true;
+  }
+
+  // 2. Check if init is already in-flight for this session (prevent duplicate calls)
+  const inFlight = initInFlightMap.get(sessionId);
+  if (inFlight) {
+    console.debug(`[sessionService] Session ${sessionId.slice(0, 8)}... init already in-flight, waiting`);
+    return inFlight;
+  }
+
+  // 3. Call backend to init session
+  const initPromise = (async (): Promise<boolean> => {
+    try {
+      const { apiClient } = await import('../api/client');
+      const response = await apiClient.initSession(sessionId, metadata);
+
+      if (response.success) {
+        await markSessionInitialized(sessionId);
+        console.log(
+          `[sessionService] Session ${sessionId.slice(0, 8)}... initialized on backend (created: ${response.data.created})`
+        );
+        return true;
+      }
+
+      console.warn(`[sessionService] Session init returned success=false for ${sessionId.slice(0, 8)}...`);
+      return false;
+    } catch (error) {
+      // Handle specific error cases
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // If the error indicates session already exists (some backends return 409 Conflict)
+      // treat it as success
+      if (errorMessage.includes('already exists') || errorMessage.includes('CONFLICT')) {
+        await markSessionInitialized(sessionId);
+        console.debug(`[sessionService] Session ${sessionId.slice(0, 8)}... already exists on backend`);
+        return true;
+      }
+
+      // Network errors - session might not be initialized, but we can't confirm
+      // Allow proceeding but don't cache (will retry on next call)
+      console.warn(`[sessionService] Failed to init session ${sessionId.slice(0, 8)}...:`, errorMessage);
+
+      // For offline mode, we still want to allow local operations
+      // The session will be synced when connection is restored
+      return false;
+    } finally {
+      initInFlightMap.delete(sessionId);
+    }
+  })();
+
+  initInFlightMap.set(sessionId, initPromise);
+  return initPromise;
+}
+
+/**
  * Create a new session
- * Generates a UUID, creates a domain-prefixed title, and saves it to the index
- * 
+ * Generates a UUID, creates a domain-prefixed title, and saves it to the index.
+ * Also initializes the session on the backend for Pusher support.
+ *
  * @param initialUrl - The URL where the session was started
  * @param taskDescription - Optional description for the task (will be prefixed with domain)
  */
 export async function createNewSession(initialUrl: string = '', taskDescription?: string): Promise<Session> {
   const sessionId = generateSessionId();
   const now = Date.now();
-  
+
   // Extract domain from URL for metadata
   const domainInfo = extractDomain(initialUrl);
   const domain = domainInfo.isValid ? domainInfo.rootDomain : '';
-  
+
   // Format title with domain prefix
   const title = formatSessionTitle(domain, taskDescription || 'New Task');
-  
+
   const session: Session = {
     sessionId,
     title,
@@ -411,28 +546,40 @@ export async function createNewSession(initialUrl: string = '', taskDescription?
     status: 'active',
     isRenamed: false,
   };
-  
+
   try {
     // Invalidate cache since we're creating a new session
     invalidateSessionListCache();
-    
+
+    // === CRITICAL: Initialize session on backend BEFORE saving locally ===
+    // This ensures Pusher auth will succeed when we subscribe
+    // Fire-and-forget: don't block local session creation on backend
+    // If backend is down, session will be synced later
+    void ensureSessionInitialized(sessionId, {
+      url: initialUrl,
+      domain,
+      initialQuery: taskDescription,
+    }).catch((error) => {
+      console.debug('[sessionService] Background session init failed (will retry):', error);
+    });
+
     // Load existing sessions
     const existingSessions = await listSessions({ forceRefresh: true });
-    
+
     // Add new session to the beginning
     const updatedSessions = [session, ...existingSessions];
-    
+
     // Limit to 50 sessions
     const limitedSessions = updatedSessions.slice(0, 50);
-    
+
     // Save updated index
     await chrome.storage.local.set({
       [SESSIONS_INDEX_KEY]: limitedSessions,
     });
-    
+
     // Invalidate cache again after modification
     invalidateSessionListCache();
-    
+
     return session;
   } catch (error) {
     console.error('Error creating new session:', error);
@@ -707,13 +854,13 @@ export async function migrateSessionsWithDomain(): Promise<void> {
   try {
     const sessions = await getLocalSessions();
     let updated = false;
-    
-    const migratedSessions = sessions.map(session => {
+
+    const migratedSessions = sessions.map((session) => {
       // Skip if already has domain
       if (session.domain) {
         return session;
       }
-      
+
       // Extract domain from URL
       if (session.url) {
         const domainInfo = extractDomain(session.url);
@@ -725,10 +872,10 @@ export async function migrateSessionsWithDomain(): Promise<void> {
           };
         }
       }
-      
+
       return session;
     });
-    
+
     if (updated) {
       await chrome.storage.local.set({
         [SESSIONS_INDEX_KEY]: migratedSessions,
@@ -737,6 +884,120 @@ export async function migrateSessionsWithDomain(): Promise<void> {
     }
   } catch (error) {
     console.error('Error migrating sessions:', error);
+  }
+}
+
+/**
+ * Initialize session service on extension startup.
+ * - Loads initialized sessions cache from storage
+ * - Handles storage loss recovery by syncing from backend
+ *
+ * Call this early in the extension lifecycle (before any session operations).
+ */
+export async function initializeSessionService(): Promise<void> {
+  try {
+    // Load the initialized sessions cache from storage
+    await loadInitializedSessionsCache();
+    console.debug('[sessionService] Loaded initialized sessions cache:', initializedSessionsCache.size, 'sessions');
+  } catch (error) {
+    console.error('[sessionService] Error initializing session service:', error);
+  }
+}
+
+/**
+ * Recover sessions from backend when local storage is empty.
+ * This handles the "storage loss" scenario where chrome.storage was cleared
+ * but the backend still has the user's sessions.
+ *
+ * @param currentUrl - Current tab URL for domain matching (optional)
+ * @returns The recovered session ID if successful, null otherwise
+ */
+export async function recoverSessionsFromBackend(currentUrl?: string): Promise<string | null> {
+  try {
+    // Check if local storage has any sessions
+    const localSessions = await getLocalSessions();
+
+    if (localSessions.length > 0) {
+      // Local storage has sessions - no recovery needed
+      console.debug('[sessionService] Local sessions exist, no recovery needed');
+      return null;
+    }
+
+    console.log('[sessionService] Local storage empty, attempting to recover sessions from backend...');
+
+    // Fetch sessions from backend
+    const { apiClient } = await import('../api/client');
+    const response = await apiClient.listSessions({
+      status: 'active',
+      includeArchived: false,
+      limit: 50,
+    });
+
+    if (!response.success || !response.data.sessions || response.data.sessions.length === 0) {
+      console.debug('[sessionService] No sessions found on backend to recover');
+      return null;
+    }
+
+    // Convert backend sessions to local format and save
+    const recoveredSessions: Session[] = response.data.sessions.map((s) => {
+      const domainInfo = extractDomain(s.url || '');
+      return {
+        sessionId: s.sessionId,
+        title: s.metadata?.initialQuery
+          ? typeof s.metadata.initialQuery === 'string' && s.metadata.initialQuery.length > 50
+            ? s.metadata.initialQuery.substring(0, 50) + '...'
+            : String(s.metadata.initialQuery || 'New Task')
+          : 'New Task',
+        createdAt: new Date(s.createdAt).getTime(),
+        url: s.url,
+        domain: domainInfo.isValid ? domainInfo.rootDomain : undefined,
+        updatedAt: new Date(s.updatedAt).getTime(),
+        messageCount: s.messageCount,
+        status: s.status,
+      };
+    });
+
+    // Save recovered sessions to local storage
+    await chrome.storage.local.set({
+      [SESSIONS_INDEX_KEY]: recoveredSessions,
+    });
+
+    // Mark all recovered sessions as initialized (they already exist on backend)
+    for (const session of recoveredSessions) {
+      await markSessionInitialized(session.sessionId);
+    }
+
+    console.log(`[sessionService] Recovered ${recoveredSessions.length} sessions from backend`);
+
+    // Invalidate cache to pick up recovered sessions
+    invalidateSessionListCache();
+
+    // Try to find a session matching the current domain
+    if (currentUrl) {
+      const currentDomainInfo = extractDomain(currentUrl);
+      if (currentDomainInfo.isValid) {
+        const matchingSession = recoveredSessions.find(
+          (s) => s.domain === currentDomainInfo.rootDomain
+        );
+        if (matchingSession) {
+          console.log(
+            `[sessionService] Found matching session for domain ${currentDomainInfo.rootDomain}:`,
+            matchingSession.sessionId.slice(0, 8)
+          );
+          return matchingSession.sessionId;
+        }
+      }
+    }
+
+    // Return most recent session if no domain match
+    if (recoveredSessions.length > 0) {
+      return recoveredSessions[0].sessionId;
+    }
+
+    return null;
+  } catch (error) {
+    console.error('[sessionService] Error recovering sessions from backend:', error);
+    return null;
   }
 }
 

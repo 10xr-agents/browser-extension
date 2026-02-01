@@ -214,14 +214,6 @@ async function ensureContentScriptReady(tabId: number): Promise<boolean> {
 }
 
 /**
- * Legacy function name for backward compatibility
- * @deprecated Use ensureContentScriptReady instead
- */
-async function ensureContentScriptInjected(tabId: number): Promise<boolean> {
-  return ensureContentScriptReady(tabId);
-}
-
-/**
  * Combined extraction function that waits for DOM stability, 
  * ensures stable IDs, and extracts the semantic tree.
  * 
@@ -256,18 +248,17 @@ async function getSemanticDomAsText(config?: DomWaitConfig): Promise<string> {
 }
 
 /**
- * V3 ULTRA-LIGHT EXTRACTION
- * 
- * Key improvements over getSemanticDom:
+ * ULTRA-LIGHT SEMANTIC EXTRACTION (PRIMARY)
+ *
+ * Features:
  * 1. Viewport pruning - skips off-screen elements (~60% reduction)
  * 2. Minified JSON keys - i/r/n/v/s/xy instead of full names
  * 3. Coordinates included - for precise click targeting
- * 4. ~50-300 tokens instead of 1k-5k tokens
- * 
- * This is now the PRIMARY extraction method - use this instead of getSemanticDom
- * unless you need the full format for debugging.
- * 
- * Reference: DOM_EXTRACTION_ARCHITECTURE.md (V3 section)
+ * 4. ~25-75 tokens instead of 10k+ tokens for full DOM
+ *
+ * This is the PRIMARY extraction method. Use getSemanticDom only for debugging.
+ *
+ * Reference: DOM_EXTRACTION_ARCHITECTURE.md
  */
 async function getSemanticDomV3(
   config?: DomWaitConfig,
@@ -275,16 +266,16 @@ async function getSemanticDomV3(
 ): Promise<SemanticTreeResultV3> {
   // 1. Wait for DOM to stabilize
   await waitForDomStability(config);
-  
+
   // 2. Ensure all interactive elements have stable IDs
   ensureStableIds();
-  
-  // 3. Extract V3 ultra-light format with viewport pruning
+
+  // 3. Extract ultra-light format with viewport pruning
   return extractSemanticTreeV3(v3Options);
 }
 
 /**
- * Get the V3 legend text to include in system prompts
+ * Get the semantic legend text to include in system prompts
  * This helps the LLM understand the minified key format
  */
 function getSemanticV3Legend(): string {
@@ -320,46 +311,46 @@ function getElementByLlmId(id: string): SemanticNode | null {
 }
 
 export const rpcMethods = {
-  // === LEGACY METHODS (still available for backward compatibility) ===
-  getAnnotatedDOM,
+  // === DOM EXTRACTION METHODS ===
+  getAnnotatedDOM,                   // Full DOM extraction with annotations
   getUniqueElementSelectorId,
   getInteractiveElementSnapshot,
-  waitForElementAppearance,
-  checkNetworkIdle,
-  checkWaitCondition,
-  setNetworkObservationMark,
-  getDidNetworkOccurSinceMark,
-  ripple,
-  copyToClipboard,
-  
-  // === V3 ULTRA-LIGHT EXTRACTION (PRIMARY - use this) ===
-  // These are the recommended methods - send full DOM only if backend requests
+
+  // === SEMANTIC EXTRACTION (PRIMARY) ===
   getSemanticDomV3,                  // PRIMARY: Ultra-light format with viewport pruning
   getSemanticV3Legend,               // Get legend for system prompt
-  
-  // === V2 SEMANTIC METHODS (fallback) ===
-  getSemanticDom,                    // Full semantic tree as JSON (larger payload)
-  getSemanticDomAsText,              // Semantic tree as text
-  
+  getSemanticDom,                    // Full semantic tree as JSON (fallback/debug)
+  getSemanticDomAsText,              // Semantic tree as text format
+
   // === TAGGER METHODS ===
   initializeTagger,                  // Initialize auto-tagger
   ensureStableIds,                   // Manually trigger tagging
-  
+
   // === ELEMENT LOOKUP ===
   getElementByLlmId,                 // Find element by stable ID
   findElementByStableId,             // Get raw element by ID
   searchNodesByName,                 // Search by name
   getNodesByRole,                    // Get by role
-  
+
   // === WAITING METHODS ===
   waitForDomStability,               // Wait for DOM to settle
   waitForPageReady,                  // Wait for full page ready
   waitForElementBySelector,          // Wait for element by CSS selector
+  waitForElementAppearance,
   waitForText,                       // Wait for text content
-  
-  // === V3 ADVANCED: MUTATION LOG METHODS ===
+  checkNetworkIdle,
+  checkWaitCondition,
+
+  // === NETWORK OBSERVATION ===
+  setNetworkObservationMark,
+  getDidNetworkOccurSinceMark,
+
+  // === UTILITIES ===
+  ripple,
+  copyToClipboard,
+
+  // === MUTATION LOG METHODS ===
   // Track DOM changes for ghost state detection
-  // Reference: DOM_EXTRACTION_ARCHITECTURE.md (Mutation Stream)
   getRecentMutations,                // Get recent mutations as strings
   getRecentMutationsStructured,      // Get recent mutations as structured data
   getMutationSummary,                // Get summary with error/success flags
@@ -464,7 +455,7 @@ export const callRPC = async <T extends MethodName>(
         // CRITICAL FIX: Try injection on every failed attempt, not just once
         if (i < maxTries - 1) {
           console.log(`[callRPC] Attempting to inject content script into tab ${activeTab.id}...`);
-          const injected = await ensureContentScriptInjected(activeTab.id);
+          const injected = await ensureContentScriptReady(activeTab.id);
           contentScriptInjected = true;
           if (injected) {
             // Script was injected, wait a bit and retry

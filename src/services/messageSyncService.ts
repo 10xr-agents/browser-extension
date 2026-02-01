@@ -70,7 +70,7 @@ class MessageSyncManager {
         console.debug('[MessageSyncManager] Sync already in progress for session:', sessionId);
         return this.syncInProgress;
       }
-      
+
       // Check if we recently started sync (prevent rapid restarts)
       const timeSinceLastSync = Date.now() - this.lastSyncStartTime;
       if (timeSinceLastSync < this.MIN_SYNC_INTERVAL) {
@@ -81,13 +81,36 @@ class MessageSyncManager {
 
     // Stop polling first (will be restarted if Pusher fails)
     pollingFallbackService.stopPolling();
-    
+
     // Track this sync
     this.currentSyncSessionId = sessionId;
     this.lastSyncStartTime = Date.now();
 
     const syncPromise = (async () => {
       try {
+        // === CRITICAL: Ensure session exists on backend BEFORE Pusher subscribe ===
+        // This prevents 403 errors from /api/pusher/auth
+        // Reference: REALTIME_MESSAGE_SYNC_ROADMAP.md (Session Init Contract)
+        const { ensureSessionInitialized } = await import('./sessionService');
+
+        // Get session metadata from store if available
+        const state = this.getState?.();
+        const session = state?.sessions.sessions.find((s) => s.sessionId === sessionId);
+
+        const initialized = await ensureSessionInitialized(sessionId, {
+          url: session?.url,
+          domain: session?.domain,
+        });
+
+        if (!initialized) {
+          // Backend init failed - session might not exist on server
+          // Fall back to polling (doesn't require Pusher auth)
+          console.warn('[MessageSyncManager] Session init failed, falling back to polling');
+          pollingFallbackService.startPolling(sessionId);
+          return;
+        }
+
+        // Session confirmed to exist on backend, safe to connect Pusher
         await pusherTransport.connect(sessionId);
       } catch (error: unknown) {
         console.warn('[MessageSyncManager] Pusher connect failed, using fallback:', error);
@@ -96,7 +119,7 @@ class MessageSyncManager {
         this.syncInProgress = null;
       }
     })();
-    
+
     this.syncInProgress = syncPromise;
     return syncPromise;
   }
