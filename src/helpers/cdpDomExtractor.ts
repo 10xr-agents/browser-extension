@@ -356,8 +356,11 @@ function buildBoundsMap(
 
 /**
  * Check if element is in viewport
+ *
+ * NOTE: Currently unused - for human-driven automation we send ALL interactive elements.
+ * Kept for potential future use in agentic/token-optimized modes.
  */
-function isInViewport(
+function _isInViewport(
   bounds: { x: number; y: number; w: number; h: number },
   viewport: { width: number; height: number },
   scrollX: number,
@@ -411,11 +414,10 @@ function convertToSemanticNodes(
     // Get bounds
     const bounds = boundsMap.get(backendNodeId);
 
-    // Skip elements without bounds (invisible)
+    // Skip elements without bounds (invisible/zero-size)
+    // NOTE: We do NOT skip elements outside viewport - for human-driven automation,
+    // we need the COMPLETE semantic tree of all interactive elements on the page
     if (!bounds || bounds.w === 0 || bounds.h === 0) continue;
-
-    // Skip elements outside viewport (viewport pruning)
-    if (!isInViewport(bounds, viewport, scrollX, scrollY)) continue;
 
     // Calculate center coordinates
     const centerX = Math.round(bounds.x + bounds.w / 2);

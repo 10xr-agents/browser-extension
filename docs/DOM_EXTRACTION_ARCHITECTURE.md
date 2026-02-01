@@ -11,7 +11,7 @@
 | **CDP Extraction (PRIMARY)** | ✅ Active | `cdpDomExtractor.ts` → `currentTask.ts` |
 | CDP Lifecycle (Page Ready) | ✅ Active | `cdpLifecycle.ts` |
 | CDP Visual Feedback | ✅ Active | `cdpVisualFeedback.ts` |
-| Viewport Pruning | ✅ Active | `extractDomViaCDP()` |
+| Viewport Pruning | ⏸️ Disabled | Human-driven automation needs full page |
 | Skeleton/Hybrid (Fallback) | ✅ Active | `skeletonDom.ts`, `hybridCapture.ts` |
 | Delta Hashing | ✅ Implemented | `deltaHash.ts` |
 | DOM RAG | ✅ Implemented | `domRag.ts` |
@@ -23,10 +23,11 @@
 ## Extraction Flow
 
 ```
-1. CDP Extraction (PRIMARY) - ~25-75 tokens
+1. CDP Extraction (PRIMARY) - ~100-500 tokens (full page, no viewport pruning)
    └── extractDomViaCDP() using Accessibility.getFullAXTree + DOMSnapshot
+   └── ALL interactive elements sent for human-driven automation
 
-2. Legacy Accessibility (FALLBACK) - ~50-150 tokens
+2. Legacy Accessibility (FALLBACK) - ~150-400 tokens
    └── getAccessibilityTree() if CDP extraction fails
 
 3. Skeleton/Hybrid (FALLBACK) - ~500-3000 tokens
@@ -261,10 +262,12 @@ export async function extractDomViaCDP(tabId: number): Promise<CDPExtractionResu
 | Enhancement | Description | Impact |
 |-------------|-------------|--------|
 | **CDP AXTree** | `Accessibility.getFullAXTree` for 100% reliable extraction | Bypasses all DOM issues |
-| **Viewport Pruning** | Skip elements below/above the visible viewport | ~60% reduction on long pages |
+| **Complete Page Coverage** | ALL interactive elements sent (viewport pruning disabled) | Full automation support |
 | **Minified JSON Keys** | `i/r/n/v/s/xy` instead of `id/role/name/value/state/coordinates` | ~30% reduction |
 | **Coordinates Included** | `[x, y]` center point for direct click targeting | Eliminates coordinate lookups |
 | **Stable IDs** | `backendNodeId` doesn't drift on re-renders | No self-healing needed |
+
+> **Note:** Viewport pruning is **DISABLED** for human-driven automation. We send the complete semantic tree of all interactive elements on the page to ensure proper automation regardless of scroll position.
 
 ### Token Cost Comparison
 
@@ -272,7 +275,9 @@ export async function extractDomViaCDP(tabId: number): Promise<CDPExtractionResu
 |------|--------------|----------------|-----------------|
 | Full DOM | 50-200 KB | 10,000-50,000 | $0.10-0.50 |
 | Skeleton | 2-6 KB | 500-1,500 | $0.005-0.015 |
-| **Semantic** | **100-300 bytes** | **25-75** | **$0.00025-0.00075** |
+| **Semantic (Full Page)** | **500-2000 bytes** | **100-500** | **$0.001-0.005** |
+
+> **Token estimate updated:** Since viewport pruning is disabled, we now send all interactive elements. Token count varies by page complexity (simple pages ~100 tokens, complex apps ~500 tokens).
 
 ### Semantic Payload Example
 
@@ -323,27 +328,24 @@ LEGEND for interactive_tree format:
 
 ### Viewport Pruning Algorithm
 
+> **DISABLED for Human-Driven Automation**: Viewport pruning is currently disabled because this is a human-driven automation extension. The complete semantic tree of ALL interactive elements on the page is sent to ensure proper automation regardless of scroll position.
+
 ```typescript
-// Skip off-screen elements (viewport pruning)
-const rect = element.getBoundingClientRect();
+// NOTE: Viewport pruning is DISABLED for human-driven automation
+// We send ALL interactive elements on the page, not just visible ones
 
-// Skip elements completely below viewport
-if (rect.top > window.innerHeight) {
-  return null; // Don't include in payload
-}
-
-// Skip elements completely above viewport  
-if (rect.bottom < 0) {
-  return null;
-}
-
-// Skip elements with no dimensions
+// Only skip elements with zero dimensions (truly invisible)
 if (rect.width === 0 && rect.height === 0) {
   return null;
 }
+
+// All other interactive elements are included regardless of viewport position
 ```
 
-**Result:** On a Twitter feed with 100 elements, only ~40 visible elements are sent.
+**Rationale:** For human-driven automation, users need to interact with elements anywhere on the page. The backend/LLM needs visibility into the complete page structure to:
+1. Understand full page context for better decision-making
+2. Handle scroll-then-click scenarios correctly
+3. Support "scroll to element" actions for off-screen elements
 
 ### CDP AXTree Extraction (Primary Method)
 
