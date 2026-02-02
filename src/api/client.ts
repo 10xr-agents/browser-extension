@@ -115,7 +115,11 @@ export interface ClientObservations {
  * Reference: BACKEND_WEB_SEARCH_CHANGES.md §4.1 (Error Handling)
  */
 interface AgentInteractRequest {
-  url: string;
+  /**
+   * URL is now OPTIONAL for chat-only tasks
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+   */
+  url?: string;
   query: string;
   /**
    * Chrome tab id that originated this request/session.
@@ -212,6 +216,14 @@ interface AgentInteractRequest {
    * Page title for context
    */
   pageTitle?: string;
+
+  /**
+   * File attachment for chat-only or web-with-file tasks
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+   *
+   * Upload file first via /api/knowledge/upload-to-s3, then include this in request.
+   */
+  attachment?: FileAttachment;
 }
 
 /**
@@ -273,6 +285,106 @@ export interface MissingInfoField {
   type: 'EXTERNAL_KNOWLEDGE' | 'PRIVATE_DATA'; // Can be found via search vs must ask user
   description: string; // Human-readable description
 }
+
+/**
+ * Blocker field for user input during blocker resolution
+ * Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+ */
+export interface BlockerRequiredField {
+  name: string; // Field identifier
+  label: string; // Display label
+  type: 'text' | 'password' | 'email' | 'code'; // Input type
+  description?: string; // Help text
+}
+
+/**
+ * Blocker types detected by the backend
+ * Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+ */
+export type BlockerType =
+  | 'login_failure'
+  | 'mfa_required'
+  | 'captcha'
+  | 'cookie_consent'
+  | 'rate_limit'
+  | 'session_expired'
+  | 'access_denied'
+  | 'page_error';
+
+/**
+ * Resolution methods for blockers
+ */
+export type BlockerResolutionMethod =
+  | 'user_action_on_web'
+  | 'provide_in_chat'
+  | 'auto_retry'
+  | 'alternative_action';
+
+/**
+ * Blocker information when task needs user intervention
+ * Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+ */
+export interface BlockerInfo {
+  type: BlockerType;
+  description: string; // Human-readable description
+  userMessage?: string; // User-friendly message explaining what to do
+  resolutionMethods: BlockerResolutionMethod[]; // Available resolution options
+  requiredFields?: BlockerRequiredField[]; // Input fields for provide_in_chat
+  retryAfterSeconds?: number; // For rate_limit type - countdown duration
+  confidence?: number; // Detection confidence (0-1)
+}
+
+/**
+ * Resume task request body
+ */
+export interface ResumeTaskRequest {
+  resolutionMethod: 'provide_in_chat' | 'user_action_on_web';
+  resolutionData?: Record<string, unknown>; // e.g., { username: "...", password: "..." }
+}
+
+/**
+ * Resume task response
+ */
+export interface ResumeTaskResponse {
+  taskId: string;
+  status: 'executing';
+  message: string;
+  resumedAt: string; // ISO timestamp
+}
+
+/**
+ * Task type classification
+ * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+ */
+export type TaskType = 'chat_only' | 'web_only' | 'web_with_file';
+
+/**
+ * File attachment for chat-only or web-with-file tasks
+ * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+ */
+export interface FileAttachment {
+  s3Key: string; // S3 storage key from upload response
+  filename: string; // Original filename (e.g., "sales.csv")
+  mimeType: string; // MIME type (e.g., "text/csv")
+  size: number; // File size in bytes
+}
+
+/**
+ * Upload response from /api/knowledge/upload-to-s3
+ */
+export interface FileUploadResponse {
+  success: boolean;
+  s3Key: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  error?: string;
+}
+
+/**
+ * Report format options
+ */
+export type ReportFormat = 'json' | 'csv' | 'markdown';
 
 /**
  * Evidence structure supporting reasoning decisions
@@ -345,6 +457,15 @@ interface NextActionResponse {
   taskId?: string; // if server creates task; client should send this on later steps (legacy)
   sessionId?: string; // Session ID for new chat persistence structure
   hasOrgKnowledge?: boolean; // Optional. true when org-specific RAG was used; false when public-only
+  /**
+   * Task type classification
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+   *
+   * - chat_only: Direct AI response, no browser needed (display response, no DOM action)
+   * - web_only: Standard web automation (existing flow)
+   * - web_with_file: Web automation using attached file data
+   */
+  taskType?: TaskType;
   // Orchestrator enhancements (optional, backward compatible)
   plan?: ActionPlan; // Action plan from orchestrator
   currentStep?: number; // Current step number (1-indexed)
@@ -361,7 +482,14 @@ interface NextActionResponse {
     // NEW (development): backend-driven artifact negotiation
     | 'needs_skeleton_dom'
     | 'needs_screenshot'
-    | 'needs_context'; // Orchestrator status
+    | 'needs_context'
+    // Blocker detection: task paused, waiting for user to resolve
+    | 'awaiting_user'; // Orchestrator status
+  /**
+   * Blocker information when status is 'awaiting_user'
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+   */
+  blockerInfo?: BlockerInfo;
   verification?: VerificationResult; // Verification result for previous step (Task 7)
   correction?: CorrectionResult; // Self-correction result for current step (Task 8)
   expectedOutcome?: string; // Expected outcome for next verification (Task 9)
@@ -390,6 +518,64 @@ interface NextActionResponse {
   requestedDomMode?: 'semantic' | 'skeleton' | 'hybrid' | 'full';
   needsScreenshot?: boolean;
   needsSkeletonDom?: boolean;
+
+  /**
+   * Action Chaining Support
+   * Reference: SPECS_AND_CONTRACTS.md §9 (Atomic Actions & Action Chaining)
+   *
+   * When the backend returns chained actions, the extension should execute
+   * them sequentially with client-side verification between steps.
+   */
+  chainedActions?: Array<{
+    action: string;
+    description: string;
+    index: number;
+    targetElementId?: number | string;
+    actionType: string;
+    verificationLevel: 'client' | 'lightweight' | 'full';
+    clientVerificationChecks?: Array<{
+      type: 'value_matches' | 'state_changed' | 'element_visible' | 'element_enabled' | 'no_error_message' | 'success_message';
+      elementId?: number | string;
+      expectedValue?: string;
+      textPattern?: string;
+    }>;
+  }>;
+  chainMetadata?: {
+    totalActions: number;
+    safeToChain: boolean;
+    chainReason: 'FORM_FILL' | 'RELATED_INPUTS' | 'BULK_SELECTION' | 'SEQUENTIAL_STEPS' | 'OPTIMIZED_PATH';
+    containerSelector?: string;
+    defaultVerificationLevel: 'client' | 'lightweight' | 'full';
+    clientVerificationSufficient: boolean;
+    finalVerificationLevel: 'client' | 'lightweight' | 'full';
+  };
+
+  /**
+   * Server-Side Tool Actions (Memory, etc.)
+   * Reference: SPECS_AND_CONTRACTS.md §10 (Server-Side Tool Actions)
+   *
+   * When toolAction.toolType is "SERVER", the action was already executed
+   * server-side (e.g., memory operations). The extension should NOT execute
+   * the action in the browser - just display the result and continue.
+   */
+  toolAction?: {
+    /** Name of the tool (e.g., "remember", "recall", "exportToSession") */
+    toolName: string;
+    /** Tool type: "DOM" = browser action, "SERVER" = server-side action */
+    toolType: 'DOM' | 'SERVER';
+    /** Tool parameters */
+    parameters: Record<string, unknown>;
+    /** Result of memory operations (when toolType is "SERVER") */
+    memoryResult?: {
+      success: boolean;
+      action: string;
+      key?: string;
+      scope?: 'task' | 'session';
+      value?: unknown;
+      error?: string;
+      message: string;
+    };
+  };
 }
 
 // Get API base URL from environment or use default
@@ -893,9 +1079,13 @@ class ApiClient {
       recentEvents?: string[];
       hasErrors?: boolean;
       hasSuccess?: boolean;
-    }
-    ,
-    tabId?: number
+    },
+    tabId?: number,
+    /**
+     * File attachment for chat-only or web-with-file tasks
+     * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+     */
+    attachment?: FileAttachment
   ): Promise<NextActionResponse> {
     // Adaptive DOM size limits:
     // - Default: 50k chars (sufficient for most pages)
@@ -973,6 +1163,8 @@ class ApiClient {
       hasErrors: hybridParams?.hasErrors,
       hasSuccess: hybridParams?.hasSuccess,
       pageTitle: hybridParams?.pageTitle,
+      // File attachment for chat-only or web-with-file tasks
+      attachment,
     };
 
     return this.request<NextActionResponse>('POST', '/api/agent/interact', body, logger);
@@ -1216,17 +1408,148 @@ class ApiClient {
       };
     }>('POST', '/api/session', { sessionId });
   }
+
+  /**
+   * Resume a paused task after blocker resolution
+   * Called when user provides credentials, completes CAPTCHA, or resolves other blockers
+   *
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+   */
+  async resumeTask(
+    sessionId: string,
+    taskId: string,
+    request: ResumeTaskRequest,
+    logger?: (msg: string) => void
+  ): Promise<ResumeTaskResponse> {
+    const log = logger || (() => {});
+    log(`[API] Resuming task ${taskId} with method: ${request.resolutionMethod}`);
+
+    return this.request<ResumeTaskResponse>(
+      'POST',
+      `/api/session/${sessionId}/task/${taskId}/resume`,
+      request,
+      logger
+    );
+  }
+
+  /**
+   * Upload a file to S3 for use in chat-only or web-with-file tasks
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+   *
+   * @param file - The file to upload
+   * @param logger - Optional logger function
+   * @returns FileUploadResponse with s3Key to use in interact request
+   */
+  async uploadFile(
+    file: File,
+    logger?: (msg: string) => void
+  ): Promise<FileUploadResponse> {
+    const log = logger || (() => {});
+    log(`[API] Uploading file: ${file.name} (${file.size} bytes)`);
+
+    const token = await this.getToken();
+    if (!token) {
+      throw new Error('Not authenticated');
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('filename', file.name);
+
+    const response = await fetch(`${this.baseUrl}/api/knowledge/upload-to-s3`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`File upload failed: ${response.status} ${errorText}`);
+    }
+
+    const result = await response.json();
+    log(`[API] File uploaded successfully: ${result.s3Key}`);
+
+    return {
+      success: true,
+      s3Key: result.s3Key,
+      filename: file.name,
+      mimeType: file.type,
+      size: file.size,
+    };
+  }
+
+  /**
+   * Download a task report in the specified format
+   * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+   *
+   * @param sessionId - Session ID
+   * @param taskId - Task ID
+   * @param format - Report format (json, csv, markdown)
+   * @returns Blob of the report file
+   */
+  async downloadReport(
+    sessionId: string,
+    taskId: string,
+    format: ReportFormat = 'json'
+  ): Promise<{ blob: Blob; filename: string }> {
+    const token = await this.getToken();
+    if (!token) {
+      throw new Error('Not authenticated');
+    }
+
+    const response = await fetch(
+      `${this.baseUrl}/api/session/${sessionId}/task/${taskId}/report?format=${format}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Report download failed: ${response.status} ${errorText}`);
+    }
+
+    const blob = await response.blob();
+
+    // Extract filename from Content-Disposition header or generate default
+    const contentDisposition = response.headers.get('Content-Disposition');
+    let filename = `task-report-${Date.now()}.${format}`;
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename="(.+)"/);
+      if (match) {
+        filename = match[1];
+      }
+    }
+
+    return { blob, filename };
+  }
 }
 
 export const apiClient = new ApiClient();
-export type { 
-  ResolveKnowledgeResponse, 
-  KnowledgeChunk, 
-  Citation, 
-  NextActionResponse, 
+export type {
+  ResolveKnowledgeResponse,
+  KnowledgeChunk,
+  Citation,
+  NextActionResponse,
   AgentInteractRequest,
   PreferencesResponse,
   PreferencesRequest,
   DOMChangeInfo,
-  ActionDetails
+  ActionDetails,
+  BlockerInfo,
+  BlockerType,
+  BlockerResolutionMethod,
+  BlockerRequiredField,
+  ResumeTaskRequest,
+  ResumeTaskResponse,
+  TaskType,
+  FileAttachment,
+  FileUploadResponse,
+  ReportFormat,
 };

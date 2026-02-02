@@ -167,9 +167,58 @@ When `fallback`, `wsFallbackReason` explains (e.g. "Pusher not configured", "Pus
 | **new_message** | Payload `message` mapped to `ChatMessage`; emit `newMessage`; Message Sync Manager merges into store (dedup, sort by sequenceNumber). |
 | **interact_response** | Message Sync Manager calls `loadMessages(sessionId)` to refresh from REST. |
 
-**Chat UI upgrade (user vs agent bubbles):** For the Side Panel chat to show user messages right (blue) and agent messages left (gray), the **new_message** payload must include **message.role: 'user' \| 'assistant' \| 'system'**. If the server omits `role`, the client defaults to `'assistant'`. Prefer sending the same message shape as GET /api/session/[sessionId]/messages (messageId, role, content, timestamp, status, sequenceNumber, actionPayload, etc.). See **SPECS_AND_CONTRACTS.md §3 (Backend Requirements)** and **§3.5 (WebSocket / push)**.
+**Chat UI upgrade (user vs agent bubbles):** For the Side Panel chat to show user messages right (blue) and agent messages left (gray), the **new_message** payload must include **message.role: 'user' \| 'assistant' \| 'system'**. If the server omits `role`, the client defaults to `'assistant'`. Prefer sending the same message shape as GET /api/session/[sessionId]/messages (messageId, role, content, timestamp, status, sequenceNumber, actionPayload, etc.). See **SPECS_AND_CONTRACTS.md §3 (Backend Requirements)** and **§3.6 (WebSocket / push)**.
 
-### 4.3 Env / Build
+### 4.3 Plan Preview Messages
+
+**Status:** ✅ Implemented (February 2026)
+
+The backend sends **plan preview messages** via `new_message` event when a plan is generated. These are system messages that show users the planned steps before execution begins.
+
+| Message Type | `metadata.messageType` | When Sent |
+|--------------|------------------------|-----------|
+| Plan Preview | `"plan_preview"` | New task with plan generated |
+| Plan Update | `"plan_update"` | Plan regenerated during replanning |
+
+**Payload Structure:**
+
+```json
+{
+  "type": "new_message",
+  "sessionId": "session-uuid",
+  "message": {
+    "messageId": "uuid",
+    "role": "system",
+    "content": "Here's my plan to complete this task:\n\n1. Navigate to login\n2. Enter credentials\n3. Click submit",
+    "sequenceNumber": 2,
+    "timestamp": "2026-02-02T10:00:00.000Z",
+    "metadata": {
+      "messageType": "plan_preview",
+      "taskId": "task-uuid",
+      "plan": {
+        "steps": [
+          { "index": 0, "description": "Navigate to login page", "status": "pending" },
+          { "index": 1, "description": "Enter email address", "status": "pending" },
+          { "index": 2, "description": "Click submit button", "status": "pending" }
+        ],
+        "totalSteps": 3,
+        "currentStepIndex": 0
+      }
+    }
+  }
+}
+```
+
+**Client Handling:**
+
+1. Check `message.metadata?.messageType` for `"plan_preview"` or `"plan_update"`
+2. Render with special UI (numbered list in card) distinct from regular messages
+3. Use ListChecks icon for preview, RefreshCw icon for update
+4. Merge into message list and sort by sequenceNumber like other messages
+
+See **SPECS_AND_CONTRACTS.md §3.5 (Plan Preview Messages)** for full specification.
+
+### 4.4 Env / Build
 
 - Webpack injects `WEBPACK_PUSHER_KEY`, `WEBPACK_PUSHER_WS_HOST`, `WEBPACK_PUSHER_WS_PORT` (and `WEBPACK_API_BASE` for auth endpoint). Set in `.env.local` and rebuild; reload extension after build.
 

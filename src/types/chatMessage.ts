@@ -45,6 +45,76 @@ export type PlanDisplay = {
 export type IsThinking = boolean;
 
 /**
+ * System message type - distinguishes different system messages
+ * Reference: SPECS_AND_CONTRACTS.md §3.5 (Plan Preview Messages)
+ */
+export type SystemMessageType = 'plan_preview' | 'plan_update' | 'verification_result' | 'correction_applied';
+
+/**
+ * Verification level for action chaining
+ * Reference: SPECS_AND_CONTRACTS.md §9.3 (Verification Levels)
+ */
+export type VerificationLevel = 'client' | 'lightweight' | 'full';
+
+/**
+ * Client-side verification check types
+ * Reference: SPECS_AND_CONTRACTS.md §9.4 (Client-Side Verification Checks)
+ */
+export type ClientVerificationCheck = {
+  type: 'value_matches' | 'state_changed' | 'element_visible' | 'element_enabled' | 'no_error_message' | 'success_message';
+  elementId?: number | string;
+  expectedValue?: string;
+  textPattern?: string;
+};
+
+/**
+ * Chained action in a chain response
+ * Reference: SPECS_AND_CONTRACTS.md §9.2 (Action Chaining Contract)
+ */
+export type ChainAction = {
+  action: string;
+  description: string;
+  index: number;
+  targetElementId?: number | string;
+  actionType: string;
+  verificationLevel: VerificationLevel;
+  clientVerificationChecks?: ClientVerificationCheck[];
+};
+
+/**
+ * Chain metadata for action chaining
+ */
+export type ChainMetadata = {
+  totalActions: number;
+  safeToChain: boolean;
+  chainReason: 'FORM_FILL' | 'RELATED_INPUTS' | 'BULK_SELECTION' | 'SEQUENTIAL_STEPS' | 'OPTIMIZED_PATH';
+  containerSelector?: string;
+  defaultVerificationLevel: VerificationLevel;
+  clientVerificationSufficient: boolean;
+  finalVerificationLevel: VerificationLevel;
+};
+
+/**
+ * Partial chain state when chain fails mid-execution
+ */
+export type ChainPartialState = {
+  executedActions: string[];
+  domAfterLastSuccess?: string;
+  totalActionsInChain: number;
+};
+
+/**
+ * Chain error when an action in a chain fails
+ */
+export type ChainError = {
+  action: string;
+  message: string;
+  code: string;
+  elementId?: number | string;
+  failedIndex: number;
+};
+
+/**
  * Action step (technical execution log)
  * Nested inside assistant messages
  */
@@ -91,6 +161,9 @@ export type ChatMessage = {
       completionTokens: number;
     };
     expectedOutcome?: string;
+    // System message type (for plan preview, verification, etc.)
+    // Reference: SPECS_AND_CONTRACTS.md §3.5 (Plan Preview Messages)
+    messageType?: SystemMessageType;
     // Reasoning layer metadata (optional, Enhanced v2.0)
     reasoning?: {
       source: 'MEMORY' | 'PAGE' | 'WEB_SEARCH' | 'ASK_USER';
@@ -124,12 +197,43 @@ export type ChatMessage = {
       searchIterations?: number; // Number of search iterations
       finalQuery?: string; // Final refined query
     };
+    // Server-side tool result (for memory operations, etc.)
+    // Reference: SPECS_AND_CONTRACTS.md §10 (Server-Side Tool Actions)
+    serverToolResult?: {
+      toolName: string;
+      toolType: 'DOM' | 'SERVER';
+      memoryResult?: {
+        success: boolean;
+        action: string;
+        key?: string;
+        scope?: 'task' | 'session';
+        value?: unknown;
+        error?: string;
+        message: string;
+      };
+    };
   };
-  
+
   // Error information (if message represents a failure)
   error?: {
     message: string;
     code: string;
+  };
+
+  // Backend metadata format (alternative to meta, used for plan previews)
+  // Reference: SPECS_AND_CONTRACTS.md §3.5 (Plan Preview Messages)
+  metadata?: {
+    messageType?: SystemMessageType;
+    taskId?: string;
+    plan?: {
+      steps: Array<{
+        index: number;
+        description: string;
+        status: 'pending' | 'active' | 'completed' | 'failed';
+      }>;
+      totalSteps: number;
+      currentStepIndex: number;
+    };
   };
   
   // User input request (when status is 'needs_user_input')

@@ -322,7 +322,18 @@ export type CurrentTaskSlice = {
   verificationHistory: VerificationResult[]; // Verification results from server
   // Manus orchestrator correction data (Task 8)
   correctionHistory: CorrectionResult[]; // Self-correction attempts from server
-  status: 'idle' | 'running' | 'success' | 'error' | 'interrupted'; // Legacy task status (kept for backward compatibility)
+  // Action chaining state (Reference: SPECS_AND_CONTRACTS.md §9)
+  chainPartialState: import('../types/chatMessage').ChainPartialState | null; // Partial state when chain fails
+  chainError: import('../types/chatMessage').ChainError | null; // Error details when chain fails
+  // Blocker state (Reference: INTERACT_FLOW_WALKTHROUGH.md §H)
+  blockerInfo: import('../api/client').BlockerInfo | null; // Active blocker requiring user intervention
+  isResumingTask: boolean; // True while calling resume endpoint
+  // File attachment state (Reference: INTERACT_FLOW_WALKTHROUGH.md §7)
+  attachment: import('../api/client').FileAttachment | null; // Attached file for chat-only or web-with-file tasks
+  attachmentUploadProgress: number | null; // Upload progress (0-100) or null when not uploading
+  // Task type from server response
+  taskType: import('../api/client').TaskType | null; // 'chat_only' | 'web_only' | 'web_with_file'
+  status: 'idle' | 'running' | 'success' | 'error' | 'interrupted' | 'awaiting_user'; // Task status including blocker state
   actionStatus:
     | 'idle'
     | 'attaching-debugger'
@@ -356,6 +367,15 @@ export type CurrentTaskSlice = {
     addAssistantMessage: (content: string, action: string, parsedAction: ParsedAction) => void; // Add assistant message
     addActionStep: (messageId: string, step: ActionStep) => void; // Add action step to assistant message
     updateMessageStatus: (messageId: string, status: ChatMessage['status'], error?: { message: string; code: string }) => void; // Update message status
+    // Blocker resolution actions (Reference: INTERACT_FLOW_WALKTHROUGH.md §H)
+    resumeTaskWithCredentials: (data: Record<string, unknown>) => Promise<void>; // Resume with user-provided credentials
+    resumeTaskFromWebsite: () => Promise<void>; // Resume after user resolved on website
+    clearBlocker: () => void; // Clear blocker state (e.g., on cancel)
+    // File attachment actions (Reference: INTERACT_FLOW_WALKTHROUGH.md §7)
+    uploadFile: (file: File) => Promise<void>; // Upload file and store attachment info
+    clearAttachment: () => void; // Clear attached file
+    // Report download action
+    downloadReport: (format: import('../api/client').ReportFormat) => Promise<void>; // Download task report
   };
 };
 // ============================================================================
@@ -524,6 +544,13 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
   orchestratorStatus: null,
   verificationHistory: [],
   correctionHistory: [],
+  chainPartialState: null,
+  chainError: null,
+  blockerInfo: null,
+  isResumingTask: false,
+  attachment: null,
+  attachmentUploadProgress: null,
+  taskType: null,
   status: 'idle',
   actionStatus: 'idle',
   messagesLoadingState: {
@@ -1420,7 +1447,9 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                   viewport: domMode === 'semantic' ? viewport : undefined,
                   pageTitle: pageTitle,
                 },
-                tabId
+                tabId,
+                // File attachment for chat-only or web-with-file tasks
+                get().currentTask.attachment || undefined
               );
             } finally {
               // CRITICAL: Stop keep-alive as soon as API response is received
@@ -1494,7 +1523,9 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
                     domMode: requestedMode as 'skeleton' | 'full' | 'hybrid',
                     screenshotHash: screenshotHash || undefined,
                   },
-                  tabId
+                  tabId,
+                  // File attachment for chat-only or web-with-file tasks
+                  get().currentTask.attachment || undefined
                 );
               } finally {
                 await stopKeepAlive();
@@ -1569,6 +1600,14 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             if (response.hasOrgKnowledge !== undefined) {
               set((state) => {
                 state.currentTask.hasOrgKnowledge = response.hasOrgKnowledge ?? null;
+              });
+            }
+
+            // Store taskType for chat-only vs web task handling
+            // Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+            if (response.taskType) {
+              set((state) => {
+                state.currentTask.taskType = response.taskType ?? null;
               });
             }
 
@@ -1863,6 +1902,39 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               break;
             }
 
+            // Handle AWAITING_USER (blocker detected) - stop execution and show blocker UI
+            // Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+            if (response.status === 'awaiting_user' && response.blockerInfo) {
+              console.log('[CurrentTask] Blocker detected - pausing task:', {
+                type: response.blockerInfo.type,
+                description: response.blockerInfo.description,
+                resolutionMethods: response.blockerInfo.resolutionMethods,
+              });
+
+              set((state) => {
+                state.currentTask.status = 'awaiting_user';
+                state.currentTask.actionStatus = 'idle';
+                state.currentTask.blockerInfo = response.blockerInfo || null;
+              });
+
+              // Add system message about the blocker
+              addMessage({
+                id: generateUUID(),
+                role: 'system' as const,
+                content: response.blockerInfo.userMessage || response.blockerInfo.description,
+                status: 'pending',
+                timestamp: new Date(),
+                metadata: {
+                  messageType: 'verification_result',
+                },
+              });
+
+              // Break the loop - wait for user to resolve blocker
+              // User can call resumeTaskWithCredentials() or resumeTaskFromWebsite()
+              // which will call the resume endpoint and restart the action loop
+              break;
+            }
+
             // Handle errors
             if ('error' in parsedWithThought) {
               onError(parsedWithThought.error);
@@ -1875,6 +1947,129 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
               parsedWithThought.parsedAction.name === 'fail'
             ) {
               break;
+            }
+
+            // Handle chat_only tasks - NO DOM execution needed
+            // Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+            // Chat-only tasks return finish() directly - the response IS the result
+            if (response.taskType === 'chat_only') {
+              console.log('[CurrentTask] Chat-only task - skipping DOM execution');
+              // The message was already added above via addAssistantMessage
+              // For chat-only, the task is complete (finish() action)
+              // No need to continue the loop or execute any DOM action
+              break;
+            }
+
+            // Handle SERVER tool actions (memory operations, etc.)
+            // Reference: SPECS_AND_CONTRACTS.md §10 (Server-Side Tool Actions)
+            // These actions are executed server-side - extension should NOT execute them in browser
+            if (response.toolAction?.toolType === 'SERVER') {
+              console.log('[CurrentTask] SERVER tool action - skipping DOM execution:', {
+                toolName: response.toolAction.toolName,
+                memoryResult: response.toolAction.memoryResult,
+              });
+
+              // Add message showing the server action result
+              const memoryResult = response.toolAction.memoryResult;
+              const resultMessage = memoryResult?.success
+                ? `Memory: ${memoryResult.message}`
+                : `Memory error: ${memoryResult?.error || 'Unknown error'}`;
+
+              addMessage({
+                id: generateUUID(),
+                role: 'assistant' as const,
+                content: parsedWithThought.thought || resultMessage,
+                status: memoryResult?.success ? 'success' : 'failure',
+                timestamp: new Date(),
+                actionPayload: {
+                  action: safeAction,
+                  parsedAction: parsedWithThought.parsedAction,
+                },
+                meta: {
+                  // Store memory result in metadata for debugging/display
+                  serverToolResult: {
+                    toolName: response.toolAction.toolName,
+                    toolType: response.toolAction.toolType,
+                    memoryResult: response.toolAction.memoryResult,
+                  },
+                },
+              });
+
+              // Continue to next iteration - request next action from server
+              // No DOM action needed since server already executed the action
+              continue;
+            }
+
+            // Handle chained actions if present
+            // Reference: SPECS_AND_CONTRACTS.md §9 (Atomic Actions & Action Chaining)
+            if (response.chainedActions && response.chainedActions.length > 0 && response.chainMetadata?.safeToChain) {
+              console.log('[CurrentTask] Processing chained actions:', {
+                totalActions: response.chainedActions.length,
+                chainReason: response.chainMetadata.chainReason,
+              });
+
+              const { executeChain } = await import('../helpers/chainExecutor');
+
+              const chainResult = await executeChain(
+                response.chainedActions,
+                response.chainMetadata,
+                tabId,
+                (index, total, action) => {
+                  console.log(`[CurrentTask] Chain progress: ${index + 1}/${total} - ${action.description}`);
+                }
+              );
+
+              if (!chainResult.success) {
+                console.error('[CurrentTask] Chain execution failed:', chainResult.chainError);
+
+                // Create error message for the failed chain action
+                const failedAction = chainResult.chainError?.action || 'Unknown action';
+                const failedError = chainResult.chainError?.message || 'Chain execution failed';
+
+                addMessage({
+                  id: generateUUID(),
+                  role: 'assistant' as const,
+                  content: `Chain execution failed at step ${(chainResult.failedAtIndex ?? 0) + 1}: ${failedError}`,
+                  status: 'failure',
+                  timestamp: new Date(),
+                  actionPayload: {
+                    action: failedAction,
+                    parsedAction: parseAction(failedAction) || { name: 'unknown', args: {} },
+                  },
+                  error: {
+                    message: failedError,
+                    code: chainResult.chainError?.code || 'CHAIN_FAILED',
+                  },
+                });
+
+                // Store partial state for server to know what was completed
+                set((state) => {
+                  state.currentTask.chainPartialState = chainResult.partialState;
+                  state.currentTask.chainError = chainResult.chainError;
+                });
+
+                // Continue to next iteration to report failure to server
+                continue;
+              }
+
+              // Chain completed successfully
+              console.log('[CurrentTask] Chain execution completed successfully');
+
+              // Add success message for the chain
+              const chainDescription = response.chainedActions
+                .map((a, i) => `${i + 1}. ${a.description}`)
+                .join('\n');
+
+              addMessage({
+                id: generateUUID(),
+                role: 'assistant' as const,
+                content: `Completed ${response.chainedActions.length} actions:\n${chainDescription}`,
+                status: 'success',
+                timestamp: new Date(),
+              });
+
+              // Continue to next iteration for server verification
+              continue;
             }
 
             // Execute action and track result
@@ -3062,7 +3257,7 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
             message.error = error;
           }
         }
-        
+
         // Update session message count
         if (state.currentTask.sessionId) {
           get().sessions.actions.updateSession(state.currentTask.sessionId, {
@@ -3071,6 +3266,222 @@ export const createCurrentTaskSlice: MyStateCreator<CurrentTaskSlice> = (
           });
         }
       });
+    },
+
+    /**
+     * Resume task after user provides credentials/data via the blocker dialog
+     * Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+     */
+    resumeTaskWithCredentials: async (data: Record<string, unknown>) => {
+      const sessionId = get().currentTask.sessionId;
+      const taskId = get().currentTask.taskId;
+      const blockerInfo = get().currentTask.blockerInfo;
+
+      if (!sessionId || !taskId) {
+        console.error('[CurrentTask] Cannot resume: missing sessionId or taskId');
+        return;
+      }
+
+      if (!blockerInfo) {
+        console.error('[CurrentTask] Cannot resume: no active blocker');
+        return;
+      }
+
+      console.log('[CurrentTask] Resuming task with credentials:', {
+        sessionId,
+        taskId,
+        blockerType: blockerInfo.type,
+        dataKeys: Object.keys(data),
+      });
+
+      set((state) => {
+        state.currentTask.isResumingTask = true;
+      });
+
+      try {
+        const response = await apiClient.resumeTask(sessionId, taskId, {
+          resolutionMethod: 'provide_in_chat',
+          resolutionData: data,
+        });
+
+        console.log('[CurrentTask] Task resumed successfully:', response);
+
+        // Clear blocker state and restart action loop
+        set((state) => {
+          state.currentTask.blockerInfo = null;
+          state.currentTask.isResumingTask = false;
+          state.currentTask.status = 'running';
+        });
+
+        // Restart the action loop by calling runTask
+        // The UI should trigger this via the standard task flow
+        get().currentTask.actions.runTask((error) => {
+          console.error('[CurrentTask] Error after resume:', error);
+        });
+      } catch (error) {
+        console.error('[CurrentTask] Failed to resume task:', error);
+        set((state) => {
+          state.currentTask.isResumingTask = false;
+          // Keep blocker state so user can retry
+        });
+      }
+    },
+
+    /**
+     * Resume task after user indicates they resolved the blocker on the website
+     * Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+     */
+    resumeTaskFromWebsite: async () => {
+      const sessionId = get().currentTask.sessionId;
+      const taskId = get().currentTask.taskId;
+      const blockerInfo = get().currentTask.blockerInfo;
+
+      if (!sessionId || !taskId) {
+        console.error('[CurrentTask] Cannot resume: missing sessionId or taskId');
+        return;
+      }
+
+      if (!blockerInfo) {
+        console.error('[CurrentTask] Cannot resume: no active blocker');
+        return;
+      }
+
+      console.log('[CurrentTask] Resuming task after website resolution:', {
+        sessionId,
+        taskId,
+        blockerType: blockerInfo.type,
+      });
+
+      set((state) => {
+        state.currentTask.isResumingTask = true;
+      });
+
+      try {
+        const response = await apiClient.resumeTask(sessionId, taskId, {
+          resolutionMethod: 'user_action_on_web',
+        });
+
+        console.log('[CurrentTask] Task resumed successfully:', response);
+
+        // Clear blocker state and restart action loop
+        set((state) => {
+          state.currentTask.blockerInfo = null;
+          state.currentTask.isResumingTask = false;
+          state.currentTask.status = 'running';
+        });
+
+        // Restart the action loop by calling runTask
+        get().currentTask.actions.runTask((error) => {
+          console.error('[CurrentTask] Error after resume:', error);
+        });
+      } catch (error) {
+        console.error('[CurrentTask] Failed to resume task:', error);
+        set((state) => {
+          state.currentTask.isResumingTask = false;
+          // Keep blocker state so user can retry
+        });
+      }
+    },
+
+    /**
+     * Clear blocker state (e.g., when user cancels)
+     */
+    clearBlocker: () => {
+      set((state) => {
+        state.currentTask.blockerInfo = null;
+        state.currentTask.isResumingTask = false;
+        state.currentTask.status = 'idle';
+        state.currentTask.actionStatus = 'idle';
+      });
+    },
+
+    /**
+     * Upload a file and store attachment info for interact request
+     * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+     */
+    uploadFile: async (file: File) => {
+      console.log('[CurrentTask] Uploading file:', file.name, file.size, 'bytes');
+
+      set((state) => {
+        state.currentTask.attachmentUploadProgress = 0;
+      });
+
+      try {
+        const result = await apiClient.uploadFile(file, (msg) => {
+          console.log(msg);
+        });
+
+        console.log('[CurrentTask] File uploaded successfully:', result.s3Key);
+
+        set((state) => {
+          state.currentTask.attachment = {
+            s3Key: result.s3Key,
+            filename: result.filename,
+            mimeType: result.mimeType,
+            size: result.size,
+          };
+          state.currentTask.attachmentUploadProgress = 100;
+        });
+
+        // Clear progress indicator after a short delay
+        setTimeout(() => {
+          set((state) => {
+            state.currentTask.attachmentUploadProgress = null;
+          });
+        }, 500);
+      } catch (error) {
+        console.error('[CurrentTask] File upload failed:', error);
+        set((state) => {
+          state.currentTask.attachment = null;
+          state.currentTask.attachmentUploadProgress = null;
+        });
+        throw error;
+      }
+    },
+
+    /**
+     * Clear the attached file
+     */
+    clearAttachment: () => {
+      set((state) => {
+        state.currentTask.attachment = null;
+        state.currentTask.attachmentUploadProgress = null;
+      });
+    },
+
+    /**
+     * Download task report in the specified format
+     * Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+     */
+    downloadReport: async (format: import('../api/client').ReportFormat) => {
+      const sessionId = get().currentTask.sessionId;
+      const taskId = get().currentTask.taskId;
+
+      if (!sessionId || !taskId) {
+        console.error('[CurrentTask] Cannot download report: missing sessionId or taskId');
+        return;
+      }
+
+      console.log('[CurrentTask] Downloading report:', { sessionId, taskId, format });
+
+      try {
+        const { blob, filename } = await apiClient.downloadReport(sessionId, taskId, format);
+
+        // Create download link and trigger download
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
+        console.log('[CurrentTask] Report downloaded:', filename);
+      } catch (error) {
+        console.error('[CurrentTask] Report download failed:', error);
+        throw error;
+      }
     },
   },
 });

@@ -1,7 +1,7 @@
 # Specs & Contracts
 
-**Purpose:** API contracts, verification contract, and feature specifications for the Chrome extension and backend.  
-**Last Updated:** February 1, 2026
+**Purpose:** API contracts, verification contract, and feature specifications for the Chrome extension and backend.
+**Last Updated:** February 2, 2026
 
 ---
 
@@ -15,8 +15,12 @@
 6. [Hybrid Vision + Skeleton](#6-hybrid-vision--skeleton)
 7. [Semantic JSON Protocol](#7-semantic-json-protocol)
 8. [Backend Implementation: Browser-Use & Midscene Support](#8-backend-implementation-browser-use--midscene-support)
-9. [Changelog](#9-changelog)
-10. [Related Documentation](#10-related-documentation)
+9. [Atomic Actions & Action Chaining](#9-atomic-actions--action-chaining)
+10. [Server-Side Tool Actions (Memory)](#10-server-side-tool-actions-memory)
+11. [Blocker Detection & Task Pause/Resume](#11-blocker-detection--task-pauseresume)
+12. [File-Based Tasks & Chat-Only Mode](#12-file-based-tasks--chat-only-mode)
+13. [Changelog](#13-changelog)
+14. [Related Documentation](#14-related-documentation)
 
 ---
 
@@ -497,7 +501,61 @@ The backend must implement `POST /api/session/init` that:
 
 No separate "task complete" endpoint or `isTaskComplete` flag is required; the existing interact response is enough.
 
-### 3.5 WebSocket / Push (Pusher/Sockudo)
+### 3.5 Plan Preview Messages (System Messages)
+
+**Status:** ✅ Implemented (February 2026)
+
+When the agent generates a plan for complex tasks, a **plan preview system message** is created and broadcast to users before execution begins. This provides transparency into the agent's intended actions.
+
+#### Message Types
+
+| Type | When Created | `metadata.messageType` |
+|------|--------------|------------------------|
+| **Plan Preview** | New task with plan generated | `"plan_preview"` |
+| **Plan Update** | Plan regenerated during replanning | `"plan_update"` |
+
+#### Message Structure
+
+```json
+{
+  "messageId": "uuid",
+  "sessionId": "session-uuid",
+  "role": "system",
+  "content": "Here's my plan to complete this task:\n\n1. Navigate to login page\n2. Enter email address\n3. Click submit button",
+  "sequenceNumber": 1,
+  "timestamp": "2026-02-02T10:00:00.000Z",
+  "metadata": {
+    "messageType": "plan_preview",
+    "taskId": "task-uuid",
+    "plan": {
+      "steps": [
+        { "index": 0, "description": "Navigate to login page", "status": "pending" },
+        { "index": 1, "description": "Enter email address", "status": "pending" },
+        { "index": 2, "description": "Click submit button", "status": "pending" }
+      ],
+      "totalSteps": 3,
+      "currentStepIndex": 0
+    }
+  }
+}
+```
+
+#### Client Rendering
+
+Clients should check `metadata.messageType` to render plan messages differently:
+
+- **`plan_preview`**: Show with "Plan" header and ListChecks icon
+- **`plan_update`**: Show with "Updated Plan" header and RefreshCw icon
+- Render steps as a numbered list in a card with `bg-muted/30` styling
+- Distinguish from regular assistant messages (left-aligned gray bubble)
+
+#### Pusher Broadcast
+
+Plan messages are broadcast via **new_message** event on `private-session-<sessionId>` channel with `role: "system"`. Clients receive in real-time and should merge into message list like other messages.
+
+---
+
+### 3.6 WebSocket / Push (Pusher/Sockudo)
 
 Real-time message sync uses **Pusher/Sockudo**: channel `private-session-<sessionId>`, events **new_message** and **interact_response**.
 
@@ -544,7 +602,7 @@ When Pusher channel auth fails (403 Forbidden, 401 Unauthorized):
 
 **Location:** `src/services/pusherTransport.ts` (`handleAuthFailure`, `forceReconnectWithFreshToken`, `validateToken`)
 
-### 3.6 What the Backend Does NOT Need to Do
+### 3.7 What the Backend Does NOT Need to Do
 
 - **No new endpoints** — only correct shape of existing responses.
 - **No `isTaskComplete` field** — client infers from `action: "finish()"` / `"fail()"`.
@@ -552,7 +610,7 @@ When Pusher channel auth fails (403 Forbidden, 401 Unauthorized):
 
 ---
 
-### 3.7 Fields the UI Uses
+### 3.8 Fields the UI Uses
 
 | Field | Source | Purpose |
 |-------|--------|---------|
@@ -577,9 +635,9 @@ interface PlanStep {
 
 ---
 
-### 3.8 Implementation Notes
+### 3.9 Implementation Notes
 
-#### 3.8.1 Plan Step ID Generation
+#### 3.9.1 Plan Step ID Generation
 
 The `id` field is generated from `index` in the interact route:
 
@@ -590,11 +648,11 @@ steps: graphResult.plan.steps.map((step) => ({
 }))
 ```
 
-#### 3.8.2 Message Role Persistence
+#### 3.9.2 Message Role Persistence
 
 The Message model already has `role: 'user' | 'assistant' | 'system'` as a required field. All messages are persisted with their role.
 
-#### 3.8.3 WebSocket Payload
+#### 3.9.3 WebSocket Payload
 
 The `triggerNewMessage` function in `lib/pusher/server.ts` already requires `role` in the message payload:
 
@@ -1552,8 +1610,527 @@ Test these scenarios to validate backend integration:
 
 ---
 
-## 9. Changelog
+## 9. Atomic Actions & Action Chaining
 
+**Status:** ✅ Implemented (February 2026)
+
+This section defines the contract for atomic actions (one Chrome action per step) and action chaining with verification levels.
+
+### 9.1 Atomic Actions Contract
+
+Each plan step MUST represent exactly **ONE Chrome action**. The Chrome extension executes actions sequentially, one at a time.
+
+#### Why Atomic?
+
+| Reason | Explanation |
+|--------|-------------|
+| **Extension Constraint** | Chrome extension executes ONE action per request |
+| **Verification** | Each action needs individual verification |
+| **Error Recovery** | If a step fails, we can retry just that step |
+| **Chaining** | Atomic actions can be safely chained |
+
+#### Valid Atomic Actions
+
+Each step maps to exactly one action from `CHROME_TAB_ACTIONS.md`:
+
+| Category | Actions |
+|----------|---------|
+| Navigation | `navigate(url)`, `goBack()`, `search(query)` |
+| Input | `setValue(id, text)`, `type(text)` |
+| Click | `click(id)`, `doubleClick(id)`, `rightClick(id)` |
+| Selection | `check(id)`, `uncheck(id)`, `selectDropdown(id, value)` |
+| Keyboard | `press("Enter")`, `press("Tab")` |
+| Scroll | `scroll(direction)`, `findText(text)` |
+
+#### Invalid Compound Actions
+
+| Invalid | Split Into |
+|---------|------------|
+| "Type X and click Submit" | 1. `setValue(id, X)`, 2. `click(submitId)` |
+| "Enter email and password" | 1. `setValue(emailId, email)`, 2. `setValue(passId, pass)` |
+| "Fill form and submit" | N steps for each field + 1 click |
+| "Search and press Enter" | 1. `setValue(searchId, query)`, 2. `press("Enter")` |
+
+#### Server-Side Enforcement
+
+The backend validates plans via `lib/agent/atomic-action-validator.ts`:
+
+1. **Detection**: `analyzeStepAtomicity(description)` checks for compound patterns
+2. **Splitting**: `splitCompoundAction(description)` splits into atomic steps
+3. **Post-processing**: `validateAndSplitPlan(plan)` processes all steps
+
+### 9.2 Action Chaining Contract
+
+For related atomic actions (e.g., filling multiple form fields), the system can **chain** them with **lighter verification**.
+
+#### Chain Response Shape
+
+```typescript
+{
+  actions: [
+    {
+      action: "setValue(101, 'John')",
+      description: "Enter first name",
+      index: 0,
+      targetElementId: 101,
+      actionType: "setValue",
+      verificationLevel: "client",
+      clientVerificationChecks: [
+        { type: "value_matches", elementId: 101, expectedValue: "John" }
+      ]
+    },
+    {
+      action: "setValue(102, 'Doe')",
+      description: "Enter last name",
+      index: 1,
+      targetElementId: 102,
+      actionType: "setValue",
+      verificationLevel: "client",
+      clientVerificationChecks: [
+        { type: "value_matches", elementId: 102, expectedValue: "Doe" }
+      ]
+    },
+    {
+      action: "setValue(103, 'john@email.com')",
+      description: "Enter email",
+      index: 2,
+      targetElementId: 103,
+      actionType: "setValue",
+      verificationLevel: "lightweight"
+    }
+  ],
+  metadata: {
+    totalActions: 3,
+    safeToChain: true,
+    chainReason: "FORM_FILL",
+    containerSelector: "form#registration",
+    defaultVerificationLevel: "client",
+    clientVerificationSufficient: true,
+    finalVerificationLevel: "lightweight"
+  }
+}
+```
+
+### 9.3 Verification Levels
+
+| Level | Where | Token Cost | When Used |
+|-------|-------|------------|-----------|
+| `client` | Extension | 0 | Intermediate form fills, checkboxes |
+| `lightweight` | Server (Tier 2) | ~100 | Simple final steps |
+| `full` | Server (Tier 3) | ~400+ | Complex verifications, task completion |
+
+### 9.4 Client-Side Verification Checks
+
+When `verificationLevel: "client"`, the extension performs these checks:
+
+| Type | Description | Parameters |
+|------|-------------|------------|
+| `value_matches` | Input value equals expected | `elementId`, `expectedValue` |
+| `state_changed` | Element state changed | `elementId` |
+| `element_visible` | Element is visible | `elementId` |
+| `element_enabled` | Element is enabled | `elementId` |
+| `no_error_message` | No error appeared | `textPattern?` |
+| `success_message` | Success message appeared | `textPattern?` |
+
+### 9.5 Chain Reasons
+
+| Reason | Description | Client Verification? |
+|--------|-------------|---------------------|
+| `FORM_FILL` | Multiple fields in same form | ✅ Sufficient |
+| `RELATED_INPUTS` | Related fields (e.g., address) | ✅ Sufficient |
+| `BULK_SELECTION` | Multiple checkboxes | ✅ Sufficient |
+| `SEQUENTIAL_STEPS` | Ordered steps | ❌ Needs server |
+| `OPTIMIZED_PATH` | Optimization | ❌ Needs server |
+
+### 9.6 Extension Contract
+
+When receiving a chained response:
+
+1. **Execute sequentially**: Execute actions in order (index 0, 1, 2...)
+2. **Client verify**: For `verificationLevel: "client"`, run `clientVerificationChecks`
+3. **Continue on success**: If client check passes, continue to next action
+4. **Report on failure**: If any action fails, stop and report partial state
+5. **Final verification**: After all actions, send request with final DOM for server verification
+
+#### Partial Failure Reporting
+
+If chain fails mid-execution:
+
+```typescript
+{
+  // ... normal request fields ...
+  chainPartialState: {
+    executedActions: ["setValue(101, 'John')", "setValue(102, 'Doe')"],
+    domAfterLastSuccess: "...", // DOM after last successful action
+    totalActionsInChain: 3
+  },
+  chainError: {
+    action: "setValue(103, 'invalid-email')",
+    message: "Element not found",
+    code: "ELEMENT_NOT_FOUND",
+    elementId: 103,
+    failedIndex: 2
+  }
+}
+```
+
+### 9.7 Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `lib/agent/atomic-action-validator.ts` | Atomic action detection and splitting |
+| `lib/agent/chaining/types.ts` | Chain types, verification levels, helpers |
+| `lib/agent/chaining/chain-generator.ts` | Chain building with verification levels |
+| `lib/agent/chaining/chain-analyzer.ts` | Chain safety analysis |
+| `lib/agent/planning-engine.ts` | Uses atomic validator |
+
+---
+
+## 10. Server-Side Tool Actions (Memory)
+
+**Status:** ✅ Implemented (February 2026)
+
+This section defines the contract for server-side tool actions, specifically memory operations that are executed entirely on the backend.
+
+### 10.1 Overview
+
+Some actions are executed server-side rather than in the browser. The most common example is **memory operations** (`remember`, `recall`, `exportToSession`) that store and retrieve data in task/session memory.
+
+When the backend responds with a `toolAction.toolType === "SERVER"`, the extension should:
+1. **NOT execute** the action in the browser
+2. Display the result to the user (optional)
+3. Immediately continue to the next iteration
+
+### 10.2 Response Shape
+
+```typescript
+interface InteractResponse {
+  thought: string;
+  action: string;  // e.g., "remember(\"key\", value)"
+  toolAction?: {
+    toolName: string;           // "remember" | "recall" | "exportToSession"
+    toolType: "DOM" | "SERVER"; // "SERVER" means already executed
+    parameters: Record<string, unknown>;
+    memoryResult?: {
+      success: boolean;
+      action: string;           // "remember" | "recall" | "export"
+      key?: string;
+      scope?: "task" | "session";
+      value?: unknown;          // Retrieved value (for recall)
+      error?: string;
+      message: string;          // Human-readable result
+    };
+  };
+  // ... other fields
+}
+```
+
+### 10.3 Memory Actions
+
+The extension may see these action strings (but should NOT execute them):
+
+| Action | Description | Scope |
+|--------|-------------|-------|
+| `remember("key", value)` | Store data in task memory | Task |
+| `recall("key")` | Retrieve data from task memory | Task |
+| `recall("key", "session")` | Retrieve data from session memory | Session |
+| `exportToSession("key")` | Export task memory to session memory | Session |
+
+### 10.4 Extension Implementation
+
+```typescript
+// In the action loop, check for SERVER tool before DOM execution
+if (response.toolAction?.toolType === 'SERVER') {
+  console.log('[CurrentTask] SERVER tool action - skipping DOM execution:', {
+    toolName: response.toolAction.toolName,
+    memoryResult: response.toolAction.memoryResult,
+  });
+
+  // Optionally display result to user
+  const memoryResult = response.toolAction.memoryResult;
+  if (memoryResult?.success) {
+    addMessage({
+      content: `Memory: ${memoryResult.message}`,
+      status: 'success',
+      // ...
+    });
+  }
+
+  // Continue to next iteration (no DOM action needed)
+  continue;
+}
+
+// Normal DOM action execution follows...
+```
+
+### 10.5 Key Points
+
+| Aspect | Behavior |
+|--------|----------|
+| **DOM Execution** | Skip - action already executed server-side |
+| **Display** | Optional - show result for debugging/transparency |
+| **Loop Continuation** | Continue immediately to next iteration |
+| **Error Handling** | Check `memoryResult.success` and display errors |
+
+### 10.6 Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/api/client.ts` | `toolAction` type in `NextActionResponse` |
+| `src/state/currentTask.ts` | SERVER tool handling in action loop |
+| `src/types/chatMessage.ts` | `serverToolResult` in message meta |
+
+---
+
+## 11. Blocker Detection & Task Pause/Resume
+
+**Purpose:** Handle user intervention scenarios (login failures, CAPTCHA, MFA, rate limits) by pausing the task and showing appropriate UI.
+
+**Reference:** `INTERACT_FLOW_WALKTHROUGH.md` §H (Blocker Detection & Task Pause/Resume System)
+
+### 11.1 Blocker Types
+
+| Type | Description | Resolution Methods |
+|------|-------------|-------------------|
+| `login_failure` | Invalid credentials, auth errors | `provide_in_chat`, `user_action_on_web` |
+| `mfa_required` | Multi-factor authentication needed | `user_action_on_web`, `provide_in_chat` |
+| `captcha` | CAPTCHA/reCAPTCHA challenge | `user_action_on_web` only |
+| `cookie_consent` | Cookie consent banner | `alternative_action`, `user_action_on_web` |
+| `rate_limit` | Too many attempts | `auto_retry` (with delay) |
+| `session_expired` | Session timeout | `user_action_on_web`, `provide_in_chat` |
+| `access_denied` | Permission/authorization error | `user_action_on_web` |
+| `page_error` | Page errors (404, 500, etc.) | `alternative_action` |
+
+### 11.2 API Response Format
+
+When a blocker is detected, the `/api/agent/interact` response includes:
+
+```typescript
+{
+  status: "awaiting_user",
+  blockerInfo: {
+    type: string,           // e.g., "login_failure", "mfa_required"
+    description: string,    // Human-readable description
+    userMessage?: string,   // User-friendly message explaining what to do
+    resolutionMethods: Array<"user_action_on_web" | "provide_in_chat" | "auto_retry" | "alternative_action">,
+    requiredFields?: Array<{
+      name: string,
+      label: string,
+      type: "text" | "password" | "email" | "code",
+      description?: string
+    }>,
+    retryAfterSeconds?: number,  // For rate_limit type
+    confidence?: number          // Detection confidence (0-1)
+  }
+}
+```
+
+### 11.3 Resume Endpoint
+
+**POST `/api/session/[sessionId]/task/[taskId]/resume`**
+
+Resume a paused task after user provides resolution data.
+
+**Request body:**
+```typescript
+{
+  resolutionMethod: "provide_in_chat" | "user_action_on_web",
+  resolutionData?: {
+    [key: string]: unknown  // e.g., { username: "...", password: "..." }
+  }
+}
+```
+
+**Response:**
+```typescript
+{
+  taskId: string,
+  status: "executing",
+  message: string,
+  resumedAt: string  // ISO timestamp
+}
+```
+
+### 11.4 Chrome Extension Implementation
+
+**Flow:**
+1. Receive response with `status="awaiting_user"` and `blockerInfo`
+2. Pause action loop (do NOT send another interact request)
+3. Display blocker UI based on `blockerInfo.type`:
+   - For `login_failure`/`mfa_required`/`session_expired`: Show input fields from `blockerInfo.requiredFields`
+   - For `captcha`: Show message "Please complete the CAPTCHA on the website"
+   - For `rate_limit`: Show countdown from `blockerInfo.retryAfterSeconds`
+4. After resume call succeeds (`status="executing"`):
+   - Resume action loop
+   - Send next interact request with updated DOM
+
+**State Changes:**
+```typescript
+// When blocker detected:
+state.currentTask.status = 'awaiting_user';
+state.currentTask.blockerInfo = response.blockerInfo;
+
+// After resume:
+state.currentTask.status = 'running';
+state.currentTask.blockerInfo = null;
+```
+
+### 11.5 BlockerDialog Component
+
+The `BlockerDialog` component (`src/common/BlockerDialog.tsx`) handles:
+
+- **Credential forms**: Dynamic input fields from `requiredFields`
+- **Password visibility toggle**: For password fields
+- **Rate limit countdown**: Visual countdown timer with auto-retry
+- **Resolution buttons**: "Submit & Continue", "I've resolved on website", "Cancel"
+- **Loading state**: Shows spinner while resuming
+
+### 11.6 Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/api/client.ts` | `BlockerInfo` types, `resumeTask()` function |
+| `src/state/currentTask.ts` | Blocker state, `awaiting_user` handling, resume actions |
+| `src/common/BlockerDialog.tsx` | UI component for blocker resolution |
+| `src/common/TaskUI.tsx` | Integration of BlockerDialog in main UI |
+
+---
+
+## 12. File-Based Tasks & Chat-Only Mode
+
+**Purpose:** Enable the agent to handle tasks without browser interaction, including file analysis, questions, and memory queries.
+
+**Reference:** `INTERACT_FLOW_WALKTHROUGH.md` §7 (File-Based Tasks & Chat-Only Mode)
+
+### 12.1 Task Types
+
+| Task Type | Description | Browser Required | URL Required |
+|-----------|-------------|------------------|--------------|
+| `web_only` | Standard web automation (existing flow) | Yes | Yes |
+| `web_with_file` | Web automation using attached file data | Yes | Yes |
+| `chat_only` | Direct AI response, no browser needed | No | No |
+
+### 12.2 API Response Changes
+
+```typescript
+interface NextActionResponse {
+  // ... existing fields
+  taskType?: "chat_only" | "web_only" | "web_with_file";
+}
+```
+
+### 12.3 File Attachment Flow
+
+**Step 1: Upload file to S3**
+
+```typescript
+POST /api/knowledge/upload-to-s3
+Content-Type: multipart/form-data
+{ file: <file>, filename: "sales.csv" }
+
+Response: { success: true, s3Key: "uploads/123/sales.csv", ... }
+```
+
+**Step 2: Include attachment in interact request**
+
+```typescript
+POST /api/agent/interact
+{
+  query: "What's the total revenue?",
+  sessionId: "...",
+  attachment: {
+    s3Key: "uploads/123/sales.csv",
+    filename: "sales.csv",
+    mimeType: "text/csv",
+    size: 1024
+  }
+}
+```
+
+### 12.4 Chat-Only Response Handling
+
+When `taskType === "chat_only"`:
+1. **DO NOT** execute any DOM action
+2. Display the response directly (action is `finish("response text")`)
+3. Task is complete - no further action loop iterations
+
+### 12.5 Report Download
+
+After task completion, download report in various formats:
+
+```
+GET /api/session/{sessionId}/task/{taskId}/report?format=json|csv|markdown
+
+Response: File download with appropriate Content-Type header
+```
+
+### 12.6 Supported File Types
+
+| Type | MIME Type | Content Extraction |
+|------|-----------|-------------------|
+| PDF | application/pdf | Full text + metadata |
+| CSV | text/csv | Structured data |
+| JSON | application/json | Full content |
+| Text | text/plain | Full text |
+| Markdown | text/markdown | Full text |
+| DOCX | application/vnd.openxmlformats-officedocument.wordprocessingml.document | Full text |
+| XML | application/xml | Full content |
+
+### 12.7 Chrome Extension Implementation
+
+**State Changes:**
+```typescript
+interface CurrentTaskSlice {
+  // ... existing fields
+  taskType: "chat_only" | "web_only" | "web_with_file" | null;
+  attachment: FileAttachment | null;
+  attachmentUploadProgress: number | null;
+}
+```
+
+**Actions:**
+- `uploadFile(file: File)`: Upload file and store attachment info
+- `clearAttachment()`: Clear attached file
+- `downloadReport(format: ReportFormat)`: Download task report
+
+### 12.8 Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/api/client.ts` | `TaskType`, `FileAttachment`, `uploadFile()`, `downloadReport()` |
+| `src/state/currentTask.ts` | Chat-only handling, attachment state, upload/download actions |
+
+---
+
+## 13. Changelog
+
+- **2026-02-02**: **File-Based Tasks & Chat-Only Mode** - Added section 12 documenting:
+  - **Task Types**: `chat_only` (no browser), `web_only` (standard), `web_with_file` (web + file)
+  - **API Changes**: Added `taskType` to `NextActionResponse`, made `url` optional in request
+  - **File Upload**: `POST /api/knowledge/upload-to-s3` for uploading files before interact
+  - **Report Download**: `GET /api/session/{sessionId}/task/{taskId}/report?format=json|csv|markdown`
+  - **New Types**: `TaskType`, `FileAttachment`, `FileUploadResponse`, `ReportFormat`
+  - **New Functions**: `uploadFile()`, `downloadReport()` in API client
+  - **State Changes**: Added `taskType`, `attachment`, `attachmentUploadProgress` to currentTask
+  - **Chat-Only Handling**: Skip DOM execution when `taskType === "chat_only"`
+- **2026-02-02**: **Blocker Detection & Task Pause/Resume** - Added section 11 documenting:
+  - **Blocker Types**: `login_failure`, `mfa_required`, `captcha`, `cookie_consent`, `rate_limit`, `session_expired`, `access_denied`, `page_error`
+  - **API Changes**: Added `awaiting_user` status and `blockerInfo` to `NextActionResponse`
+  - **Resume Endpoint**: `POST /api/session/{sessionId}/task/{taskId}/resume`
+  - **New Types**: `BlockerInfo`, `BlockerType`, `BlockerResolutionMethod`, `BlockerRequiredField`, `ResumeTaskRequest`, `ResumeTaskResponse`
+  - **New Component**: `BlockerDialog.tsx` for displaying blocker UI with credential forms, rate limit countdown, resolution buttons
+  - **State Changes**: Added `blockerInfo`, `isResumingTask` to currentTask slice
+  - **New Actions**: `resumeTaskWithCredentials()`, `resumeTaskFromWebsite()`, `clearBlocker()`
+- **2026-02-02**: **Atomic Actions & Action Chaining** - Added section 9 documenting:
+  - **Atomic Action Enforcement**: Each plan step must represent exactly ONE Chrome action. Compound actions like "type X and click Submit" are automatically detected and split.
+  - **New Utility**: `lib/agent/atomic-action-validator.ts` with `analyzeStepAtomicity()`, `splitCompoundAction()`, `validateAndSplitPlan()`
+  - **Planning Integration**: `planning-engine.ts` now calls `validateAndSplitPlan()` as post-processing step
+  - **Verification Levels**: New `VerificationLevel` type (`client`/`lightweight`/`full`) for chained actions
+  - **Client-Side Verification**: New `ClientVerificationCheck` type for checks the extension performs locally
+  - **Chain Metadata**: Enhanced with `defaultVerificationLevel`, `clientVerificationSufficient`, `finalVerificationLevel`
+  - **Updated Types**: `lib/agent/chaining/types.ts` with verification level helpers
+  - **Updated Generator**: `lib/agent/chaining/chain-generator.ts` assigns verification levels
+- **2026-02-02**: **Plan Preview Messages** - Added plan preview system messages that show users the generated plan before execution begins. New message types: `plan_preview` (initial plan) and `plan_update` (replanning). Messages are persisted to DB and broadcast via Pusher. New files: `lib/agent/graph/route-integration/plan-message.ts`. Updated: `run-graph.ts` (calls createPlanPreviewMessage), `replanning.ts` (calls createPlanUpdateMessage), `agent-chat.tsx` (renders plan messages with special UI). See §3.5 (Plan Preview Messages).
 - **2026-02-01**: **Midscene-Inspired Token Optimizations** - Adopted three key optimizations from Midscene's DOM extractor:
   - **Atomic Leaf Traversal**: Stop recursion on interactive elements (buttons, links, inputs). Treats them as leaves and extracts all nested text at once. Reduces tree depth and tokens by ~30%.
   - **2/3 Visibility Rule**: Only include elements that are ≥66% visible in viewport. Prevents LLM from trying to click half-hidden elements that require scrolling.
@@ -1585,7 +2162,7 @@ Test these scenarios to validate backend integration:
 
 ---
 
-## 10. Related Documentation
+## 14. Related Documentation
 
 - [DOM_EXTRACTION_ARCHITECTURE.md](./DOM_EXTRACTION_ARCHITECTURE.md) — **Comprehensive guide to DOM extraction and what's sent to the LLM**
 - [INTERACT_FLOW_WALKTHROUGH.md](./INTERACT_FLOW_WALKTHROUGH.md) — Detailed interact flow

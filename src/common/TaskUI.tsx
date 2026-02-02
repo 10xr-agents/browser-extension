@@ -29,6 +29,10 @@ import ChatHistoryDrawer from './ChatHistoryDrawer';
 import DomainStatus from './components/DomainStatus';
 import { TypingIndicator } from './TypingIndicator';
 import { messageSyncManager } from '../services/messageSyncService';
+import BlockerDialog from './BlockerDialog';
+import FileAttachmentInput from './FileAttachmentInput';
+import ReportDownloadMenu from './ReportDownloadMenu';
+import type { ReportFormat } from '../api/client';
 
 interface TaskUIProps {
   hasOrgKnowledge?: boolean | null;
@@ -93,6 +97,24 @@ const TaskUI: React.FC<TaskUIProps> = ({
   });
   // Get loading state to prevent infinite loops
   const messagesLoadingState = useAppState((state) => state.currentTask.messagesLoadingState);
+
+  // Blocker state for pause/resume flow
+  // Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection & Task Pause/Resume System)
+  const blockerInfo = useAppState((state) => state.currentTask.blockerInfo);
+  const isResumingTask = useAppState((state) => state.currentTask.isResumingTask);
+  const resumeTaskWithCredentials = useAppState((state) => state.currentTask.actions.resumeTaskWithCredentials);
+  const resumeTaskFromWebsite = useAppState((state) => state.currentTask.actions.resumeTaskFromWebsite);
+  const clearBlocker = useAppState((state) => state.currentTask.actions.clearBlocker);
+
+  // File attachment state for chat-only and web-with-file tasks
+  // Reference: INTERACT_FLOW_WALKTHROUGH.md §7 (File-Based Tasks & Chat-Only Mode)
+  const attachment = useAppState((state) => state.currentTask.attachment);
+  const attachmentUploadProgress = useAppState((state) => state.currentTask.attachmentUploadProgress);
+  const uploadFile = useAppState((state) => state.currentTask.actions.uploadFile);
+  const clearAttachment = useAppState((state) => state.currentTask.actions.clearAttachment);
+  const downloadReport = useAppState((state) => state.currentTask.actions.downloadReport);
+  const taskType = useAppState((state) => state.currentTask.taskType);
+  const taskId = useAppState((state) => state.currentTask.taskId);
 
   // Check if we're waiting for user input (ASK_USER state)
   const waitingForUserInput = useAppState((state) => {
@@ -381,6 +403,62 @@ const TaskUI: React.FC<TaskUIProps> = ({
     setInstructions('');
   }, [activeUrl, createNewChat, createNewChatForTab, startNewChat, isRunning, interruptTask, setInstructions, taskStatus]);
 
+  // Blocker resolution handlers
+  const handleBlockerCredentials = useCallback((data: Record<string, unknown>) => {
+    resumeTaskWithCredentials(data);
+  }, [resumeTaskWithCredentials]);
+
+  const handleBlockerResolvedOnWebsite = useCallback(() => {
+    resumeTaskFromWebsite();
+  }, [resumeTaskFromWebsite]);
+
+  const handleBlockerCancel = useCallback(() => {
+    clearBlocker();
+  }, [clearBlocker]);
+
+  // Check if blocker is active
+  const hasActiveBlocker = blockerInfo !== null && taskStatus === 'awaiting_user';
+
+  // File attachment handlers
+  const handleFileSelect = useCallback(async (file: File) => {
+    try {
+      await uploadFile(file);
+    } catch (error) {
+      console.error('File upload failed:', error);
+    }
+  }, [uploadFile]);
+
+  const handleClearAttachment = useCallback(() => {
+    clearAttachment();
+  }, [clearAttachment]);
+
+  // Report download handler
+  const handleDownloadReport = useCallback(async (format: ReportFormat) => {
+    await downloadReport(format);
+  }, [downloadReport]);
+
+  // Check if task is complete (for showing report download option)
+  const isTaskComplete = taskStatus === 'success' && taskId !== null && sessionId !== null;
+
+  // Check if this looks like a chat-only query (allows submitting without URL)
+  const isChatOnlyQuery = useCallback((query: string): boolean => {
+    if (!query) return false;
+    const chatOnlyPatterns = [
+      /^(what|how|why|when|where|who|which)\s/i,
+      /\b(calculate|sum|total|analyze|explain)\b/i,
+      /\b(remember|recall|what did)\b/i,
+      /\b(from the|in the uploaded)\s+(file|csv|pdf)\b/i,
+    ];
+    // If has attachment with question, likely chat-only
+    if (attachment && /\?$/.test(query.trim())) {
+      return true;
+    }
+    return chatOnlyPatterns.some(p => p.test(query));
+  }, [attachment]);
+
+  // Can submit query even without URL for chat-only queries
+  const canSubmitWithoutUrl = isChatOnlyQuery(instructions || '');
+
   return (
     <Flex direction="column" h="100%" minH="0" w="100%" overflow="hidden" bg={contentBg}>
       {/* Zone A: Unified Command Bar (Domain Status + Actions) */}
@@ -459,7 +537,23 @@ const TaskUI: React.FC<TaskUIProps> = ({
               <TaskHistory />
             </Box>
           </ErrorBoundary>
-          
+
+          {/* Blocker Dialog - Shown when task is awaiting user intervention */}
+          {/* Reference: INTERACT_FLOW_WALKTHROUGH.md §H (Blocker Detection) */}
+          {hasActiveBlocker && blockerInfo && (
+            <ErrorBoundary>
+              <Box minW="0" py={2}>
+                <BlockerDialog
+                  blockerInfo={blockerInfo}
+                  onSubmitCredentials={handleBlockerCredentials}
+                  onResolvedOnWebsite={handleBlockerResolvedOnWebsite}
+                  onCancel={handleBlockerCancel}
+                  isLoading={isResumingTask}
+                />
+              </Box>
+            </ErrorBoundary>
+          )}
+
           {/* Spacer to ensure last message can scroll fully above input bar */}
           <Box minH="16px" flexShrink={0} />
         </VStack>
@@ -491,7 +585,33 @@ const TaskUI: React.FC<TaskUIProps> = ({
         >
           {/* Status line removed - cleaner design without visual artifacts */}
 
+          {/* Attached file indicator */}
+          {attachment && (
+            <Box px={4} pt={2}>
+              <FileAttachmentInput
+                attachment={attachment}
+                uploadProgress={attachmentUploadProgress}
+                onFileSelect={handleFileSelect}
+                onClear={handleClearAttachment}
+                isDisabled={isRunning}
+              />
+            </Box>
+          )}
+
           <Flex align="flex-end" px={4} py={3} gap={2} minW="0">
+            {/* File attachment button */}
+            {!attachment && (
+              <Box flexShrink={0} pb={1}>
+                <FileAttachmentInput
+                  attachment={null}
+                  uploadProgress={attachmentUploadProgress}
+                  onFileSelect={handleFileSelect}
+                  onClear={handleClearAttachment}
+                  isDisabled={isRunning}
+                />
+              </Box>
+            )}
+
             {/* Text Input - Takes up most space */}
             <Box flex="1" minW="0">
               <AutosizeTextarea
@@ -499,7 +619,9 @@ const TaskUI: React.FC<TaskUIProps> = ({
                 placeholder={
                   waitingForUserInput
                     ? "Please provide the requested information..."
-                    : "What would you like me to do on this page? (e.g., fill out the form, click the button, search for products)"
+                    : attachment
+                    ? "Ask a question about the attached file..."
+                    : "Ask a question or describe what to do (attach files for analysis)"
                 }
                 value={instructions || ''}
                 isDisabled={isRunning && !waitingForUserInput}
@@ -528,7 +650,18 @@ const TaskUI: React.FC<TaskUIProps> = ({
                 maxRows={6}
               />
             </Box>
-            
+
+            {/* Report download button (shown when task is complete) */}
+            {isTaskComplete && (
+              <Box flexShrink={0} pb={1}>
+                <ReportDownloadMenu
+                  onDownload={handleDownloadReport}
+                  isDisabled={isRunning}
+                  size="sm"
+                />
+              </Box>
+            )}
+
             {/* Send Button - Solid filled icons for high contrast */}
             <Box flexShrink={0} pb={1}>
               <IconButton
@@ -538,7 +671,7 @@ const TaskUI: React.FC<TaskUIProps> = ({
                 variant="solid"
                 colorScheme={isRunning && !waitingForUserInput ? 'red' : waitingForUserInput ? 'yellow' : 'blue'}
                 size="sm"
-                isDisabled={!isRunning && !instructions}
+                isDisabled={!isRunning && !instructions && !canSubmitWithoutUrl}
                 _disabled={{
                   opacity: 0.5,
                   cursor: 'not-allowed',

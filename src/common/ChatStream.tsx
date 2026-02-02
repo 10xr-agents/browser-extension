@@ -1,10 +1,12 @@
 /**
  * ChatStream Component
- * 
+ *
  * User-facing chat interface that displays conversation messages.
  * Separates user messages from assistant messages with clean message bubbles.
- * 
+ * Also handles system messages (plan previews, verification results).
+ *
  * Reference: Client-side fixes for chat persistence and UI refactor
+ * Reference: SPECS_AND_CONTRACTS.md §3.5 (Plan Preview Messages)
  */
 
 import React from 'react';
@@ -16,6 +18,7 @@ import {
 } from '@chakra-ui/react';
 import type { ChatMessage } from '../types/chatMessage';
 import ExecutionDetails from './ExecutionDetails';
+import PlanPreviewMessage from './PlanPreviewMessage';
 
 interface ChatStreamProps {
   messages: ChatMessage[];
@@ -101,8 +104,45 @@ const ChatStream: React.FC<ChatStreamProps> = ({ messages, isProcessing = false 
               )}
             </Box>
           );
+        } else if (message.role === 'system') {
+          // System messages (plan previews, verification results, etc.)
+          const messageType = message.metadata?.messageType || message.meta?.messageType;
+
+          // Handle plan preview and plan update messages
+          if (messageType === 'plan_preview' || messageType === 'plan_update') {
+            return <PlanPreviewMessage key={message.id} message={message} />;
+          }
+
+          // Default system message rendering (left-aligned, muted)
+          return (
+            <Box key={message.id} w="100%">
+              <Box
+                display="flex"
+                justifyContent="flex-start"
+              >
+                <Box
+                  bg={assistantMessageBg}
+                  borderRadius="lg"
+                  px={0}
+                  py={1}
+                  maxW="100%"
+                >
+                  <Text
+                    fontSize="sm"
+                    lineHeight="1.6"
+                    color={textColor}
+                    fontStyle="italic"
+                  >
+                    {typeof message.content === 'string'
+                      ? message.content
+                      : String(message.content || '')}
+                  </Text>
+                </Box>
+              </Box>
+            </Box>
+          );
         }
-        
+
         return null;
       })}
       
